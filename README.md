@@ -1,84 +1,54 @@
-# self-improve-skill
+# Yorrick's Claude Code Plugins
 
-A Claude Code plugin that automatically reflects on skills used during sessions and proposes improvements.
+A collection of Claude Code plugins by Yorrick Jansen.
 
 ## Installation
 
-### From Marketplace
-
-First, add this repository as a marketplace:
+Add this repository as a marketplace:
 
 ```
-/plugin marketplace add yorrick/claude-code-plugins
+claude plugin marketplace add yorrick/claude-code-plugins
 ```
 
-Then install the plugin:
+Then install any plugin:
 
 ```
-/plugin install self-improve-skill
+claude plugin install <plugin-name>@yorrick
 ```
 
-You can choose the installation scope:
-- **User scope** (default): Available across all your projects
-- **Project scope**: Available to all collaborators on the repository
-- **Local scope**: Available only to you in the current repository
+## Plugins
 
-### Local Development
+### dev-loop
 
-For testing or development, load the plugin directly:
+Automated development loop that composes existing Claude Code commands into a full lifecycle: brainstorm, plan, implement, create PR, then iteratively review (simplify + code review + security review) until clean.
+
+**Commands:**
+- `/dev-loop` — Full lifecycle: interactive brainstorming and planning, then automated implementation and review loop
+- `/review-loop` — Review loop only on an existing PR (skip brainstorm + implementation)
+
+**Prerequisites:**
+- [superpowers](https://github.com/obra/superpowers) plugin (brainstorming, writing-plans, executing-plans skills)
+- [code-review](https://github.com/anthropics/claude-code-plugins) plugin (`/code-review:code-review`)
+- `/simplify` and `/security-review` (built-in)
+- `gh` CLI (for creating PRs)
+
+```
+claude plugin install dev-loop@yorrick
+```
+
+### self-improve-skill
+
+Automatically reflects on skills used during sessions and proposes improvements.
+
+```
+claude plugin install self-improve-skill@yorrick
+```
+
+## Local Development
+
+For testing or development, load a plugin directly:
 
 ```bash
+claude --plugin-dir ./dev-loop
 claude --plugin-dir ./self-improve-skill
 ```
-
-## Skills
-
-### `/self-improve-skill:reflect`
-
-Analyze the current session and propose improvements to skills based on what worked, what didn't, and edge cases discovered.
-
-**Usage:**
-```
-/self-improve-skill:reflect [skill-name]
-```
-
-**Modes:**
-- **Interactive** (default): Shows proposed changes and asks for approval before applying
-- **Non-interactive**: Applies changes directly without prompting (used by the session end hook)
-
-### `/self-improve-skill:python-development`
-
-Expert Python development assistance with modern best practices, type hints, and clean architecture.
-
-## Hooks
-
-### SessionEnd
-
-Automatically triggers reflection for any skills used during the session. When a session ends:
-
-1. Parses the session transcript
-2. Detects which skills were used
-3. Launches background reflection for each skill (excluding `reflect` itself to avoid loops)
-
-Logs are written to `skills/reflect/.logs/`.
-
-## Plugin Structure
-
-```
-self-improve-skill/
-├── .claude-plugin/
-│   └── plugin.json           # Plugin manifest
-├── hooks/
-│   └── hooks.json            # SessionEnd hook configuration
-└── skills/
-    ├── python-development/
-    │   └── SKILL.md
-    └── reflect/
-        ├── SKILL.md
-        └── session_end_hook.py
-```
-
-## Requirements
-
-- Claude Code CLI
-- Python 3.8+ with `uv` (for the session end hook script)

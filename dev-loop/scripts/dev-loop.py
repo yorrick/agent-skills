@@ -5,7 +5,7 @@
 """Automated development loop: implement -> simplify -> review -> fix -> repeat.
 
 Usage:
-    dev-loop.py <plan-file> [--max-iterations N] [--pr-url URL] [--skip-permissions]
+    dev-loop.py <issue-url> [--max-iterations N] [--pr-url URL] [--skip-permissions]
 """
 
 from __future__ import annotations
@@ -25,7 +25,9 @@ def log(msg: str) -> None:
     print(f"\n{'=' * 64}\n  {msg}\n{'=' * 64}\n", flush=True)
 
 
-def run_claude(prompt: str, output_file: Path, permission_mode: str = "default") -> Path:
+def run_claude(
+    prompt: str, output_file: Path, permission_mode: str = "default", cwd: Path | None = None
+) -> Path:
     """Run a headless claude session and save output to file."""
     cmd = ["claude", "-p", prompt, "--output-format", "json"]
     if permission_mode != "default":
@@ -34,7 +36,7 @@ def run_claude(prompt: str, output_file: Path, permission_mode: str = "default")
     env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
 
     with open(output_file, "w") as f:
-        subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, env=env)
+        subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, env=env, cwd=cwd)
 
     print(f"  Output saved to: {output_file}", flush=True)
     return output_file
@@ -59,6 +61,12 @@ def extract_pr_url(json_file: Path) -> str | None:
 def extract_pr_number(pr_url: str) -> str:
     """Extract PR number from a GitHub PR URL."""
     match = re.search(r"/pull/(\d+)", pr_url)
+    return match.group(1) if match else ""
+
+
+def extract_issue_number(issue_url: str) -> str:
+    """Extract issue number from a GitHub issue URL."""
+    match = re.search(r"/issues/(\d+)", issue_url)
     return match.group(1) if match else ""
 
 
@@ -107,9 +115,87 @@ def gh_assign_self(pr_url: str) -> None:
         print(f"  Warning: failed to assign PR: {e}", flush=True)
 
 
-def run_claude_bg(prompt: str, output_file: Path, permission_mode: str = "default") -> None:
-    """Wrapper for ProcessPoolExecutor — must be top-level function."""
+def fetch_issue_body(issue_url: str) -> str:
+    """Fetch the body of a GitHub issue."""
+    issue_number = extract_issue_number(issue_url)
+    if not issue_number:
+        print(f"Error: could not extract issue number from {issue_url}", file=sys.stderr)
+        sys.exit(1)
+    result = subprocess.run(
+        ["gh", "issue", "view", issue_number, "--json", "body", "--jq", ".body"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        print(f"Error: failed to fetch issue: {result.stderr}", file=sys.stderr)
+        sys.exit(1)
+    return result.stdout.strip()
+
+
+def create_worktree_via_claude(
+    issue_url: str, output_file: Path, permission_mode: str = "default"
+) -> Path:
+    """Use Claude with superpowers:using-git-worktrees to create a worktree."""
+    issue_number = extract_issue_number(issue_url)
+    branch_name = f"dev-loop/issue-{issue_number}"
+
+    prompt = (
+        f"Create a git worktree for branch '{branch_name}' using the "
+        "superpowers:using-git-worktrees skill. Follow the skill exactly.\n\n"
+        "After the worktree is created and verified, output EXACTLY this line as the "
+        "very last line of your response:\n"
+        "WORKTREE_PATH=<absolute path to the worktree>\n\n"
+        "Do NOT use superpowers:finishing-a-development-branch — just create the worktree."
+    )
+
     run_claude(prompt, output_file, permission_mode)
+
+    result_text = extract_result(output_file)
+    match = re.search(r"WORKTREE_PATH=(.+)", result_text)
+    if match:
+        worktree_path = Path(match.group(1).strip())
+        if worktree_path.exists():
+            print(f"  Worktree created at: {worktree_path}", flush=True)
+            return worktree_path
+
+    # Fallback: check git worktree list for our branch
+    wt_result = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        capture_output=True,
+        text=True,
+    )
+    for line in wt_result.stdout.splitlines():
+        if line.startswith("worktree ") and branch_name.replace("/", "-") in line:
+            worktree_path = Path(line.split(" ", 1)[1])
+            if worktree_path.exists():
+                print(f"  Worktree found at: {worktree_path}", flush=True)
+                return worktree_path
+
+    # Second fallback: look for branch in worktree list
+    current_worktree = None
+    for line in wt_result.stdout.splitlines():
+        if line.startswith("worktree "):
+            current_worktree = line.split(" ", 1)[1]
+        if line.startswith("branch ") and branch_name in line and current_worktree:
+            worktree_path = Path(current_worktree)
+            if worktree_path.exists():
+                print(f"  Worktree found at: {worktree_path}", flush=True)
+                return worktree_path
+
+    print(
+        f"Error: could not find worktree for branch {branch_name}. "
+        f"Check {output_file}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def run_claude_bg(
+    prompt: str, output_file: Path, permission_mode: str = "default", cwd: str | None = None
+) -> None:
+    """Wrapper for ProcessPoolExecutor — must be top-level function."""
+    run_claude(prompt, output_file, permission_mode, Path(cwd) if cwd else None)
 
 
 def check_dependencies() -> bool:
@@ -147,10 +233,12 @@ def check_dependencies() -> bool:
     return True
 
 
-def _implementation_prompt(plan_file: Path) -> str:
+def _implementation_prompt(issue_url: str) -> str:
     return (
-        f"Read the plan at {plan_file}. "
-        "Use the superpowers:executing-plans skill to implement it task by task.\n\n"
+        f"Fetch the implementation plan from GitHub issue {issue_url} using: "
+        f"gh issue view {extract_issue_number(issue_url)} --json body --jq .body\n\n"
+        "Use the superpowers:executing-plans skill to implement the plan task by task. "
+        "Do NOT use superpowers:using-git-worktrees — the branch and worktree are already set up.\n\n"
         "After completing all tasks, discover and run the project's quality gates:\n"
         "- Check package.json, Makefile, pyproject.toml, tox.ini, Cargo.toml, or equivalent\n"
         "- Run linting (eslint, ruff, pylint, clippy, etc.)\n"
@@ -161,11 +249,14 @@ def _implementation_prompt(plan_file: Path) -> str:
     )
 
 
-def _pr_creation_prompt(plan_file: Path) -> str:
+def _pr_creation_prompt(issue_url: str) -> str:
+    issue_number = extract_issue_number(issue_url)
     return (
         "Push the current branch and create a pull request using gh pr create. "
         "Use a descriptive title and body summarizing what was implemented "
-        f"based on the plan at {plan_file}. Return the PR URL."
+        f"based on the plan in issue #{issue_number}. "
+        f"Link the PR to the issue by including 'Closes #{issue_number}' in the body. "
+        "Return the PR URL."
     )
 
 
@@ -206,7 +297,7 @@ def _fix_prompt(pr_url: str, code_review_text: str, security_review_text: str) -
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Automated development loop")
-    parser.add_argument("plan_file", help="Path to the implementation plan")
+    parser.add_argument("issue_url", help="GitHub issue URL containing the implementation plan")
     parser.add_argument(
         "--max-iterations", type=int, default=3, help="Max review iterations (default: 3)"
     )
@@ -218,9 +309,9 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    plan_file = Path(args.plan_file)
-    if not plan_file.exists():
-        print(f"Error: plan file not found: {plan_file}", file=sys.stderr)
+    issue_url = args.issue_url
+    if not re.match(r"https://github\.com/.+/issues/\d+", issue_url):
+        print(f"Error: invalid GitHub issue URL: {issue_url}", file=sys.stderr)
         return 1
 
     if not check_dependencies():
@@ -232,19 +323,27 @@ def main() -> int:
     print(f"Work directory: {work_dir}")
 
     # --- Phase 1: Implementation (skip if --pr-url provided) ---
+    worktree_path: Path | None = None
     if not pr_url:
+        log("Phase 0: Setting up branch and worktree")
+        worktree_path = create_worktree_via_claude(
+            issue_url, work_dir / "worktree-setup.json", permission_mode
+        )
+
         log("Phase 1: Implementing plan")
         run_claude(
-            _implementation_prompt(plan_file),
+            _implementation_prompt(issue_url),
             work_dir / "implementation.json",
             permission_mode,
+            cwd=worktree_path,
         )
 
         log("Phase 1b: Creating PR")
         run_claude(
-            _pr_creation_prompt(plan_file),
+            _pr_creation_prompt(issue_url),
             work_dir / "pr-creation.json",
             permission_mode,
+            cwd=worktree_path,
         )
 
         pr_url = extract_pr_url(work_dir / "pr-creation.json")
@@ -274,6 +373,7 @@ def main() -> int:
             "/simplify",
             work_dir / f"simplify-{iteration}.json",
             permission_mode,
+            cwd=worktree_path,
         )
 
         run_claude(
@@ -281,23 +381,27 @@ def main() -> int:
             "commit them with a descriptive message and push to the current branch.",
             work_dir / f"simplify-commit-{iteration}.json",
             permission_mode,
+            cwd=worktree_path,
         )
 
         # Step 2: Code review + Security review in parallel
         log(f"Step 2/{iteration}: Code review + Security review (parallel)")
 
+        cwd_str = str(worktree_path) if worktree_path else None
         with ProcessPoolExecutor(max_workers=2) as executor:
             code_review_future: Future = executor.submit(
                 run_claude_bg,
                 f"/code-review:code-review {pr_url}",
                 work_dir / f"code-review-{iteration}.json",
                 permission_mode,
+                cwd_str,
             )
             security_review_future: Future = executor.submit(
                 run_claude_bg,
                 _security_review_prompt(pr_url),
                 work_dir / f"security-review-{iteration}.json",
                 permission_mode,
+                cwd_str,
             )
             code_review_future.result()
             security_review_future.result()
@@ -336,6 +440,7 @@ def main() -> int:
             _fix_prompt(pr_url, code_review_text, security_review_text),
             work_dir / f"fix-{iteration}.json",
             permission_mode,
+            cwd=worktree_path,
         )
 
     log(f"Max iterations ({args.max_iterations}) reached. Review PR manually.")

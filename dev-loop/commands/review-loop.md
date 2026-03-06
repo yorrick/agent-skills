@@ -1,6 +1,6 @@
 ---
 description: "Run the review loop on an existing PR: simplify, code review + security review in parallel, fix issues, repeat"
-argument-hint: "<plan-file> --pr-url <PR-URL> [--max-iterations N] [--skip-permissions]"
+argument-hint: "<issue-url> --pr-url <PR-URL> [--max-iterations N] [--skip-permissions]"
 allowed-tools: ["Bash(uv run ${CLAUDE_PLUGIN_ROOT}/scripts/*)"]
 ---
 

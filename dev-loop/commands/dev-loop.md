@@ -25,11 +25,11 @@ Before running the script, confirm with the user:
 - Show the command that will be run
 - Ask if they want to adjust --max-iterations (default 3) or use --skip-permissions
 
-Then execute:
+Then execute the script using the Bash tool:
 
-```!
-"${CLAUDE_PLUGIN_ROOT}/scripts/dev-loop.sh" <plan-file-path> $ARGUMENTS
-```
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/dev-loop.sh" PLAN_FILE_PATH $ARGUMENTS
+
+Replace PLAN_FILE_PATH with the actual path to the plan file created in Phase 1.
 
 The script will:
 1. Implement the plan (using executing-plans skill) including running lint, typecheck, format, and tests

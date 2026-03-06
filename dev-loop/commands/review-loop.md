@@ -8,11 +8,9 @@ allowed-tools: ["Bash(${CLAUDE_PLUGIN_ROOT}/scripts/dev-loop.sh:*)"]
 
 Run the review loop on an existing PR. This skips brainstorming and implementation — it goes straight to the iterative review cycle.
 
-Execute the dev-loop script with the --pr-url flag:
+Execute the dev-loop script with the --pr-url flag using the Bash tool:
 
-```!
-"${CLAUDE_PLUGIN_ROOT}/scripts/dev-loop.sh" $ARGUMENTS
-```
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/dev-loop.sh" $ARGUMENTS
 
 The script will:
 1. Run /simplify and commit fixes

@@ -43,6 +43,17 @@ def run_claude(
     return output_file
 
 
+def check_claude_error(json_file: Path) -> str | None:
+    """Check if a claude session output contains an error. Returns error message or None."""
+    try:
+        data = json.loads(json_file.read_text())
+        if data.get("is_error"):
+            return data.get("result", "Unknown error")
+    except (json.JSONDecodeError, KeyError):
+        pass
+    return None
+
+
 def extract_result(json_file: Path) -> str:
     """Extract the result text from a claude JSON output file."""
     try:
@@ -436,20 +447,28 @@ def main() -> int:
         )
 
         log("Phase 1: Implementing plan")
-        run_claude(
+        impl_file = run_claude(
             _implementation_prompt(issue_url),
             work_dir / "implementation.json",
             permission_mode,
             cwd=worktree_path,
         )
+        err = check_claude_error(impl_file)
+        if err:
+            print(f"Error during implementation: {err}", file=sys.stderr)
+            return 1
 
         log("Phase 1b: Creating PR")
-        run_claude(
+        pr_file = run_claude(
             _pr_creation_prompt(issue_url),
             work_dir / "pr-creation.json",
             permission_mode,
             cwd=worktree_path,
         )
+        err = check_claude_error(pr_file)
+        if err:
+            print(f"Error during PR creation: {err}", file=sys.stderr)
+            return 1
 
         pr_url = extract_pr_url(work_dir / "pr-creation.json")
         if not pr_url:
@@ -474,12 +493,17 @@ def main() -> int:
 
         # Step 1: Simplify
         log(f"Step 1/{iteration}: Simplify")
-        run_claude(
+        simplify_file = run_claude(
             "/simplify",
             work_dir / f"simplify-{iteration}.json",
             permission_mode,
             cwd=worktree_path,
         )
+        err = check_claude_error(simplify_file)
+        if err:
+            log(f"Error during simplify: {err}")
+            gh_comment(pr_url, f"### dev-loop: Aborted\n\nError during simplify step: {err}")
+            return 1
 
         run_claude(
             "If there are any uncommitted changes from the simplify pass, "
@@ -513,6 +537,15 @@ def main() -> int:
 
         print(f"  Code review: {work_dir / f'code-review-{iteration}.json'}")
         print(f"  Security review: {work_dir / f'security-review-{iteration}.json'}")
+
+        # Check for errors in review sessions
+        for review_name in ("code-review", "security-review"):
+            review_file = work_dir / f"{review_name}-{iteration}.json"
+            err = check_claude_error(review_file)
+            if err:
+                log(f"Error during {review_name}: {err}")
+                gh_comment(pr_url, f"### dev-loop: Aborted\n\nError during {review_name}: {err}")
+                return 1
 
         # Step 2b: Wait for CI checks
         log(f"Step 2b/{iteration}: Checking CI/CD status")

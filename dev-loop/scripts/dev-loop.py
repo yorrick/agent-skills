@@ -79,6 +79,34 @@ def gh_comment(pr_url: str, body: str) -> None:
         print(f"  Warning: failed to post PR comment: {e}", flush=True)
 
 
+def gh_assign_self(pr_url: str) -> None:
+    """Assign the current GitHub user to a PR."""
+    pr_number = extract_pr_number(pr_url)
+    if not pr_number:
+        print("  Warning: could not extract PR number, skipping assignment", flush=True)
+        return
+    try:
+        result = subprocess.run(
+            ["gh", "api", "user", "--jq", ".login"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        username = result.stdout.strip()
+        if not username:
+            print("  Warning: could not determine GitHub username, skipping assignment", flush=True)
+            return
+        subprocess.run(
+            ["gh", "pr", "edit", pr_number, "--add-assignee", username],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        print(f"  Assigned {username} to PR #{pr_number}", flush=True)
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        print(f"  Warning: failed to assign PR: {e}", flush=True)
+
+
 def run_claude_bg(prompt: str, output_file: Path, permission_mode: str = "default") -> None:
     """Wrapper for ProcessPoolExecutor — must be top-level function."""
     run_claude(prompt, output_file, permission_mode)
@@ -228,6 +256,7 @@ def main() -> int:
             return 1
 
         print(f"PR created: {pr_url}")
+        gh_assign_self(pr_url)
         gh_comment(pr_url, (
             "### dev-loop: Implementation complete\n\n"
             "Starting automated review loop (simplify + code review + security review).\n\n"

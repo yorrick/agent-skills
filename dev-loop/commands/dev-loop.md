@@ -46,15 +46,15 @@ Once the issue is created, run the dev-loop orchestrator script.
 Before running the script, confirm with the user:
 - Show them the GitHub issue URL
 - Show the exact command that will be run
-- Ask if they want to adjust --max-iterations (default 3) or use --skip-permissions
+- Ask if they want to adjust --max-iterations (default 3), use --skip-permissions, or set --reviewers
 
 Then execute the script using the Bash tool. IMPORTANT: pass the issue URL (not the plan file path) and options to the script. Do NOT pass the feature description — that was only for Phase 1.
 
-uv run "${CLAUDE_PLUGIN_ROOT}/scripts/dev-loop.py" <issue-url> [--max-iterations N] [--skip-permissions]
+uv run "${CLAUDE_PLUGIN_ROOT}/scripts/dev-loop.py" <issue-url> [--max-iterations N] [--skip-permissions] [--reviewers user1,user2,org/team]
 
 Example:
 
-uv run "${CLAUDE_PLUGIN_ROOT}/scripts/dev-loop.py" https://github.com/user/repo/issues/42 --max-iterations 5 --skip-permissions
+uv run "${CLAUDE_PLUGIN_ROOT}/scripts/dev-loop.py" https://github.com/user/repo/issues/42 --max-iterations 5 --skip-permissions --reviewers alice,bob
 
 The script will:
 1. Create a feature branch and worktree (never commits on main)

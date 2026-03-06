@@ -116,6 +116,26 @@ def gh_assign_self(pr_url: str) -> None:
         print(f"  Warning: failed to assign PR: {e}", flush=True)
 
 
+def gh_request_review(pr_number: str, reviewers: str) -> None:
+    """Request review from GitHub users or teams on a PR."""
+    if not reviewers:
+        return
+    cmd = ["gh", "pr", "edit", pr_number]
+    for reviewer in reviewers.split(","):
+        reviewer = reviewer.strip()
+        if not reviewer:
+            continue
+        if "/" in reviewer:
+            cmd += ["--add-reviewer", reviewer]
+        else:
+            cmd += ["--add-reviewer", reviewer]
+    try:
+        subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        print(f"  Requested review from: {reviewers}", flush=True)
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        print(f"  Warning: failed to request review: {e}", flush=True)
+
+
 def wait_for_ci(pr_number: str, timeout: int = 600, poll_interval: int = 30) -> tuple[str, str]:
     """Wait for CI checks to complete and return (status, details).
 
@@ -382,6 +402,9 @@ def main() -> int:
     parser.add_argument(
         "--skip-permissions", action="store_true", help="Run with bypassPermissions mode"
     )
+    parser.add_argument(
+        "--reviewers", default="", help="Comma-separated GitHub usernames or team slugs to request review from"
+    )
     args = parser.parse_args()
 
     issue_url = args.issue_url
@@ -514,6 +537,9 @@ def main() -> int:
 
         if "NO" in decision.upper():
             log("No critical issues found. PR is ready!")
+            pr_num = extract_pr_number(pr_url)
+            if args.reviewers:
+                gh_request_review(pr_num, args.reviewers)
             gh_comment(pr_url, (
                 "### dev-loop: Review complete\n\n"
                 f"No critical issues found after {iteration} iteration(s). "
@@ -533,6 +559,9 @@ def main() -> int:
         )
 
     log(f"Max iterations ({args.max_iterations}) reached. Review PR manually.")
+    pr_num = extract_pr_number(pr_url)
+    if args.reviewers:
+        gh_request_review(pr_num, args.reviewers)
     gh_comment(pr_url, (
         f"### dev-loop: Max iterations reached ({args.max_iterations})\n\n"
         "There are still outstanding issues. Please review manually."

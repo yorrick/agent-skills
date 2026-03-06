@@ -1,5 +1,11 @@
 # dev-loop plugin
 
+## Design philosophy
+
+- **Compose, don't reinvent.** Reuse existing commands and skills maintained by others (`/security-review`, `/simplify`, `/code-review:code-review`, `superpowers:*`). Other people are better at writing those — our job is to identify great tools and define workflows that combine them effectively.
+- **Workflow orchestration is the value.** The dev-loop plugin defines the sequence, decision gates, and feedback loops. The individual steps are delegated to best-in-class commands/skills.
+- **Headless-compatible.** All prompts sent to `claude -p` must work without user interaction. Explicitly disable interactive skills (e.g. `finishing-a-development-branch`) in headless sessions.
+
 ## Development guidelines
 
 - All scripts in `scripts/` must use `uv run --script` with inline dependency metadata (PEP 723).

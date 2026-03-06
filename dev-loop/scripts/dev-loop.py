@@ -320,14 +320,17 @@ def _implementation_prompt(issue_url: str) -> str:
         f"Fetch the implementation plan from GitHub issue {issue_url} using: "
         f"gh issue view {extract_issue_number(issue_url)} --json body --jq .body\n\n"
         "Use the superpowers:executing-plans skill to implement the plan task by task. "
-        "Do NOT use superpowers:using-git-worktrees — the branch and worktree are already set up.\n\n"
+        "Do NOT use superpowers:using-git-worktrees — the branch and worktree are already set up. "
+        "Do NOT use superpowers:finishing-a-development-branch — this is a headless session, "
+        "do not present interactive options. Just implement, verify, and commit.\n\n"
         "After completing all tasks, discover and run the project's quality gates:\n"
         "- Check package.json, Makefile, pyproject.toml, tox.ini, Cargo.toml, or equivalent\n"
         "- Run linting (eslint, ruff, pylint, clippy, etc.)\n"
         "- Run type checking (tsc, mypy, pyright, etc.)\n"
         "- Run formatting check (prettier, black, rustfmt, etc.)\n"
         "- Run the test suite\n\n"
-        "Fix any failures before proceeding. Once everything passes, commit all work."
+        "Fix any failures before proceeding. Once everything passes, commit all work. "
+        "Do NOT push — just commit locally."
     )
 
 
@@ -343,14 +346,18 @@ def _pr_creation_prompt(issue_url: str) -> str:
 
 
 def _security_review_prompt(pr_url: str) -> str:
+    pr_number = extract_pr_number(pr_url)
     return (
         f"/security-review\n\n"
-        f"After completing the security review, post your findings as a comment "
-        f"on PR {pr_url} using the gh CLI:\n"
-        f"  gh pr comment {extract_pr_number(pr_url)} --body '<your findings>'\n\n"
-        f"Format the comment with a '### Security Review' header, "
-        f"list any issues found categorized by severity, "
-        f"and end with an assessment of whether it's ready to merge."
+        f"Review the changes in PR {pr_url}.\n\n"
+        "After completing the security review, you MUST post your findings as a comment "
+        f"on the PR using the gh CLI:\n"
+        f"  gh pr comment {pr_number} --body '<your findings>'\n\n"
+        "Format the comment with a '### Security Review' header, "
+        "list any issues found categorized by severity, "
+        "and end with an assessment of whether it's ready to merge.\n\n"
+        "IMPORTANT: Always post a comment with your findings, even if no issues were found, "
+        "and even if other review comments already exist on the PR."
     )
 
 

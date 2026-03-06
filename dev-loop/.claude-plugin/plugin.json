@@ -1,11 +1,11 @@
 {
   "name": "dev-loop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Automated development loop: brainstorm, plan, implement, PR, then iterative review (simplify + code review + security review) until clean",
   "author": {
     "name": "Yorrick Jansen"
   },
-  "repository": "https://github.com/yorrickjansen/claude-dev-loop",
+  "repository": "https://github.com/yorrick/claude-code-plugins",
   "license": "MIT",
   "keywords": ["development", "automation", "code-review", "workflow", "loop"]
 }

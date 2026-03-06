@@ -56,6 +56,29 @@ def extract_pr_url(json_file: Path) -> str | None:
     return match.group(0) if match else None
 
 
+def extract_pr_number(pr_url: str) -> str:
+    """Extract PR number from a GitHub PR URL."""
+    match = re.search(r"/pull/(\d+)", pr_url)
+    return match.group(1) if match else ""
+
+
+def gh_comment(pr_url: str, body: str) -> None:
+    """Post a comment on a GitHub PR."""
+    pr_number = extract_pr_number(pr_url)
+    if not pr_number:
+        print("  Warning: could not extract PR number, skipping comment", flush=True)
+        return
+    try:
+        subprocess.run(
+            ["gh", "pr", "comment", pr_number, "--body", body],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        print(f"  Warning: failed to post PR comment: {e}", flush=True)
+
+
 def run_claude_bg(prompt: str, output_file: Path, permission_mode: str = "default") -> None:
     """Wrapper for ProcessPoolExecutor — must be top-level function."""
     run_claude(prompt, output_file, permission_mode)
@@ -115,6 +138,18 @@ def _pr_creation_prompt(plan_file: Path) -> str:
         "Push the current branch and create a pull request using gh pr create. "
         "Use a descriptive title and body summarizing what was implemented "
         f"based on the plan at {plan_file}. Return the PR URL."
+    )
+
+
+def _security_review_prompt(pr_url: str) -> str:
+    return (
+        f"/security-review\n\n"
+        f"After completing the security review, post your findings as a comment "
+        f"on PR {pr_url} using the gh CLI:\n"
+        f"  gh pr comment {extract_pr_number(pr_url)} --body '<your findings>'\n\n"
+        f"Format the comment with a '### Security Review' header, "
+        f"list any issues found categorized by severity, "
+        f"and end with an assessment of whether it's ready to merge."
     )
 
 
@@ -193,10 +228,16 @@ def main() -> int:
             return 1
 
         print(f"PR created: {pr_url}")
+        gh_comment(pr_url, (
+            "### dev-loop: Implementation complete\n\n"
+            "Starting automated review loop (simplify + code review + security review).\n\n"
+            f"Max iterations: {args.max_iterations}"
+        ))
 
     # --- Phase 2: Review loop ---
     for iteration in range(1, args.max_iterations + 1):
         log(f"Review iteration {iteration} of {args.max_iterations}")
+        gh_comment(pr_url, f"### dev-loop: Review iteration {iteration}/{args.max_iterations}")
 
         # Step 1: Simplify
         log(f"Step 1/{iteration}: Simplify")
@@ -225,7 +266,7 @@ def main() -> int:
             )
             security_review_future: Future = executor.submit(
                 run_claude_bg,
-                "/security-review",
+                _security_review_prompt(pr_url),
                 work_dir / f"security-review-{iteration}.json",
                 permission_mode,
             )
@@ -252,6 +293,10 @@ def main() -> int:
 
         if "NO" in decision.upper():
             log("No critical issues found. PR is ready!")
+            gh_comment(pr_url, (
+                "### dev-loop: Review complete\n\n"
+                f"No critical issues found after {iteration} iteration(s). PR is ready for human review."
+            ))
             print(f"PR: {pr_url}")
             print(f"Review artifacts: {work_dir}")
             return 0
@@ -265,6 +310,10 @@ def main() -> int:
         )
 
     log(f"Max iterations ({args.max_iterations}) reached. Review PR manually.")
+    gh_comment(pr_url, (
+        f"### dev-loop: Max iterations reached ({args.max_iterations})\n\n"
+        "There are still outstanding issues. Please review manually."
+    ))
     print(f"PR: {pr_url}")
     print(f"Review artifacts: {work_dir}")
     return 1

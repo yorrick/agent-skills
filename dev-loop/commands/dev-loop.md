@@ -64,5 +64,6 @@ The script will:
 5. Run a review loop:
    - /simplify — clean up the code
    - /code-review:code-review + /security-review — in parallel
-   - If Critical/Important issues found: fix and loop
-   - If clean: done
+   - Wait for CI/CD checks to complete (if any exist)
+   - If Critical/Important issues or CI failures found: fix and loop
+   - If clean and CI passing: done

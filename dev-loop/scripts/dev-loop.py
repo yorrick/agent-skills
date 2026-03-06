@@ -17,6 +17,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from concurrent.futures import Future, ProcessPoolExecutor
 from pathlib import Path
 
@@ -113,6 +114,67 @@ def gh_assign_self(pr_url: str) -> None:
         print(f"  Assigned {username} to PR #{pr_number}", flush=True)
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         print(f"  Warning: failed to assign PR: {e}", flush=True)
+
+
+def wait_for_ci(pr_number: str, timeout: int = 600, poll_interval: int = 30) -> tuple[str, str]:
+    """Wait for CI checks to complete and return (status, details).
+
+    Returns:
+        ("pass", "") if all checks pass or no checks exist.
+        ("fail", "<failure details>") if any check fails.
+        ("timeout", "") if checks don't complete within timeout.
+    """
+    # First check if the PR has any checks at all
+    result = subprocess.run(
+        ["gh", "pr", "checks", pr_number, "--json", "name,state,conclusion"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0 or not result.stdout.strip() or result.stdout.strip() == "[]":
+        print("  No CI checks found, skipping CI wait", flush=True)
+        return ("pass", "")
+
+    elapsed = 0
+    while elapsed < timeout:
+        result = subprocess.run(
+            ["gh", "pr", "checks", pr_number, "--json", "name,state,conclusion"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            print(f"  Warning: failed to check CI status: {result.stderr}", flush=True)
+            return ("pass", "")
+
+        try:
+            checks = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return ("pass", "")
+
+        if not checks:
+            return ("pass", "")
+
+        all_complete = all(c.get("state") == "COMPLETED" for c in checks)
+        if all_complete:
+            failures = [
+                c for c in checks if c.get("conclusion") not in ("SUCCESS", "NEUTRAL", "SKIPPED")
+            ]
+            if not failures:
+                print("  CI checks passed", flush=True)
+                return ("pass", "")
+
+            details = "\n".join(f"- {c['name']}: {c.get('conclusion', 'UNKNOWN')}" for c in failures)
+            print(f"  CI checks failed:\n{details}", flush=True)
+            return ("fail", details)
+
+        pending = [c["name"] for c in checks if c.get("state") != "COMPLETED"]
+        print(f"  Waiting for CI ({len(pending)} pending: {', '.join(pending[:3])}{'...' if len(pending) > 3 else ''})...", flush=True)
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+
+    print("  CI check timeout reached", flush=True)
+    return ("timeout", "")
 
 
 def fetch_issue_body(issue_url: str) -> str:
@@ -272,27 +334,40 @@ def _security_review_prompt(pr_url: str) -> str:
     )
 
 
-def _decision_prompt(code_review_text: str, security_review_text: str) -> str:
-    return (
+def _decision_prompt(
+    code_review_text: str, security_review_text: str, ci_failures: str = ""
+) -> str:
+    parts = [
         "Based on these review findings, are there Critical or Important "
         "issues that MUST be fixed before merging?\n\n"
         f"Code Review findings:\n{code_review_text}\n\n"
         f"Security Review findings:\n{security_review_text}\n\n"
+    ]
+    if ci_failures:
+        parts.append(f"CI/CD failures:\n{ci_failures}\n\n")
+    parts.append(
         "Answer with EXACTLY one word: YES or NO. "
-        "Only answer YES if there are genuinely Critical or Important issues. "
+        "Only answer YES if there are genuinely Critical or Important issues "
+        "OR if CI/CD checks are failing. "
         "Minor suggestions and nitpicks do not count."
     )
+    return "".join(parts)
 
 
-def _fix_prompt(pr_url: str, code_review_text: str, security_review_text: str) -> str:
-    return (
+def _fix_prompt(
+    pr_url: str, code_review_text: str, security_review_text: str, ci_failures: str = ""
+) -> str:
+    parts = [
         f"The following issues were found during review of PR {pr_url}. "
         "Fix all Critical and Important issues. After fixing, run the project's "
         "quality gates (lint, typecheck, format, tests) and make sure everything "
         "passes. Commit and push the fixes.\n\n"
         f"Code Review findings:\n{code_review_text}\n\n"
         f"Security Review findings:\n{security_review_text}"
-    )
+    ]
+    if ci_failures:
+        parts.append(f"\n\nCI/CD failures (MUST fix):\n{ci_failures}")
+    return "".join(parts)
 
 
 def main() -> int:
@@ -409,6 +484,14 @@ def main() -> int:
         print(f"  Code review: {work_dir / f'code-review-{iteration}.json'}")
         print(f"  Security review: {work_dir / f'security-review-{iteration}.json'}")
 
+        # Step 2b: Wait for CI checks
+        log(f"Step 2b/{iteration}: Checking CI/CD status")
+        pr_number = extract_pr_number(pr_url)
+        ci_status, ci_failures = wait_for_ci(pr_number)
+
+        if ci_failures:
+            gh_comment(pr_url, f"### dev-loop: CI/CD failures (iteration {iteration})\n\n```\n{ci_failures}\n```")
+
         # Step 3: Decision gate
         code_review_text = extract_result(work_dir / f"code-review-{iteration}.json")
         security_review_text = extract_result(
@@ -416,19 +499,25 @@ def main() -> int:
         )
 
         log(f"Step 3/{iteration}: Decision gate")
-        run_claude(
-            _decision_prompt(code_review_text, security_review_text),
-            work_dir / f"decision-{iteration}.json",
-            permission_mode,
-        )
 
-        decision = extract_result(work_dir / f"decision-{iteration}.json")
+        # CI failure automatically means YES (must fix)
+        if ci_status == "fail":
+            print("  CI failed — forcing fix iteration", flush=True)
+            decision = "YES"
+        else:
+            run_claude(
+                _decision_prompt(code_review_text, security_review_text),
+                work_dir / f"decision-{iteration}.json",
+                permission_mode,
+            )
+            decision = extract_result(work_dir / f"decision-{iteration}.json")
 
         if "NO" in decision.upper():
             log("No critical issues found. PR is ready!")
             gh_comment(pr_url, (
                 "### dev-loop: Review complete\n\n"
-                f"No critical issues found after {iteration} iteration(s). PR is ready for human review."
+                f"No critical issues found after {iteration} iteration(s). "
+                "CI passing. PR is ready for human review."
             ))
             print(f"PR: {pr_url}")
             print(f"Review artifacts: {work_dir}")
@@ -437,7 +526,7 @@ def main() -> int:
         # Step 4: Fix issues
         log(f"Step 4/{iteration}: Fixing issues")
         run_claude(
-            _fix_prompt(pr_url, code_review_text, security_review_text),
+            _fix_prompt(pr_url, code_review_text, security_review_text, ci_failures),
             work_dir / f"fix-{iteration}.json",
             permission_mode,
             cwd=worktree_path,

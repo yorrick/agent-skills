@@ -15,5 +15,6 @@ uv run "${CLAUDE_PLUGIN_ROOT}/scripts/dev-loop.py" $ARGUMENTS
 The script will:
 1. Run /simplify and commit fixes
 2. Run /code-review:code-review + /security-review in parallel
-3. If Critical/Important issues found: fix and loop
-4. If clean: done
+3. Wait for CI/CD checks to complete (if any exist)
+4. If Critical/Important issues or CI failures found: fix and loop
+5. If clean and CI passing: done

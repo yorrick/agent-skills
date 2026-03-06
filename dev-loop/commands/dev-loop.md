@@ -1,12 +1,20 @@
 ---
 description: "Full development loop: brainstorm, plan, implement, PR, then iterative review (simplify + code review + security review) until clean"
 argument-hint: "[--max-iterations N] [--skip-permissions]"
-allowed-tools: ["Bash(${CLAUDE_PLUGIN_ROOT}/scripts/dev-loop.sh:*)", "Read", "Write", "Edit", "Glob", "Grep", "Agent", "Skill"]
+allowed-tools: ["Bash(uv run ${CLAUDE_PLUGIN_ROOT}/scripts/*)", "Read", "Write", "Edit", "Glob", "Grep", "Agent", "Skill"]
 ---
 
 # Development Loop
 
 You are orchestrating a full feature development cycle. Follow these phases exactly.
+
+## Phase 0: Check dependencies
+
+First, verify all required plugins are installed. Run this using the Bash tool:
+
+uv run "${CLAUDE_PLUGIN_ROOT}/scripts/dev-loop.py" --help
+
+If uv or the script fails, tell the user they need uv installed (https://docs.astral.sh/uv/).
 
 ## Phase 1: Brainstorm (interactive)
 
@@ -27,7 +35,7 @@ Before running the script, confirm with the user:
 
 Then execute the script using the Bash tool:
 
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/dev-loop.sh" PLAN_FILE_PATH $ARGUMENTS
+uv run "${CLAUDE_PLUGIN_ROOT}/scripts/dev-loop.py" PLAN_FILE_PATH $ARGUMENTS
 
 Replace PLAN_FILE_PATH with the actual path to the plan file created in Phase 1.
 

@@ -1,7 +1,7 @@
 ---
 description: "Run the review loop on an existing PR: simplify, code review + security review in parallel, fix issues, repeat"
 argument-hint: "<plan-file> --pr-url <PR-URL> [--max-iterations N] [--skip-permissions]"
-allowed-tools: ["Bash(${CLAUDE_PLUGIN_ROOT}/scripts/dev-loop.sh:*)"]
+allowed-tools: ["Bash(uv run ${CLAUDE_PLUGIN_ROOT}/scripts/*)"]
 ---
 
 # Review Loop
@@ -10,7 +10,7 @@ Run the review loop on an existing PR. This skips brainstorming and implementati
 
 Execute the dev-loop script with the --pr-url flag using the Bash tool:
 
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/dev-loop.sh" $ARGUMENTS
+uv run "${CLAUDE_PLUGIN_ROOT}/scripts/dev-loop.py" $ARGUMENTS
 
 The script will:
 1. Run /simplify and commit fixes

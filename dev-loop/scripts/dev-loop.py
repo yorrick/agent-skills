@@ -34,7 +34,9 @@ def run_claude(
     if permission_mode != "default":
         cmd += ["--permission-mode", permission_mode]
 
-    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+    # Strip CLAUDECODE (nested session detection) and ANTHROPIC_API_KEY
+    # (forces claude to use Max subscription instead of pay-per-use API)
+    env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "ANTHROPIC_API_KEY")}
 
     with open(output_file, "w") as f:
         subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, env=env, cwd=cwd)

@@ -143,6 +143,8 @@ def scaffold_project(project_dir: Path) -> None:
     """Create a minimal Python calculator project."""
     (project_dir / "src" / "calculator").mkdir(parents=True)
     (project_dir / "tests").mkdir()
+    # Pre-create .worktrees/ so superpowers:using-git-worktrees doesn't ask
+    (project_dir / ".worktrees").mkdir()
 
     (project_dir / "pyproject.toml").write_text(
         '[project]\nname = "calculator"\nversion = "0.1.0"\n'
@@ -506,7 +508,9 @@ def main() -> int:
 
     # Will be set to OWNER/REPO after creation; cleanup uses whatever value is current
     repo_full_name: list[str] = [bare_name]
-    atexit.register(lambda: cleanup(project_dir, repo_full_name[0]))
+    do_cleanup = "--no-cleanup" not in sys.argv
+    if do_cleanup:
+        atexit.register(lambda: cleanup(project_dir, repo_full_name[0]))
 
     # Setup
     banner("Setup")

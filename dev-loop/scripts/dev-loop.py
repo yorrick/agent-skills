@@ -113,9 +113,16 @@ class RunContext:
 _ctx: RunContext | None = None
 
 
-def run_claude(prompt: str, output_file: Path, permission_mode: str = "default", cwd: Path | None = None) -> Path:
+def run_claude(
+    prompt: str,
+    output_file: Path,
+    permission_mode: str = "default",
+    cwd: Path | None = None,
+    model: str = "opus",
+    effort: str = "high",
+) -> Path:
     """Run a headless claude session and save output to file."""
-    cmd = ["claude", "-p", prompt, "--output-format", "json"]
+    cmd = ["claude", "-p", prompt, "--output-format", "json", "--model", model, "--effort", effort]
     if permission_mode != "default":
         cmd += ["--permission-mode", permission_mode]
 
@@ -395,7 +402,9 @@ def create_worktree_via_claude(issue_url: str, output_file: Path, permission_mod
     sys.exit(1)
 
 
-def run_claude_bg(prompt: str, output_file: Path, permission_mode: str = "default", cwd: str | None = None) -> None:
+def run_claude_bg(
+    prompt: str, output_file: Path, permission_mode: str = "default", cwd: str | None = None
+) -> None:
     """Wrapper for ProcessPoolExecutor — must be top-level function."""
     run_claude(prompt, output_file, permission_mode, Path(cwd) if cwd else None)
 

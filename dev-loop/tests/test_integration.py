@@ -167,6 +167,10 @@ def run_dev_loop(project_dir: Path) -> subprocess.CompletedProcess[str]:
         "bypassPermissions",
         "--output-format",
         "json",
+        "--model",
+        "opus",
+        "--effort",
+        "high",
     ]
 
     start = time.monotonic()

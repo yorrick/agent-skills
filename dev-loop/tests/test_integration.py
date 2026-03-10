@@ -135,9 +135,10 @@ def create_github_repo(project_dir: Path, repo_name: str) -> str:
     if result.returncode != 0:
         print(f"Failed to create GitHub repo: {result.stderr}", file=sys.stderr)
         sys.exit(1)
-    # Extract owner/repo from the URL
+    # Extract owner/repo from the URL (e.g. https://github.com/owner/repo)
     repo_url = result.stdout.strip()
-    return repo_url
+    parts = repo_url.rstrip("/").split("/")
+    return f"{parts[-2]}/{parts[-1]}"
 
 
 def cleanup(project_dir: Path, repo_name: str) -> None:
@@ -392,19 +393,20 @@ def main() -> int:
     banner("dev-loop integration test")
 
     timestamp = time.strftime("%Y%m%d-%H%M%S")
-    repo_name = f"dev-loop-integration-test-{timestamp}"
+    bare_name = f"dev-loop-integration-test-{timestamp}"
     project_dir = Path(tempfile.mkdtemp(prefix="dev-loop-integration-test-"))
 
-    # Register cleanup
-    atexit.register(cleanup, project_dir, repo_name)
+    # Will be set to OWNER/REPO after creation; cleanup uses whatever value is current
+    repo_full_name: list[str] = [bare_name]
+    atexit.register(lambda: cleanup(project_dir, repo_full_name[0]))
 
     # Setup
     banner("Setup")
     scaffold_project(project_dir)
     ok(f"Created temp project at {project_dir}")
 
-    repo_url = create_github_repo(project_dir, repo_name)
-    ok(f"GitHub repo created: {repo_url}")
+    repo_full_name[0] = create_github_repo(project_dir, bare_name)
+    ok(f"GitHub repo created: {repo_full_name[0]}")
 
     # Execution
     banner("Execution")
@@ -416,7 +418,7 @@ def main() -> int:
     verify_local(project_dir)
 
     banner("GitHub verification")
-    verify_github(repo_name)
+    verify_github(repo_full_name[0])
 
     # Summary
     total = _passes + len(_failures)

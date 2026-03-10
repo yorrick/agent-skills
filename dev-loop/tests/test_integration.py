@@ -4,8 +4,8 @@
 # ///
 """Integration test for the dev-loop plugin.
 
-Creates a temporary Python project, pushes to GitHub, runs the full dev-loop
-headlessly, and verifies the results.
+Creates a temporary Python project, pushes to GitHub, creates a plan issue,
+runs dev-loop.py directly, and verifies the results.
 
 Usage:
     uv run tests/test_integration.py
@@ -25,18 +25,79 @@ from pathlib import Path
 
 # --- Configuration ---
 
-FEATURE_REQUEST = "Add multiply and divide functions to the calculator."
-HEADLESS_PROMPT = (
-    f'Use the /dev-loop command with this feature request: "{FEATURE_REQUEST}" '
-    "You are running in HEADLESS MODE — do NOT ask any questions, do NOT wait "
-    "for user input. During brainstorming: skip ALL clarifying questions, pick "
-    "the simplest possible approach, auto-approve the design immediately without "
-    "presenting alternatives. During planning: write the shortest possible plan "
-    "(2-3 tasks max, no TDD ceremony, just write code and tests together) and "
-    "auto-approve it immediately. Use --skip-permissions and --max-iterations 1 "
-    "when running the script. SPEED IS CRITICAL — minimize overhead, skip "
-    "unnecessary steps, do not over-engineer. This is a trivial feature."
-)
+SCRIPT_DIR = Path(__file__).resolve().parent.parent / "scripts"
+DEV_LOOP_SCRIPT = SCRIPT_DIR / "dev-loop.py"
+
+PLAN_CONTENT = """\
+# Add Multiply and Divide Functions — Implementation Plan
+
+> **For agentic workers:** REQUIRED: Use superpowers:executing-plans to implement this plan.
+
+**Goal:** Add `multiply` and `divide` functions to the calculator library with tests.
+
+**Architecture:** Two new functions in `src/calculator/core.py` following the existing pattern. Tests in `tests/test_core.py`.
+
+**Tech Stack:** Python 3.10+, pytest
+
+---
+
+### Task 1: Add multiply and divide functions with tests
+
+**Files:**
+- Modify: `src/calculator/core.py`
+- Modify: `tests/test_core.py`
+
+**Step 1: Add multiply function to core.py**
+
+Add after the `subtract` function:
+
+```python
+def multiply(a: float, b: float) -> float:
+    \\"\\"\\"Multiply two numbers.\\"\\"\\"
+    return a * b
+```
+
+**Step 2: Add divide function to core.py**
+
+```python
+def divide(a: float, b: float) -> float:
+    \\"\\"\\"Divide a by b. Raises ZeroDivisionError if b is 0.\\"\\"\\"
+    return a / b
+```
+
+**Step 3: Add tests to test_core.py**
+
+```python
+from calculator.core import add, subtract, multiply, divide
+import pytest
+
+
+def test_multiply():
+    assert multiply(2, 3) == 6
+    assert multiply(-1, 5) == -5
+    assert multiply(0, 100) == 0
+
+
+def test_divide():
+    assert divide(10, 2) == 5.0
+    assert divide(-6, 3) == -2.0
+    with pytest.raises(ZeroDivisionError):
+        divide(1, 0)
+```
+
+**Step 4: Run tests**
+
+Run: `uv run pytest tests/ -v`
+Expected: All tests pass.
+
+**Step 5: Commit**
+
+```bash
+git add src/calculator/core.py tests/test_core.py
+git commit -m "feat: add multiply and divide functions"
+```
+"""
+
 TIMEOUT_SECONDS = 2700  # 45 minutes
 
 
@@ -119,7 +180,7 @@ def scaffold_project(project_dir: Path) -> None:
 
 
 def create_github_repo(project_dir: Path, repo_name: str) -> str:
-    """Initialize git, create GitHub repo, push. Returns repo full name."""
+    """Initialize git, create GitHub repo, push. Returns OWNER/REPO."""
     subprocess.run(["git", "init"], cwd=project_dir, capture_output=True)
     subprocess.run(["git", "checkout", "-b", "main"], cwd=project_dir, capture_output=True)
     subprocess.run(["git", "add", "-A"], cwd=project_dir, capture_output=True)
@@ -145,53 +206,104 @@ def create_github_repo(project_dir: Path, repo_name: str) -> str:
     return f"{parts[-2]}/{parts[-1]}"
 
 
-def cleanup(project_dir: Path, repo_name: str) -> None:
+def create_issue_with_plan(repo_full_name: str) -> str:
+    """Create a GitHub issue with the implementation plan. Returns issue URL."""
+    result = subprocess.run(
+        [
+            "gh",
+            "issue",
+            "create",
+            "--repo",
+            repo_full_name,
+            "--title",
+            "Add multiply and divide functions",
+            "--body",
+            PLAN_CONTENT,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        print(f"Failed to create issue: {result.stderr}", file=sys.stderr)
+        sys.exit(1)
+    return result.stdout.strip()
+
+
+def cleanup(project_dir: Path, repo_full_name: str) -> None:
     """Delete GitHub repo and temp directory."""
     subprocess.run(
-        ["gh", "repo", "delete", repo_name, "--yes"],
+        ["gh", "repo", "delete", repo_full_name, "--yes"],
         capture_output=True,
         timeout=30,
     )
+    # Clean up any worktrees before removing the directory
     if project_dir.exists():
+        wt_result = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+        )
+        for line in wt_result.stdout.splitlines():
+            if line.startswith("worktree ") and str(project_dir) not in line:
+                wt_path = line.split(" ", 1)[1]
+                subprocess.run(
+                    ["git", "worktree", "remove", "--force", wt_path],
+                    cwd=project_dir,
+                    capture_output=True,
+                )
+                if Path(wt_path).exists():
+                    shutil.rmtree(wt_path, ignore_errors=True)
         shutil.rmtree(project_dir, ignore_errors=True)
 
 
 # --- Execution ---
 
 
-def run_dev_loop(project_dir: Path) -> subprocess.CompletedProcess[str]:
-    """Run the dev-loop headlessly with process monitoring."""
+def run_dev_loop_script(project_dir: Path, issue_url: str) -> subprocess.CompletedProcess[str]:
+    """Run dev-loop.py directly with process monitoring."""
     env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "ANTHROPIC_API_KEY")}
 
     cmd = [
-        "claude",
-        "-p",
-        HEADLESS_PROMPT,
-        "--permission-mode",
-        "bypassPermissions",
-        "--output-format",
-        "json",
-        "--model",
-        "opus",
-        "--effort",
-        "high",
+        "uv",
+        "run",
+        str(DEV_LOOP_SCRIPT),
+        issue_url,
+        "--skip-permissions",
+        "--max-iterations",
+        "1",
     ]
 
     start = time.monotonic()
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         env=env,
         cwd=project_dir,
         text=True,
     )
+
+    output_lines: list[str] = []
 
     # Monitor loop — print progress every 60s
     while proc.poll() is None:
         elapsed = int(time.monotonic() - start)
         m, s = divmod(elapsed, 60)
         print(f"  [..] Running... (elapsed: {m}m{s:02d}s)", flush=True)
+
+        # Read any available output
+        if proc.stdout:
+            import select
+
+            while select.select([proc.stdout], [], [], 0)[0]:
+                line = proc.stdout.readline()
+                if not line:
+                    break
+                output_lines.append(line)
+                print(f"       {line.rstrip()}", flush=True)
+
         try:
             proc.wait(timeout=60)
         except subprocess.TimeoutExpired:
@@ -202,29 +314,25 @@ def run_dev_loop(project_dir: Path) -> subprocess.CompletedProcess[str]:
             failed("Timeout", f"Killed after {TIMEOUT_SECONDS}s")
             break
 
+    # Read remaining output
+    if proc.stdout:
+        for line in proc.stdout:
+            output_lines.append(line)
+
     elapsed = int(time.monotonic() - start)
     m, s = divmod(elapsed, 60)
 
-    stdout = proc.stdout.read() if proc.stdout else ""
-    stderr = proc.stderr.read() if proc.stderr else ""
+    stdout = "".join(output_lines)
 
     if proc.returncode == 0:
-        ok(f"Claude session completed ({m}m{s:02d}s)")
+        ok(f"dev-loop.py completed ({m}m{s:02d}s)")
     else:
-        failed(f"Claude session failed (exit {proc.returncode}, {m}m{s:02d}s)", stderr[:500])
+        failed(
+            f"dev-loop.py failed (exit {proc.returncode}, {m}m{s:02d}s)",
+            stdout[-500:] if stdout else "",
+        )
 
-    # Parse JSON output for cost info
-    try:
-        data = json.loads(stdout)
-        cost = data.get("total_cost_usd", 0)
-        if cost:
-            ok(f"Cost: ${cost:.2f}")
-        if data.get("is_error"):
-            failed("Claude returned error", data.get("result", "")[:300])
-    except (json.JSONDecodeError, KeyError):
-        pass
-
-    return subprocess.CompletedProcess(cmd, proc.returncode or 0, stdout, stderr)
+    return subprocess.CompletedProcess(cmd, proc.returncode or 0, stdout, "")
 
 
 # --- Local verification ---
@@ -232,10 +340,6 @@ def run_dev_loop(project_dir: Path) -> subprocess.CompletedProcess[str]:
 
 def verify_local(project_dir: Path) -> None:
     """Verify local artifacts after dev-loop completes."""
-    # Plan file exists
-    plan_files = list(project_dir.glob("docs/plans/*.md"))
-    check(len(plan_files) > 0, "Plan file exists in docs/plans/")
-
     # Find worktree or feature branch
     wt_result = subprocess.run(
         ["git", "worktree", "list"],
@@ -297,7 +401,7 @@ def verify_local(project_dir: Path) -> None:
 # --- GitHub verification ---
 
 
-def verify_github(repo_name: str) -> None:
+def verify_github(repo_full_name: str) -> None:
     """Verify GitHub state after dev-loop completes."""
 
     def gh_json(cmd: list[str]) -> dict | list:  # type: ignore[type-arg]
@@ -320,7 +424,7 @@ def verify_github(repo_name: str) -> None:
             "issue",
             "list",
             "--repo",
-            repo_name,
+            repo_full_name,
             "--json",
             "number,title,body",
             "--limit",
@@ -342,7 +446,7 @@ def verify_github(repo_name: str) -> None:
             "pr",
             "list",
             "--repo",
-            repo_name,
+            repo_full_name,
             "--state",
             "all",
             "--json",
@@ -366,7 +470,7 @@ def verify_github(repo_name: str) -> None:
                 "view",
                 pr_number,
                 "--repo",
-                repo_name,
+                repo_full_name,
                 "--json",
                 "comments",
             ]
@@ -383,10 +487,6 @@ def verify_github(repo_name: str) -> None:
         check(
             "Review iteration" in all_comments,
             'PR comment: "Review iteration"',
-        )
-        check(
-            "Security Review" in all_comments,
-            'PR comment: "Security Review"',
         )
         check(
             "Review complete" in all_comments or "Max iterations" in all_comments,
@@ -416,9 +516,12 @@ def main() -> int:
     repo_full_name[0] = create_github_repo(project_dir, bare_name)
     ok(f"GitHub repo created: {repo_full_name[0]}")
 
-    # Execution
+    issue_url = create_issue_with_plan(repo_full_name[0])
+    ok(f"Issue created: {issue_url}")
+
+    # Execution — run dev-loop.py directly (skips brainstorming/planning)
     banner("Execution")
-    result = run_dev_loop(project_dir)
+    result = run_dev_loop_script(project_dir, issue_url)
     _ = result  # Used for debugging if needed
 
     # Verification

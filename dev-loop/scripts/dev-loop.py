@@ -572,6 +572,10 @@ def main() -> int:
     if not check_dependencies():
         return 1
 
+    if args.continue_pr and args.review_only:
+        print("Error: --continue-pr and --review-only are mutually exclusive", file=sys.stderr)
+        return 1
+
     permission_mode = "bypassPermissions" if args.skip_permissions else "default"
     pr_url = args.review_only
     ctx = RunContext()
@@ -608,12 +612,19 @@ def main() -> int:
 
         ctx.status("Phase 1b", "Pushing commits (continue-pr)")
         ctx.log("PHASE 1b: Pushing commits (continue-pr)")
-        run_claude(
+        push_file = run_claude(
             "Push all commits on the current branch to the remote.",
             work_dir / "push.json",
             permission_mode,
             cwd=None,
         )
+        err = check_claude_error(push_file)
+        if err:
+            print(f"Error during push: {err}", file=sys.stderr)
+            ctx.status("Error", "Push failed")
+            ctx.log(f"ERROR: Push failed: {err}")
+            ctx.notify("dev-loop aborted: push failed")
+            return 1
 
         pr_url = detect_pr_url()
         ctx.log(f"Using existing PR: {pr_url}")

@@ -135,8 +135,9 @@ def create_github_repo(project_dir: Path, repo_name: str) -> str:
     if result.returncode != 0:
         print(f"Failed to create GitHub repo: {result.stderr}", file=sys.stderr)
         sys.exit(1)
-    # Extract owner/repo from the URL (e.g. https://github.com/owner/repo)
-    repo_url = result.stdout.strip()
+    # Extract owner/repo from the first line of stdout (URL like https://github.com/owner/repo)
+    # gh repo create --push may also print git tracking info on subsequent lines
+    repo_url = result.stdout.strip().splitlines()[0].strip()
     parts = repo_url.rstrip("/").split("/")
     return f"{parts[-2]}/{parts[-1]}"
 

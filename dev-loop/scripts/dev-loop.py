@@ -16,19 +16,99 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 import time
 from concurrent.futures import Future, ProcessPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
+
+
+class RunContext:
+    """Manages a per-run directory under .dev-loop/runs/ with status, log, and notification helpers."""
+
+    def __init__(self) -> None:
+        repo_root = Path(
+            subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+        )
+        self._start = time.monotonic()
+
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S")
+        self._dir = repo_root / ".dev-loop" / "runs" / timestamp
+        self._dir.mkdir(parents=True, exist_ok=True)
+
+        # Maintain a 'latest' symlink
+        latest = repo_root / ".dev-loop" / "latest"
+        latest.unlink(missing_ok=True)
+        latest.symlink_to(self._dir)
+
+        # Ensure .dev-loop/ is in .gitignore
+        gitignore = repo_root / ".gitignore"
+        marker = ".dev-loop/"
+        if gitignore.exists():
+            content = gitignore.read_text()
+            if marker not in content:
+                with open(gitignore, "a") as f:
+                    if not content.endswith("\n"):
+                        f.write("\n")
+                    f.write(f"{marker}\n")
+        else:
+            gitignore.write_text(f"{marker}\n")
+
+    @property
+    def dir(self) -> Path:
+        """Return the run directory path."""
+        return self._dir
+
+    def _elapsed(self) -> str:
+        """Return elapsed time since run start as a human-readable string."""
+        seconds = int(time.monotonic() - self._start)
+        minutes, secs = divmod(seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return f"{hours}h{minutes:02d}m{secs:02d}s"
+        if minutes:
+            return f"{minutes}m{secs:02d}s"
+        return f"{secs}s"
+
+    def status(self, phase: str, detail: str) -> None:
+        """Overwrite status.txt with current phase info and print to stdout."""
+        line = f"{phase} | {detail} | {self._elapsed()}"
+        (self._dir / "status.txt").write_text(line + "\n")
+        print(line, flush=True)
+
+    def log(self, message: str) -> None:
+        """Append a timestamped line to dev-loop.log and print to stdout."""
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        line = f"[{ts}] {message}"
+        with open(self._dir / "dev-loop.log", "a") as f:
+            f.write(line + "\n")
+        print(line, flush=True)
+
+    def notify(self, message: str) -> None:
+        """Send a macOS notification. Silently fails if unavailable."""
+        try:
+            subprocess.run(
+                [
+                    "osascript",
+                    "-e",
+                    f'display notification "{message}" with title "dev-loop"',
+                ],
+                capture_output=True,
+                timeout=5,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
 
 
 def log(msg: str) -> None:
     print(f"\n{'=' * 64}\n  {msg}\n{'=' * 64}\n", flush=True)
 
 
-def run_claude(
-    prompt: str, output_file: Path, permission_mode: str = "default", cwd: Path | None = None
-) -> Path:
+def run_claude(prompt: str, output_file: Path, permission_mode: str = "default", cwd: Path | None = None) -> Path:
     """Run a headless claude session and save output to file."""
     cmd = ["claude", "-p", prompt, "--output-format", "json"]
     if permission_mode != "default":
@@ -190,9 +270,7 @@ def wait_for_ci(pr_number: str, timeout: int = 600, poll_interval: int = 30) -> 
 
         all_complete = all(c.get("state") == "COMPLETED" for c in checks)
         if all_complete:
-            failures = [
-                c for c in checks if c.get("conclusion") not in ("SUCCESS", "NEUTRAL", "SKIPPED")
-            ]
+            failures = [c for c in checks if c.get("conclusion") not in ("SUCCESS", "NEUTRAL", "SKIPPED")]
             if not failures:
                 print("  CI checks passed", flush=True)
                 return ("pass", "")
@@ -202,7 +280,8 @@ def wait_for_ci(pr_number: str, timeout: int = 600, poll_interval: int = 30) -> 
             return ("fail", details)
 
         pending = [c["name"] for c in checks if c.get("state") != "COMPLETED"]
-        print(f"  Waiting for CI ({len(pending)} pending: {', '.join(pending[:3])}{'...' if len(pending) > 3 else ''})...", flush=True)
+        names = ", ".join(pending[:3]) + ("..." if len(pending) > 3 else "")
+        print(f"  Waiting for CI ({len(pending)} pending: {names})...", flush=True)
         time.sleep(poll_interval)
         elapsed += poll_interval
 
@@ -228,9 +307,7 @@ def fetch_issue_body(issue_url: str) -> str:
     return result.stdout.strip()
 
 
-def create_worktree_via_claude(
-    issue_url: str, output_file: Path, permission_mode: str = "default"
-) -> Path:
+def create_worktree_via_claude(issue_url: str, output_file: Path, permission_mode: str = "default") -> Path:
     """Use Claude with superpowers:using-git-worktrees to create a worktree."""
     issue_number = extract_issue_number(issue_url)
     branch_name = f"dev-loop/issue-{issue_number}"
@@ -279,16 +356,13 @@ def create_worktree_via_claude(
                 return worktree_path
 
     print(
-        f"Error: could not find worktree for branch {branch_name}. "
-        f"Check {output_file}",
+        f"Error: could not find worktree for branch {branch_name}. Check {output_file}",
         file=sys.stderr,
     )
     sys.exit(1)
 
 
-def run_claude_bg(
-    prompt: str, output_file: Path, permission_mode: str = "default", cwd: str | None = None
-) -> None:
+def run_claude_bg(prompt: str, output_file: Path, permission_mode: str = "default", cwd: str | None = None) -> None:
     """Wrapper for ProcessPoolExecutor — must be top-level function."""
     run_claude(prompt, output_file, permission_mode, Path(cwd) if cwd else None)
 
@@ -307,17 +381,12 @@ def check_dependencies() -> bool:
     missing = []
 
     for plugin in required:
-        found = any(
-            v is True for k, v in enabled_plugins.items() if k.startswith(f"{plugin}@")
-        )
+        found = any(v is True for k, v in enabled_plugins.items() if k.startswith(f"{plugin}@"))
         if not found:
             missing.append(plugin)
 
     if missing:
-        print(
-            "ERROR: dev-loop requires the following plugins "
-            "to be installed and enabled:\n"
-        )
+        print("ERROR: dev-loop requires the following plugins to be installed and enabled:\n")
         for p in missing:
             print(f"  - {p}")
         print("\nInstall missing plugins with:")
@@ -385,9 +454,7 @@ def _security_review_prompt(pr_url: str) -> str:
     )
 
 
-def _decision_prompt(
-    code_review_text: str, security_review_text: str, ci_failures: str = ""
-) -> str:
+def _decision_prompt(code_review_text: str, security_review_text: str, ci_failures: str = "") -> str:
     parts = [
         "Based on these review findings, are there Critical or Important "
         "issues that MUST be fixed before merging?\n\n"
@@ -405,9 +472,7 @@ def _decision_prompt(
     return "".join(parts)
 
 
-def _fix_prompt(
-    pr_url: str, code_review_text: str, security_review_text: str, ci_failures: str = ""
-) -> str:
+def _fix_prompt(pr_url: str, code_review_text: str, security_review_text: str, ci_failures: str = "") -> str:
     parts = [
         f"The following issues were found during review of PR {pr_url}. "
         "Fix all Critical and Important issues. After fixing, run the project's "
@@ -424,15 +489,9 @@ def _fix_prompt(
 def main() -> int:
     parser = argparse.ArgumentParser(description="Automated development loop")
     parser.add_argument("issue_url", help="GitHub issue URL containing the implementation plan")
-    parser.add_argument(
-        "--max-iterations", type=int, default=3, help="Max review iterations (default: 3)"
-    )
-    parser.add_argument(
-        "--pr-url", default="", help="Skip implementation, review existing PR"
-    )
-    parser.add_argument(
-        "--skip-permissions", action="store_true", help="Run with bypassPermissions mode"
-    )
+    parser.add_argument("--max-iterations", type=int, default=3, help="Max review iterations (default: 3)")
+    parser.add_argument("--pr-url", default="", help="Skip implementation, review existing PR")
+    parser.add_argument("--skip-permissions", action="store_true", help="Run with bypassPermissions mode")
     parser.add_argument(
         "--reviewers", default="", help="Comma-separated GitHub usernames or team slugs to request review from"
     )
@@ -448,16 +507,15 @@ def main() -> int:
 
     permission_mode = "bypassPermissions" if args.skip_permissions else "default"
     pr_url = args.pr_url
-    work_dir = Path(tempfile.mkdtemp(prefix="dev-loop-"))
+    ctx = RunContext()
+    work_dir = ctx.dir
     print(f"Work directory: {work_dir}")
 
     # --- Phase 1: Implementation (skip if --pr-url provided) ---
     worktree_path: Path | None = None
     if not pr_url:
         log("Phase 0: Setting up branch and worktree")
-        worktree_path = create_worktree_via_claude(
-            issue_url, work_dir / "worktree-setup.json", permission_mode
-        )
+        worktree_path = create_worktree_via_claude(issue_url, work_dir / "worktree-setup.json", permission_mode)
 
         log("Phase 1: Implementing plan")
         impl_file = run_claude(
@@ -493,11 +551,14 @@ def main() -> int:
 
         print(f"PR created: {pr_url}")
         gh_assign_self(pr_url)
-        gh_comment(pr_url, (
-            "### dev-loop: Implementation complete\n\n"
-            "Starting automated review loop (simplify + code review + security review).\n\n"
-            f"Max iterations: {args.max_iterations}"
-        ))
+        gh_comment(
+            pr_url,
+            (
+                "### dev-loop: Implementation complete\n\n"
+                "Starting automated review loop (simplify + code review + security review).\n\n"
+                f"Max iterations: {args.max_iterations}"
+            ),
+        )
 
     # --- Phase 2: Review loop ---
     for iteration in range(1, args.max_iterations + 1):
@@ -570,9 +631,7 @@ def main() -> int:
 
         # Step 3: Decision gate
         code_review_text = extract_result(work_dir / f"code-review-{iteration}.json")
-        security_review_text = extract_result(
-            work_dir / f"security-review-{iteration}.json"
-        )
+        security_review_text = extract_result(work_dir / f"security-review-{iteration}.json")
 
         log(f"Step 3/{iteration}: Decision gate")
 
@@ -593,11 +652,14 @@ def main() -> int:
             pr_num = extract_pr_number(pr_url)
             if args.reviewers:
                 gh_request_review(pr_num, args.reviewers)
-            gh_comment(pr_url, (
-                "### dev-loop: Review complete\n\n"
-                f"No critical issues found after {iteration} iteration(s). "
-                "CI passing. PR is ready for human review."
-            ))
+            gh_comment(
+                pr_url,
+                (
+                    "### dev-loop: Review complete\n\n"
+                    f"No critical issues found after {iteration} iteration(s). "
+                    "CI passing. PR is ready for human review."
+                ),
+            )
             print(f"PR: {pr_url}")
             print(f"Review artifacts: {work_dir}")
             return 0
@@ -615,10 +677,13 @@ def main() -> int:
     pr_num = extract_pr_number(pr_url)
     if args.reviewers:
         gh_request_review(pr_num, args.reviewers)
-    gh_comment(pr_url, (
-        f"### dev-loop: Max iterations reached ({args.max_iterations})\n\n"
-        "There are still outstanding issues. Please review manually."
-    ))
+    gh_comment(
+        pr_url,
+        (
+            f"### dev-loop: Max iterations reached ({args.max_iterations})\n\n"
+            "There are still outstanding issues. Please review manually."
+        ),
+    )
     print(f"PR: {pr_url}")
     print(f"Review artifacts: {work_dir}")
     return 1

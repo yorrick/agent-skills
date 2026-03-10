@@ -1,172 +1,112 @@
 ---
 name: reflect
-description: Analyze the current session and propose improvements to skills. Run after using a skill to capture learnings. Use when user says "reflect", "improve skill", "learn from this", or at end of skill-heavy sessions.
+description: Analyze the current session transcript and improve project documentation based on what was learned. Triggered automatically via SessionEnd hook, or manually with /reflect. Use when the user says "reflect", "what did we learn", "improve docs from this session", or "capture learnings". Also runs automatically in the background after every substantial session.
 ---
 
-# Reflect Skill
+# Reflect
 
-Analyze the current conversation and propose improvements to skills based on what worked, what didn't, and edge cases discovered.
+Analyze a session transcript to extract learnings and apply them as improvements to the project's documentation — CLAUDE.md, README.md, and auto-memory files.
 
-## Trigger
+## What This Skill Does
 
-Run `/self-improve-skill:reflect` or `/self-improve-skill:reflect [skill-name]` after a session where you used a skill.
+After a session ends (or when invoked manually), reflect reads through the transcript and looks for:
+
+- **Corrections** — The user said "no", "not like that", corrected output, or Claude had to retry something that failed
+- **Discoveries** — New patterns, conventions, or constraints that emerged during the work
+- **Pain points** — Workarounds, confusing APIs, tricky configurations that cost time
+- **Decisions** — Architectural or design choices made during the session that future sessions should know about
+
+Then it determines which project files would benefit from capturing these learnings and edits them directly.
 
 ## Modes
 
 ### Interactive Mode (default)
-When run by a user in a conversation, follow the full workflow below with prompts and confirmations.
 
-### Non-Interactive Mode (--non-interactive flag)
-When invoked with `--non-interactive` flag (e.g., `claude -p "/reflect skill-name --non-interactive" < transcript.jsonl`), operate autonomously:
+When a user runs `/self-improve-skill:reflect` in conversation:
+
+1. Summarize what happened in the session (2-3 sentences)
+2. List the learnings found, grouped by confidence (HIGH/MEDIUM/LOW)
+3. For each learning, show which file would be edited and the proposed change
+4. Ask the user to approve, modify, or skip each change
+5. Apply approved changes
+
+### Non-Interactive Mode (`--non-interactive` flag)
+
+When invoked by the SessionEnd hook via `claude -p "/self-improve-skill:reflect --non-interactive" < transcript.jsonl`:
+
 - Parse the JSONL transcript from stdin
-- Analyze the session for the specified skill
-- Apply changes directly to skill files WITHOUT committing
-- Do NOT prompt for user input
-- Do NOT run git commands (no add, commit, or push)
+- Analyze the session
+- Apply only HIGH confidence changes directly
+- Write MEDIUM/LOW confidence observations to the memory directory for later review
+- Do NOT run any git commands
 - Output a summary of changes made to stdout
 
 Detect mode by checking if `--non-interactive` is present in the arguments.
 
-## Workflow
+## Target Files
 
-### Step 1: Identify the Skill
+Only edit files within the current repository. Never edit global files like `~/.claude/CLAUDE.md`.
 
-If skill name not provided, ask:
+### CLAUDE.md
 
+Add or update instructions that would prevent repeating mistakes or capture conventions discovered during the session. Examples:
+- "Always run `npm run typecheck` before committing — the CI check is strict"
+- "The `legacy/` directory uses CommonJS, not ESM"
+- "Database migrations must be backwards-compatible (blue-green deploys)"
+
+Place new entries in the most relevant existing section. If no section fits, append to the end. Keep entries concise — one line per instruction when possible.
+
+### README.md
+
+Update if the session revealed outdated setup instructions, missing prerequisites, or incorrect documentation. Only edit sections that are clearly wrong or missing critical information.
+
+### Auto-memory (`~/.claude/projects/.../memory/`)
+
+Write observations that are useful but not yet confirmed across multiple sessions. Memory is a good staging ground — things can graduate to CLAUDE.md once they prove stable. Organize by topic file (e.g., `debugging.md`, `patterns.md`), not chronologically.
+
+## How to Analyze
+
+Read the transcript looking for these signals:
+
+**HIGH confidence (apply in non-interactive mode):**
+- User explicitly corrected Claude and the correction reveals a project convention
+- A command failed and the fix reveals an environment requirement
+- User stated a preference or rule directly ("always use...", "never do...")
+
+**MEDIUM confidence (memory only in non-interactive mode):**
+- Patterns observed but not explicitly stated by the user
+- Workarounds that might be temporary
+- Tool/library preferences shown implicitly
+
+**LOW confidence (memory only in non-interactive mode):**
+- Single-occurrence observations
+- Things that might be session-specific rather than project-wide
+
+## Important Constraints
+
+- Never duplicate information already in CLAUDE.md or memory files — check first
+- Never remove existing content unless it's clearly contradicted by session evidence
+- Keep edits minimal and surgical — add what's needed, nothing more
+- If a CLAUDE.md file doesn't exist yet, do not create one — only edit existing files
+- If a memory directory doesn't exist, you may create it (this is standard Claude Code behavior)
+- Prefer updating an existing memory file over creating a new one
+- Never edit skill files, hook files, or plugin configurations
+- Never run git add, git commit, or git push
+
+## Example
+
+After a session where the user struggled with TypeScript strict mode:
+
+**CLAUDE.md addition:**
 ```
-Which skill should I analyze this session for?
-- frontend-design
-- code-reviewer
-- [other]
-```
-
-### Step 2: Analyze the Conversation
-
-Look for these signals in the current conversation:
-
-**Corrections** (HIGH confidence):
-- User said "no", "not like that", "I meant..."
-- User explicitly corrected output
-- User asked for changes immediately after generation
-- Agent try run run a command that initially failed because of a simple issue, then succeeded
-
-**Successes** (MEDIUM confidence):
-- User said "perfect", "great", "yes", "exactly"
-- User accepted output without modification
-- User built on top of the output
-
-**Edge Cases** (MEDIUM confidence):
-- Questions the skill didn't anticipate
-- Scenarios requiring workarounds
-- Features user asked for that weren't covered
-
-**Preferences** (accumulate over sessions):
-- Repeated patterns in user choices
-- Style preferences shown implicitly
-- Tool/framework preferences
-
-### Step 3: Propose Changes
-
-Present findings using accessible colors (WCAG AA 4.5:1 contrast ratio):
-
-```
-┌─ Skill Reflection: [skill-name] ─────────────────────────┐
-│                                                          │
-│ Signals: X corrections, Y successes                      │
-│                                                          │
-│ Proposed changes:                                        │
-│                                                          │
-│ 🔴 [HIGH] + Add constraint: "[specific constraint]"      │
-│ 🟡 [MED]  + Add preference: "[specific preference]"      │
-│ 🟡 [LOW]  + Flag for review: "[observation]"             │
-│                                                          │
-│ Commit: "[skill]: [summary of changes]"                  │
-└──────────────────────────────────────────────────────────┘
-```
-
-Color guide (use ANSI codes in terminal output):
-- HIGH: \033[1;31m (bold red #FF6B6B - 4.5:1 on dark)
-- MED: \033[1;33m (bold yellow #FFE066 - 4.8:1 on dark)
-- LOW: \033[1;36m (bold cyan #6BC5FF - 4.6:1 on dark)
-
-Avoid: pure red (#FF0000) on black, green on red (colorblind users)
-
-- Y — Apply changes, commit, and push
-- n — Skip this update
-- Or describe any tweaks to the proposed changes
-
-### Step 4: If Approved (Interactive Mode Only)
-
-1. Read the current skill file from `~/.claude/skills/[skill-name]/SKILL.md`
-2. Apply the changes using the Edit tool
-3. Run git commands:
-
-```bash
-cd ~/.claude/skills
-git add [skill-name]/SKILL.md
-git commit -m "[skill]: [change summary]"
-git push origin main
+# TypeScript
+- This project uses `strict: true` in tsconfig — always handle null/undefined explicitly
+- Prefer `satisfies` over `as` for type assertions
 ```
 
-4. Confirm: "Skill updated and pushed to GitHub"
-
-### Step 4: Non-Interactive Mode
-
-1. Read the current skill file from `~/.claude/skills/[skill-name]/SKILL.md`
-2. Apply the changes using the Edit tool
-3. Do NOT run any git commands
-4. Output summary of changes to stdout
-
-### Step 5: If Declined (Interactive Mode Only)
-
-Ask: "Would you like to save these observations for later review?"
-
-If yes, append to `~/.claude/skills/[skill-name]/OBSERVATIONS.md`
-
-## Example Session
-
-User runs `/reflect frontend-design` after a UI session:
-
+**Memory file (`memory/typescript.md`):**
 ```
-┌─ Skill Reflection: frontend-design ──────────────────────┐
-│                                                          │
-│ Signals: 2 corrections, 3 successes                      │
-│                                                          │
-│ Proposed changes:                                        │
-│                                                          │
-│ 🔴 [HIGH] + Constraints/NEVER:                           │
-│           "Use gradients unless explicitly requested"    │
-│ 🔴 [HIGH] + Color & Theme:                               │
-│           "Dark backgrounds: use #000, not #1a1a1a"      │
-│ 🟡 [MED]  + Layout:                                      │
-│           "Prefer CSS Grid for card layouts"             │
-│                                                          │
-│ Commit: "frontend-design: no gradients, #000 dark"       │
-└──────────────────────────────────────────────────────────┘
-
-Apply these changes? [Y/n] or describe tweaks
+## Strict mode patterns observed
+- User prefers `satisfies` operator over type assertions
+- Nullable fields in API responses need explicit checks, not non-null assertions
 ```
-
-## Git Integration (Interactive Mode Only)
-
-This skill has permission to:
-
-- Read skill files from `~/.claude/skills/`
-- Edit skill files (with user approval)
-- Run `git add`, `git commit`, `git push` in the skills directory
-
-The skills repo should be initialized at `~/.claude/skills` with a remote origin.
-
-## Important Notes
-
-### Interactive Mode
-- Always show the exact changes before applying
-- Never modify skills without explicit user approval
-- Commit messages should be concise and descriptive
-- Push only after successful commit
-
-### Non-Interactive Mode
-- Apply changes directly without prompting
-- NEVER commit or push changes
-- Output a clear summary of what was changed
-- User will review and commit changes manually later

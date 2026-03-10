@@ -1,7 +1,7 @@
 {
   "name": "self-improve-skill",
-  "description": "Automatically reflects on skills used in sessions and proposes improvements",
-  "version": "1.0.0",
+  "description": "Analyzes session transcripts and improves project documentation (CLAUDE.md, README, memory) based on learnings",
+  "version": "2.0.0",
   "author": {
     "name": "Yorrick Jansen"
   }

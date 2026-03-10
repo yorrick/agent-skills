@@ -29,12 +29,15 @@ FEATURE_REQUEST = "Add multiply and divide functions to the calculator."
 HEADLESS_PROMPT = (
     f'Use the /dev-loop command with this feature request: "{FEATURE_REQUEST}" '
     "You are running in HEADLESS MODE — do NOT ask any questions, do NOT wait "
-    "for user input. During brainstorming: skip all clarifying questions, pick "
-    "the simplest approach, auto-approve the design immediately. During "
-    "planning: write a minimal plan and auto-approve it. Use --skip-permissions "
-    "and --max-iterations 2 when running the script. Keep everything minimal."
+    "for user input. During brainstorming: skip ALL clarifying questions, pick "
+    "the simplest possible approach, auto-approve the design immediately without "
+    "presenting alternatives. During planning: write the shortest possible plan "
+    "(2-3 tasks max, no TDD ceremony, just write code and tests together) and "
+    "auto-approve it immediately. Use --skip-permissions and --max-iterations 1 "
+    "when running the script. SPEED IS CRITICAL — minimize overhead, skip "
+    "unnecessary steps, do not over-engineer. This is a trivial feature."
 )
-TIMEOUT_SECONDS = 1800  # 30 minutes
+TIMEOUT_SECONDS = 2700  # 45 minutes
 
 
 # --- Output helpers ---

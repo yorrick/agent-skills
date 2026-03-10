@@ -110,8 +110,7 @@ class RunContext:
             pass
 
 
-def log(msg: str) -> None:
-    print(f"\n{'=' * 64}\n  {msg}\n{'=' * 64}\n", flush=True)
+_ctx: RunContext | None = None
 
 
 def run_claude(prompt: str, output_file: Path, permission_mode: str = "default", cwd: Path | None = None) -> Path:
@@ -124,10 +123,14 @@ def run_claude(prompt: str, output_file: Path, permission_mode: str = "default",
     # (forces claude to use Max subscription instead of pay-per-use API)
     env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "ANTHROPIC_API_KEY")}
 
-    with open(output_file, "w") as f:
-        subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, env=env, cwd=cwd)
+    stderr_file = output_file.with_suffix(".stderr.log")
+    with open(output_file, "w") as out_f, open(stderr_file, "w") as err_f:
+        subprocess.run(cmd, stdout=out_f, stderr=err_f, env=env, cwd=cwd)
 
-    print(f"  Output saved to: {output_file}", flush=True)
+    if _ctx is not None:
+        _ctx.log(f"Output saved to: {output_file}")
+    else:
+        print(f"  Output saved to: {output_file}", flush=True)
     return output_file
 
 
@@ -185,6 +188,8 @@ def gh_comment(pr_url: str, body: str) -> None:
         )
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         print(f"  Warning: failed to post PR comment: {e}", flush=True)
+        if _ctx:
+            _ctx.log(f"Warning: failed to post PR comment: {e}")
 
 
 def gh_assign_self(pr_url: str) -> None:
@@ -211,8 +216,12 @@ def gh_assign_self(pr_url: str) -> None:
             timeout=30,
         )
         print(f"  Assigned {username} to PR #{pr_number}", flush=True)
+        if _ctx:
+            _ctx.log(f"Assigned {username} to PR #{pr_number}")
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         print(f"  Warning: failed to assign PR: {e}", flush=True)
+        if _ctx:
+            _ctx.log(f"Warning: failed to assign PR: {e}")
 
 
 def gh_request_review(pr_number: str, reviewers: str) -> None:
@@ -231,8 +240,12 @@ def gh_request_review(pr_number: str, reviewers: str) -> None:
     try:
         subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         print(f"  Requested review from: {reviewers}", flush=True)
+        if _ctx:
+            _ctx.log(f"Requested review from: {reviewers}")
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         print(f"  Warning: failed to request review: {e}", flush=True)
+        if _ctx:
+            _ctx.log(f"Warning: failed to request review: {e}")
 
 
 def wait_for_ci(pr_number: str, timeout: int = 600, poll_interval: int = 30) -> tuple[str, str]:
@@ -252,6 +265,8 @@ def wait_for_ci(pr_number: str, timeout: int = 600, poll_interval: int = 30) -> 
     )
     if result.returncode != 0 or not result.stdout.strip() or result.stdout.strip() == "[]":
         print("  No CI checks found, skipping CI wait", flush=True)
+        if _ctx:
+            _ctx.log("No CI checks found, skipping CI wait")
         return ("pass", "")
 
     elapsed = 0
@@ -279,10 +294,14 @@ def wait_for_ci(pr_number: str, timeout: int = 600, poll_interval: int = 30) -> 
             failures = [c for c in checks if c.get("conclusion") not in ("SUCCESS", "NEUTRAL", "SKIPPED")]
             if not failures:
                 print("  CI checks passed", flush=True)
+                if _ctx:
+                    _ctx.log("CI checks passed")
                 return ("pass", "")
 
             details = "\n".join(f"- {c['name']}: {c.get('conclusion', 'UNKNOWN')}" for c in failures)
             print(f"  CI checks failed:\n{details}", flush=True)
+            if _ctx:
+                _ctx.log(f"CI checks failed:\n{details}")
             return ("fail", details)
 
         pending = [c["name"] for c in checks if c.get("state") != "COMPLETED"]
@@ -292,6 +311,8 @@ def wait_for_ci(pr_number: str, timeout: int = 600, poll_interval: int = 30) -> 
         elapsed += poll_interval
 
     print("  CI check timeout reached", flush=True)
+    if _ctx:
+        _ctx.log("CI check timeout reached")
     return ("timeout", "")
 
 
@@ -335,6 +356,8 @@ def create_worktree_via_claude(issue_url: str, output_file: Path, permission_mod
         worktree_path = Path(match.group(1).strip())
         if worktree_path.exists():
             print(f"  Worktree created at: {worktree_path}", flush=True)
+            if _ctx:
+                _ctx.log(f"Worktree created at: {worktree_path}")
             return worktree_path
 
     # Fallback: check git worktree list for our branch
@@ -348,6 +371,8 @@ def create_worktree_via_claude(issue_url: str, output_file: Path, permission_mod
             worktree_path = Path(line.split(" ", 1)[1])
             if worktree_path.exists():
                 print(f"  Worktree found at: {worktree_path}", flush=True)
+                if _ctx:
+                    _ctx.log(f"Worktree found at: {worktree_path}")
                 return worktree_path
 
     # Second fallback: look for branch in worktree list
@@ -359,6 +384,8 @@ def create_worktree_via_claude(issue_url: str, output_file: Path, permission_mod
             worktree_path = Path(current_worktree)
             if worktree_path.exists():
                 print(f"  Worktree found at: {worktree_path}", flush=True)
+                if _ctx:
+                    _ctx.log(f"Worktree found at: {worktree_path}")
                 return worktree_path
 
     print(
@@ -514,16 +541,26 @@ def main() -> int:
     permission_mode = "bypassPermissions" if args.skip_permissions else "default"
     pr_url = args.pr_url
     ctx = RunContext()
+    global _ctx
+    _ctx = ctx
     work_dir = ctx.dir
-    print(f"Work directory: {work_dir}")
+    ctx.log(f"START dev-loop for {issue_url}")
+    ctx.log(f"Run directory: {work_dir}")
+    ctx.log(
+        f"Options: max_iterations={args.max_iterations},"
+        f" skip_permissions={args.skip_permissions}, reviewers={args.reviewers}"
+    )
 
     # --- Phase 1: Implementation (skip if --pr-url provided) ---
     worktree_path: Path | None = None
     if not pr_url:
-        log("Phase 0: Setting up branch and worktree")
+        ctx.status("Phase 0", "Setting up worktree")
+        ctx.log("PHASE 0: Setting up worktree")
         worktree_path = create_worktree_via_claude(issue_url, work_dir / "worktree-setup.json", permission_mode)
+        ctx.log(f"Worktree created at: {worktree_path}")
 
-        log("Phase 1: Implementing plan")
+        ctx.status("Phase 1", "Implementing plan")
+        ctx.log("PHASE 1: Implementing plan")
         impl_file = run_claude(
             _implementation_prompt(issue_url),
             work_dir / "implementation.json",
@@ -533,9 +570,13 @@ def main() -> int:
         err = check_claude_error(impl_file)
         if err:
             print(f"Error during implementation: {err}", file=sys.stderr)
+            ctx.status("Error", "Implementation failed")
+            ctx.log(f"ERROR: Implementation failed: {err}")
+            ctx.notify("dev-loop aborted: implementation failed")
             return 1
 
-        log("Phase 1b: Creating PR")
+        ctx.status("Phase 1b", "Creating PR")
+        ctx.log("PHASE 1b: Creating PR")
         pr_file = run_claude(
             _pr_creation_prompt(issue_url),
             work_dir / "pr-creation.json",
@@ -545,6 +586,9 @@ def main() -> int:
         err = check_claude_error(pr_file)
         if err:
             print(f"Error during PR creation: {err}", file=sys.stderr)
+            ctx.status("Error", "PR creation failed")
+            ctx.log(f"ERROR: PR creation failed: {err}")
+            ctx.notify("dev-loop aborted: PR creation failed")
             return 1
 
         pr_url = extract_pr_url(work_dir / "pr-creation.json")
@@ -555,7 +599,8 @@ def main() -> int:
             )
             return 1
 
-        print(f"PR created: {pr_url}")
+        ctx.log(f"PR created: {pr_url}")
+        ctx.notify("PR created \u2014 starting review loop")
         gh_assign_self(pr_url)
         gh_comment(
             pr_url,
@@ -568,11 +613,13 @@ def main() -> int:
 
     # --- Phase 2: Review loop ---
     for iteration in range(1, args.max_iterations + 1):
-        log(f"Review iteration {iteration} of {args.max_iterations}")
+        ctx.status(f"Review {iteration}/{args.max_iterations}", "Starting")
+        ctx.log(f"REVIEW {iteration}/{args.max_iterations}: Starting")
         gh_comment(pr_url, f"### dev-loop: Review iteration {iteration}/{args.max_iterations}")
 
         # Step 1: Simplify
-        log(f"Step 1/{iteration}: Simplify")
+        ctx.status(f"Review {iteration}/{args.max_iterations}", "Simplify")
+        ctx.log(f"REVIEW {iteration}/{args.max_iterations}: Simplify")
         simplify_file = run_claude(
             "/simplify",
             work_dir / f"simplify-{iteration}.json",
@@ -581,7 +628,9 @@ def main() -> int:
         )
         err = check_claude_error(simplify_file)
         if err:
-            log(f"Error during simplify: {err}")
+            ctx.status("Error", f"Simplify failed: {err}")
+            ctx.log(f"ERROR: Simplify failed: {err}")
+            ctx.notify("dev-loop aborted: simplify failed")
             gh_comment(pr_url, f"### dev-loop: Aborted\n\nError during simplify step: {err}")
             return 1
 
@@ -594,7 +643,8 @@ def main() -> int:
         )
 
         # Step 2: Code review + Security review in parallel
-        log(f"Step 2/{iteration}: Code review + Security review (parallel)")
+        ctx.status(f"Review {iteration}/{args.max_iterations}", "Code review + Security review (parallel)")
+        ctx.log(f"REVIEW {iteration}/{args.max_iterations}: Code review + Security review (parallel)")
 
         cwd_str = str(worktree_path) if worktree_path else None
         with ProcessPoolExecutor(max_workers=2) as executor:
@@ -615,22 +665,26 @@ def main() -> int:
             code_review_future.result()
             security_review_future.result()
 
-        print(f"  Code review: {work_dir / f'code-review-{iteration}.json'}")
-        print(f"  Security review: {work_dir / f'security-review-{iteration}.json'}")
+        ctx.log(f"Code review: {work_dir / f'code-review-{iteration}.json'}")
+        ctx.log(f"Security review: {work_dir / f'security-review-{iteration}.json'}")
 
         # Check for errors in review sessions
         for review_name in ("code-review", "security-review"):
             review_file = work_dir / f"{review_name}-{iteration}.json"
             err = check_claude_error(review_file)
             if err:
-                log(f"Error during {review_name}: {err}")
+                ctx.status("Error", f"{review_name} failed")
+                ctx.log(f"ERROR: {review_name} failed: {err}")
+                ctx.notify(f"dev-loop aborted: {review_name} failed")
                 gh_comment(pr_url, f"### dev-loop: Aborted\n\nError during {review_name}: {err}")
                 return 1
 
         # Step 2b: Wait for CI checks
-        log(f"Step 2b/{iteration}: Checking CI/CD status")
+        ctx.status(f"Review {iteration}/{args.max_iterations}", "Checking CI/CD")
+        ctx.log(f"REVIEW {iteration}/{args.max_iterations}: Checking CI/CD")
         pr_number = extract_pr_number(pr_url)
         ci_status, ci_failures = wait_for_ci(pr_number)
+        ctx.log(f"REVIEW {iteration}/{args.max_iterations}: CI status \u2014 {ci_status}")
 
         if ci_failures:
             gh_comment(pr_url, f"### dev-loop: CI/CD failures (iteration {iteration})\n\n```\n{ci_failures}\n```")
@@ -639,11 +693,12 @@ def main() -> int:
         code_review_text = extract_result(work_dir / f"code-review-{iteration}.json")
         security_review_text = extract_result(work_dir / f"security-review-{iteration}.json")
 
-        log(f"Step 3/{iteration}: Decision gate")
+        ctx.status(f"Review {iteration}/{args.max_iterations}", "Decision gate")
+        ctx.log(f"REVIEW {iteration}/{args.max_iterations}: Decision gate")
 
         # CI failure automatically means YES (must fix)
         if ci_status == "fail":
-            print("  CI failed — forcing fix iteration", flush=True)
+            ctx.log("CI failed \u2014 forcing fix iteration")
             decision = "YES"
         else:
             run_claude(
@@ -653,8 +708,13 @@ def main() -> int:
             )
             decision = extract_result(work_dir / f"decision-{iteration}.json")
 
+        decision_label = "YES (issues found)" if "YES" in decision.upper() else "NO (clean)"
+        ctx.log(f"REVIEW {iteration}/{args.max_iterations}: Decision \u2014 {decision_label}")
+
         if "NO" in decision.upper():
-            log("No critical issues found. PR is ready!")
+            ctx.status("Done", f"No critical issues after {iteration} iterations")
+            ctx.log(f"DONE: PR ready after {iteration} iterations")
+            ctx.notify(f"PR ready for review after {iteration} iterations")
             pr_num = extract_pr_number(pr_url)
             if args.reviewers:
                 gh_request_review(pr_num, args.reviewers)
@@ -666,12 +726,16 @@ def main() -> int:
                     "CI passing. PR is ready for human review."
                 ),
             )
-            print(f"PR: {pr_url}")
-            print(f"Review artifacts: {work_dir}")
+            ctx.log(f"PR: {pr_url}")
+            ctx.log(f"Review artifacts: {work_dir}")
             return 0
 
         # Step 4: Fix issues
-        log(f"Step 4/{iteration}: Fixing issues")
+        ctx.notify(f"Review {iteration}/{args.max_iterations}: Critical issues found, fixing...")
+        if ci_status == "fail":
+            ctx.notify(f"Review {iteration}/{args.max_iterations}: CI failed, fixing...")
+        ctx.status(f"Review {iteration}/{args.max_iterations}", "Fixing issues")
+        ctx.log(f"REVIEW {iteration}/{args.max_iterations}: Fixing issues")
         run_claude(
             _fix_prompt(pr_url, code_review_text, security_review_text, ci_failures),
             work_dir / f"fix-{iteration}.json",
@@ -679,7 +743,9 @@ def main() -> int:
             cwd=worktree_path,
         )
 
-    log(f"Max iterations ({args.max_iterations}) reached. Review PR manually.")
+    ctx.status("Failed", f"Max iterations reached ({args.max_iterations})")
+    ctx.log(f"FAILED: Max iterations reached ({args.max_iterations})")
+    ctx.notify(f"PR needs manual review ({args.max_iterations} iterations exhausted)")
     pr_num = extract_pr_number(pr_url)
     if args.reviewers:
         gh_request_review(pr_num, args.reviewers)
@@ -690,8 +756,8 @@ def main() -> int:
             "There are still outstanding issues. Please review manually."
         ),
     )
-    print(f"PR: {pr_url}")
-    print(f"Review artifacts: {work_dir}")
+    ctx.log(f"PR: {pr_url}")
+    ctx.log(f"Review artifacts: {work_dir}")
     return 1
 
 

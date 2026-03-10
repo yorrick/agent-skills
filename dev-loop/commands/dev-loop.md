@@ -43,24 +43,32 @@ gh issue create --title "<descriptive title from the plan>" --body "$(cat <plan-
 
 Once the issue is created, run the dev-loop orchestrator script.
 
-Before running the script, confirm with the user:
-- Show them the GitHub issue URL
-- Show the exact command that will be run
-- Ask if they want to adjust --max-iterations (default 3), use --skip-permissions, or set --reviewers
+Before running the script:
+1. Check if the current branch already has an open PR: `gh pr view --json url --jq .url`
+2. If a PR exists, tell the user and recommend using `--continue-pr` to implement on the current branch and review against the existing PR
+3. Show them the GitHub issue URL
+4. Show the exact command that will be run
+5. Ask if they want to adjust --max-iterations (default 3), use --skip-permissions, or set --reviewers
 
 Then execute the script using the Bash tool. IMPORTANT: pass the issue URL (not the plan file path) and options to the script. Do NOT pass the feature description — that was only for Phase 1.
 
+Default mode (new branch + new PR):
+
 uv run "${CLAUDE_PLUGIN_ROOT}/scripts/dev-loop.py" <issue-url> [--max-iterations N] [--skip-permissions] [--reviewers user1,user2,org/team]
 
-Example:
+Continue mode (existing branch + existing PR):
 
-uv run "${CLAUDE_PLUGIN_ROOT}/scripts/dev-loop.py" https://github.com/user/repo/issues/42 --max-iterations 5 --skip-permissions --reviewers alice,bob
+uv run "${CLAUDE_PLUGIN_ROOT}/scripts/dev-loop.py" <issue-url> --continue-pr [--max-iterations N] [--skip-permissions] [--reviewers user1,user2,org/team]
+
+Review-only mode (skip implementation, just review):
+
+uv run "${CLAUDE_PLUGIN_ROOT}/scripts/dev-loop.py" <issue-url> --review-only <pr-url> [--max-iterations N] [--skip-permissions] [--reviewers user1,user2,org/team]
 
 The script will:
-1. Create a feature branch and worktree (never commits on main)
+1. Create a feature branch and worktree (default mode) or use the current branch (--continue-pr)
 2. Fetch the plan from the GitHub issue
 3. Implement the plan (using executing-plans skill) including running lint, typecheck, format, and tests
-4. Create a PR linked to the issue
+4. Create a PR linked to the issue (default mode) or push to the existing PR (--continue-pr)
 5. Run a review loop:
    - /simplify — clean up the code
    - /code-review:code-review + /security-review — in parallel

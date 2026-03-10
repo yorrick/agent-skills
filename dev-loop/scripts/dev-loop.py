@@ -616,7 +616,7 @@ def main() -> int:
         )
 
         pr_url = detect_pr_url()
-        ctx.log(f"Detected PR: {pr_url}")
+        ctx.log(f"Using existing PR: {pr_url}")
         ctx.notify("Implementation complete (continue-pr) -- starting review loop")
         gh_comment(
             pr_url,

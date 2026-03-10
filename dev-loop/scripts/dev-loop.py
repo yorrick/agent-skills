@@ -5,7 +5,7 @@
 """Automated development loop: implement -> simplify -> review -> fix -> repeat.
 
 Usage:
-    dev-loop.py <issue-url> [--max-iterations N] [--pr-url URL] [--skip-permissions]
+    dev-loop.py <issue-url> [--max-iterations N] [--review-only URL] [--continue-pr] [--skip-permissions]
 """
 
 from __future__ import annotations
@@ -341,6 +341,27 @@ def fetch_issue_body(issue_url: str) -> str:
     return result.stdout.strip()
 
 
+def detect_pr_url() -> str:
+    """Detect the PR URL for the current branch using gh CLI."""
+    result = subprocess.run(
+        ["gh", "pr", "view", "--json", "url", "--jq", ".url"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        print(
+            "Error: no PR found for the current branch. "
+            "Create a PR first or use the default mode.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    url = result.stdout.strip()
+    if _ctx:
+        _ctx.log(f"Detected PR: {url}")
+    return url
+
+
 def create_worktree_via_claude(issue_url: str, output_file: Path, permission_mode: str = "default") -> Path:
     """Use Claude with superpowers:using-git-worktrees to create a worktree."""
     issue_number = extract_issue_number(issue_url)
@@ -532,7 +553,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Automated development loop")
     parser.add_argument("issue_url", help="GitHub issue URL containing the implementation plan")
     parser.add_argument("--max-iterations", type=int, default=3, help="Max review iterations (default: 3)")
-    parser.add_argument("--pr-url", default="", help="Skip implementation, review existing PR")
+    parser.add_argument("--review-only", default="", help="Skip implementation, review existing PR")
+    parser.add_argument(
+        "--continue-pr", action="store_true",
+        help="Continue implementing in current directory, push, and review existing PR",
+    )
     parser.add_argument("--skip-permissions", action="store_true", help="Run with bypassPermissions mode")
     parser.add_argument(
         "--reviewers", default="", help="Comma-separated GitHub usernames or team slugs to request review from"
@@ -548,7 +573,7 @@ def main() -> int:
         return 1
 
     permission_mode = "bypassPermissions" if args.skip_permissions else "default"
-    pr_url = args.pr_url
+    pr_url = args.review_only
     ctx = RunContext()
     global _ctx
     _ctx = ctx
@@ -557,12 +582,52 @@ def main() -> int:
     ctx.log(f"Run directory: {work_dir}")
     ctx.log(
         f"Options: max_iterations={args.max_iterations},"
+        f" continue_pr={args.continue_pr},"
         f" skip_permissions={args.skip_permissions}, reviewers={args.reviewers}"
     )
 
-    # --- Phase 1: Implementation (skip if --pr-url provided) ---
+    # --- Phase 1: Implementation ---
     worktree_path: Path | None = None
-    if not pr_url:
+    if args.continue_pr:
+        # --continue-pr: implement in current directory, push, detect PR, review
+        ctx.status("Phase 1", "Implementing plan (continue-pr)")
+        ctx.log("PHASE 1: Implementing plan in current directory (continue-pr)")
+        impl_file = run_claude(
+            _implementation_prompt(issue_url),
+            work_dir / "implementation.json",
+            permission_mode,
+            cwd=None,
+        )
+        err = check_claude_error(impl_file)
+        if err:
+            print(f"Error during implementation: {err}", file=sys.stderr)
+            ctx.status("Error", "Implementation failed")
+            ctx.log(f"ERROR: Implementation failed: {err}")
+            ctx.notify("dev-loop aborted: implementation failed")
+            return 1
+
+        ctx.status("Phase 1b", "Pushing commits (continue-pr)")
+        ctx.log("PHASE 1b: Pushing commits (continue-pr)")
+        run_claude(
+            "Push all commits on the current branch to the remote.",
+            work_dir / "push.json",
+            permission_mode,
+            cwd=None,
+        )
+
+        pr_url = detect_pr_url()
+        ctx.log(f"Detected PR: {pr_url}")
+        ctx.notify("Implementation complete (continue-pr) -- starting review loop")
+        gh_comment(
+            pr_url,
+            (
+                "### dev-loop: Implementation complete (continue-pr)\n\n"
+                "Starting automated review loop (simplify + code review + security review).\n\n"
+                f"Max iterations: {args.max_iterations}"
+            ),
+        )
+
+    elif not pr_url:
         ctx.status("Phase 0", "Setting up worktree")
         ctx.log("PHASE 0: Setting up worktree")
         worktree_path = create_worktree_via_claude(issue_url, work_dir / "worktree-setup.json", permission_mode)

@@ -14,11 +14,12 @@ Phase 1: Interactive brainstorming + planning (you participate)
 Phase 2: Automated loop (script takes over)
     |
     +-> Implement plan (with lint, typecheck, format, tests)
-    +-> Create PR
+    +-> Create PR (or push to existing PR with --continue-pr)
     |
     +-> Review loop (repeats until clean or max iterations):
         +-> /simplify
         +-> /code-review + /security-review (parallel)
+        +-> Wait for CI/CD checks
         +-> Decision: Critical/Important issues?
             yes -> fix issues, loop back
             no  -> done, PR is ready
@@ -28,24 +29,17 @@ Phase 2: Automated loop (script takes over)
 
 This plugin composes several built-in and plugin-provided commands:
 
-- `/simplify` — built-in or from a plugin
+- `/simplify` — from the [code-simplifier plugin](https://github.com/anthropics/claude-code-plugins)
 - `/code-review:code-review` — from the [code-review plugin](https://github.com/anthropics/claude-code-plugins)
 - `/security-review` — built-in
 - `superpowers:brainstorming`, `superpowers:writing-plans`, `superpowers:executing-plans` — from the [superpowers plugin](https://github.com/obra/superpowers)
-- `gh` CLI — for creating PRs
+- `gh` CLI — for creating PRs and interacting with GitHub
+- `uv` — for running Python scripts ([install](https://docs.astral.sh/uv/))
 
 ## Installation
 
 ```bash
-claude plugin add yorrickjansen/claude-dev-loop
-```
-
-Or add to your `.claude/plugins.json`:
-
-```json
-{
-  "plugins": ["yorrickjansen/claude-dev-loop"]
-}
+claude plugin install dev-loop@yorrick
 ```
 
 ## Commands
@@ -55,22 +49,23 @@ Or add to your `.claude/plugins.json`:
 Full lifecycle: interactive brainstorming and planning, then automated implementation and review loop.
 
 ```
-/dev-loop
-/dev-loop --max-iterations 5
-/dev-loop --skip-permissions
+/dev-loop add user authentication
 ```
 
-**Options:**
+**Script options (passed during Phase 2 handoff):**
 - `--max-iterations N` — Max review loop iterations (default: 3)
 - `--skip-permissions` — Run headless sessions with bypassPermissions mode
+- `--continue-pr` — Use current branch and existing PR instead of creating a new worktree and PR
+- `--reviewers user1,user2` — Request review from GitHub users or teams
+- `--review-only <pr-url>` — Skip implementation, run review loop only
 
 ### `/review-loop`
 
 Skip brainstorming and implementation — run the review loop on an existing PR.
 
 ```
-/review-loop docs/plans/2026-03-06-auth.md --pr-url https://github.com/org/repo/pull/42
-/review-loop docs/plans/2026-03-06-auth.md --pr-url https://github.com/org/repo/pull/42 --max-iterations 5
+/review-loop <issue-url> --review-only <pr-url>
+/review-loop <issue-url> --review-only <pr-url> --max-iterations 5
 ```
 
 ### Standalone script
@@ -78,29 +73,88 @@ Skip brainstorming and implementation — run the review loop on an existing PR.
 You can also run the orchestrator script directly:
 
 ```bash
-# Full cycle from a plan
-~/.claude/plugins/*/dev-loop/scripts/dev-loop.sh docs/plans/2026-03-06-auth.md
+# Full cycle (creates worktree + PR)
+uv run scripts/dev-loop.py https://github.com/org/repo/issues/42
 
-# Review loop on existing PR
-~/.claude/plugins/*/dev-loop/scripts/dev-loop.sh docs/plans/2026-03-06-auth.md --pr-url https://github.com/org/repo/pull/42
+# Continue on existing branch/PR
+uv run scripts/dev-loop.py https://github.com/org/repo/issues/42 --continue-pr
+
+# Review loop only
+uv run scripts/dev-loop.py https://github.com/org/repo/issues/42 --review-only https://github.com/org/repo/pull/43
 
 # See all options
-~/.claude/plugins/*/dev-loop/scripts/dev-loop.sh --help
+uv run scripts/dev-loop.py --help
 ```
 
-## How the review loop works
+## Monitoring
 
-Each iteration of the review loop spawns separate `claude -p` sessions:
+Monitor progress from another terminal while the script runs:
 
-1. **Simplify** — runs `/simplify` to clean up code, commits fixes
-2. **Code review** — runs `/code-review:code-review` on the PR (parallel)
-3. **Security review** — runs `/security-review` (parallel)
-4. **Decision gate** — asks Claude if there are Critical/Important issues
-5. **Fix** — if issues found, fixes them and runs quality gates again
+```bash
+# One-line status
+watch -n1 cat .dev-loop/latest/status.txt
 
-The loop exits when either no Critical/Important issues remain or max iterations is reached.
+# Full log
+tail -f .dev-loop/latest/dev-loop.log
+```
 
-All intermediate outputs are saved to a temp directory for inspection.
+## Local development
+
+### Setup
+
+```bash
+git clone git@github.com:yorrick/claude-code-plugins.git
+cd claude-code-plugins/dev-loop
+```
+
+### Code quality
+
+Ruff for linting/formatting, pyright for type checking:
+
+```bash
+cd claude-code-plugins  # run from monorepo root
+uv run ruff check dev-loop/scripts/dev-loop.py
+uv run pyright dev-loop/scripts/dev-loop.py
+```
+
+### Running integration tests
+
+The integration test creates a temporary GitHub repo, runs the full dev-loop, and verifies the results. It takes ~30-45 minutes and uses your `gh` CLI credentials.
+
+```bash
+uv run dev-loop/tests/test_integration.py
+```
+
+Add `--no-cleanup` to keep the temporary GitHub repo and local files for debugging:
+
+```bash
+uv run dev-loop/tests/test_integration.py --no-cleanup
+```
+
+### Project structure
+
+```
+dev-loop/
+├── .claude-plugin/
+│   └── plugin.json          # Plugin manifest (name, version)
+├── commands/
+│   ├── dev-loop.md           # /dev-loop command (orchestrates full lifecycle)
+│   └── review-loop.md        # /review-loop command (review only)
+├── scripts/
+│   └── dev-loop.py           # Main orchestrator script (runs headless claude sessions)
+├── tests/
+│   └── test_integration.py   # End-to-end integration test
+├── docs/
+│   └── plans/                # Design and implementation plan documents
+├── CLAUDE.md                 # Development guidelines for Claude
+└── README.md
+```
+
+### Publishing a new version
+
+1. Update the version in `.claude-plugin/plugin.json`
+2. Commit and push to `main`
+3. The plugin registry picks up the new version automatically
 
 ## License
 

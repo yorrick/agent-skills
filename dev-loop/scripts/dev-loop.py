@@ -576,6 +576,23 @@ def main() -> int:
         print("Error: --continue-pr and --review-only are mutually exclusive", file=sys.stderr)
         return 1
 
+    if args.continue_pr:
+        branch_result = subprocess.run(
+            ["git", "branch", "--show-current"], capture_output=True, text=True, timeout=10
+        )
+        current_branch = branch_result.stdout.strip()
+        if current_branch in ("main", "master"):
+            print(
+                f"Error: --continue-pr cannot be used on '{current_branch}'. "
+                "Check out a feature branch first.",
+                file=sys.stderr,
+            )
+            return 1
+
+    if args.review_only and not re.match(r"https://github\.com/.+/pull/\d+", args.review_only):
+        print(f"Error: invalid GitHub PR URL: {args.review_only}", file=sys.stderr)
+        return 1
+
     permission_mode = "bypassPermissions" if args.skip_permissions else "default"
     pr_url = args.review_only
     ctx = RunContext()

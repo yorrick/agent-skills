@@ -25,15 +25,20 @@ from pathlib import Path
 class RunContext:
     """Manages a per-run directory under .dev-loop/runs/ with status, log, and notification helpers."""
 
-    def __init__(self) -> None:
-        repo_root = Path(
-            subprocess.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout.strip()
+    @staticmethod
+    def _git_root() -> Path:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
+        if result.returncode == 0 and result.stdout.strip():
+            return Path(result.stdout.strip())
+        return Path.cwd()
+
+    def __init__(self) -> None:
+        repo_root = self._git_root()
         self._start = time.monotonic()
 
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S")
@@ -90,12 +95,13 @@ class RunContext:
 
     def notify(self, message: str) -> None:
         """Send a macOS notification. Silently fails if unavailable."""
+        safe = message.replace("\\", "\\\\").replace('"', '\\"')
         try:
             subprocess.run(
                 [
                     "osascript",
                     "-e",
-                    f'display notification "{message}" with title "dev-loop"',
+                    f'display notification "{safe}" with title "dev-loop"',
                 ],
                 capture_output=True,
                 timeout=5,

@@ -13,3 +13,4 @@
 - The shebang for scripts should be `#!/usr/bin/env -S uv run --script`.
 - Scripts must not require a virtual environment or pre-installed packages beyond Python 3.10+.
 - Run `uv run ruff check` and `uv run pyright` from the repo root after any Python change.
+- After any change to the dev-loop, run the integration test: `uv run dev-loop/tests/test_integration.py`

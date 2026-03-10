@@ -18,3 +18,7 @@ The script will:
 3. Wait for CI/CD checks to complete (if any exist)
 4. If Critical/Important issues or CI failures found: fix and loop
 5. If clean and CI passing: done
+
+Monitor progress from another terminal:
+- Status: `watch -n1 cat .dev-loop/latest/status.txt`
+- Full log: `tail -f .dev-loop/latest/dev-loop.log`

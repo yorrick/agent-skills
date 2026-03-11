@@ -550,6 +550,34 @@ def _decision_prompt(code_review_text: str, security_review_text: str, ci_failur
     return "".join(parts)
 
 
+def _smoke_test_prompt(issue_url: str) -> str:
+    issue_number = extract_issue_number(issue_url)
+    return (
+        f"Run a smoke test to verify the implementation actually works.\n\n"
+        f"1. Fetch the implementation plan from GitHub issue {issue_url} using:\n"
+        f"   gh issue view {issue_number} --json body --jq .body\n\n"
+        "2. Look for a 'Validation' section (## Validation header) in the plan.\n\n"
+        "3. If a Validation section exists, execute those validation instructions exactly:\n"
+        "   - Start any long-running processes (servers, etc.) in the background\n"
+        "   - Use a non-standard port (e.g., 8099) to avoid conflicts\n"
+        "   - Wait up to 30 seconds for the service to be ready (poll with curl or similar)\n"
+        "   - Run each specified check\n"
+        "   - ALWAYS kill all background processes before exiting, even on failure\n"
+        "   - Report pass/fail for each check\n\n"
+        "4. If NO Validation section exists, fall back to convention-based discovery:\n"
+        "   - Read README.md, CLAUDE.md, pyproject.toml, package.json, Makefile, docker-compose.yml\n"
+        "   - Figure out how to run the application locally\n"
+        "   - Perform a basic sanity check: does it start? Does --help work? "
+        "Does a health endpoint respond?\n"
+        "   - ALWAYS kill all background processes before exiting\n\n"
+        "5. End your response with EXACTLY one of these lines (no extra text after it):\n"
+        "   SMOKE_TEST_PASS\n"
+        "   SMOKE_TEST_FAIL: <brief summary of what failed>\n\n"
+        "IMPORTANT: You MUST clean up all background processes before finishing. "
+        "Use 'kill %1' or 'kill $PID' to stop any servers you started."
+    )
+
+
 def _fix_prompt(pr_url: str, code_review_text: str, security_review_text: str, ci_failures: str = "") -> str:
     parts = [
         f"The following issues were found during review of PR {pr_url}. "

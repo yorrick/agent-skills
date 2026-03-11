@@ -14,6 +14,7 @@ Phase 1: Interactive brainstorming + planning (you participate)
 Phase 2: Automated loop (script takes over)
     |
     +-> Implement plan (with lint, typecheck, format, tests)
+    +-> Smoke test (verify app works locally using plan's Validation section)
     +-> Create PR (or push to existing PR with --continue-pr)
     |
     +-> Review loop (repeats until clean or max iterations):
@@ -21,7 +22,7 @@ Phase 2: Automated loop (script takes over)
         +-> /code-review + /security-review (parallel)
         +-> Wait for CI/CD checks
         +-> Decision: Critical/Important issues?
-            yes -> fix issues, loop back
+            yes -> fix issues (+ re-run smoke test), loop back
             no  -> done, PR is ready
 ```
 

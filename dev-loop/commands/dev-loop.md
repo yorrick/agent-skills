@@ -28,6 +28,8 @@ The brainstorming skill will transition to the writing-plans skill automatically
 
 Note the plan file path when done.
 
+During brainstorming, make sure the spec includes a **## Validation** section describing how to verify the feature works locally (e.g., start the server and hit an endpoint, run the CLI with specific args). This is used by the automated smoke test step after implementation.
+
 ## Phase 1b: Create GitHub issue with the plan
 
 After the plan is written and approved:
@@ -68,8 +70,9 @@ The script will:
 1. Create a feature branch and worktree (default mode) or use the current branch (--continue-pr)
 2. Fetch the plan from the GitHub issue
 3. Implement the plan (using executing-plans skill) including running lint, typecheck, format, and tests
-4. Create a PR linked to the issue (default mode) or push to the existing PR (--continue-pr)
-5. Run a review loop:
+4. Run a smoke test — verify the application starts and works locally using validation instructions from the plan (falls back to convention-based discovery if no validation section exists)
+5. Create a PR linked to the issue (default mode) or push to the existing PR (--continue-pr)
+6. Run a review loop:
    - /simplify — clean up the code
    - /code-review:code-review + /security-review — in parallel
    - Wait for CI/CD checks to complete (if any exist)

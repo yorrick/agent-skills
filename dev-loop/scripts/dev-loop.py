@@ -362,6 +362,7 @@ def detect_pr_url() -> str:
     return url
 
 
+
 def create_worktree_via_claude(issue_url: str, output_file: Path, permission_mode: str = "default") -> Path:
     """Use Claude with superpowers:using-git-worktrees to create a worktree."""
     issue_number = extract_issue_number(issue_url)
@@ -562,7 +563,7 @@ def _fix_prompt(pr_url: str, code_review_text: str, security_review_text: str, c
 def main() -> int:
     parser = argparse.ArgumentParser(description="Automated development loop")
     parser.add_argument("issue_url", help="GitHub issue URL containing the implementation plan")
-    parser.add_argument("--max-iterations", type=int, default=3, help="Max review iterations (default: 3)")
+    parser.add_argument("--max-iterations", type=int, default=5, help="Max review iterations (default: 5)")
     parser.add_argument("--review-only", default="", help="Skip implementation, review existing PR")
     parser.add_argument(
         "--continue-pr", action="store_true",

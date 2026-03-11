@@ -283,7 +283,7 @@ def run_dev_loop_script(project_dir: Path, issue_url: str) -> subprocess.Complet
         issue_url,
         "--skip-permissions",
         "--max-iterations",
-        "1",
+        "2",
     ]
 
     start = time.monotonic()

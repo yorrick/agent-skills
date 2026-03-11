@@ -16,7 +16,7 @@ The script will:
 1. Run /simplify and commit fixes
 2. Run /code-review:code-review + /security-review in parallel
 3. Wait for CI/CD checks to complete (if any exist)
-4. If Critical/Important issues or CI failures found: fix and loop
+4. If Critical/Important issues or CI failures found: fix (including re-running smoke test validation from the plan) and loop
 5. If clean and CI passing: done
 
 Monitor progress from another terminal:

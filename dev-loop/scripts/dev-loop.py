@@ -351,8 +351,7 @@ def detect_pr_url() -> str:
     )
     if result.returncode != 0 or not result.stdout.strip():
         print(
-            "Error: no PR found for the current branch. "
-            "Create a PR first or use the default mode.",
+            "Error: no PR found for the current branch. Create a PR first or use the default mode.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -360,7 +359,6 @@ def detect_pr_url() -> str:
     if _ctx:
         _ctx.log(f"Detected PR: {url}")
     return url
-
 
 
 def create_worktree_via_claude(issue_url: str, output_file: Path, permission_mode: str = "default") -> Path:
@@ -377,7 +375,7 @@ def create_worktree_via_claude(issue_url: str, output_file: Path, permission_mod
         "Do NOT use superpowers:finishing-a-development-branch — just create the worktree."
     )
 
-    run_claude(prompt, output_file, permission_mode)
+    run_claude(prompt, output_file, permission_mode, model="sonnet", effort="high")
 
     result_text = extract_result(output_file)
     match = re.search(r"WORKTREE_PATH=(.+)", result_text)
@@ -425,10 +423,15 @@ def create_worktree_via_claude(issue_url: str, output_file: Path, permission_mod
 
 
 def run_claude_bg(
-    prompt: str, output_file: Path, permission_mode: str = "default", cwd: str | None = None
+    prompt: str,
+    output_file: Path,
+    permission_mode: str = "default",
+    cwd: str | None = None,
+    model: str = "opus",
+    effort: str = "high",
 ) -> None:
     """Wrapper for ProcessPoolExecutor — must be top-level function."""
-    run_claude(prompt, output_file, permission_mode, Path(cwd) if cwd else None)
+    run_claude(prompt, output_file, permission_mode, Path(cwd) if cwd else None, model=model, effort=effort)
 
 
 def check_dependencies() -> bool:
@@ -504,10 +507,7 @@ def _pr_creation_prompt(issue_url: str) -> str:
 
 def _security_review_prompt(pr_url: str, previous_findings: str = "") -> str:
     pr_number = extract_pr_number(pr_url)
-    parts = [
-        f"/security-review\n\n"
-        f"Review the changes in PR {pr_url}.\n\n"
-    ]
+    parts = [f"/security-review\n\nReview the changes in PR {pr_url}.\n\n"]
     if previous_findings:
         parts.append(
             "IMPORTANT: A previous security review iteration found the following issues. "
@@ -566,7 +566,8 @@ def main() -> int:
     parser.add_argument("--max-iterations", type=int, default=5, help="Max review iterations (default: 5)")
     parser.add_argument("--review-only", default="", help="Skip implementation, review existing PR")
     parser.add_argument(
-        "--continue-pr", action="store_true",
+        "--continue-pr",
+        action="store_true",
         help="Continue implementing in current directory, push, and review existing PR",
     )
     parser.add_argument("--skip-permissions", action="store_true", help="Run with bypassPermissions mode")
@@ -588,14 +589,11 @@ def main() -> int:
         return 1
 
     if args.continue_pr:
-        branch_result = subprocess.run(
-            ["git", "branch", "--show-current"], capture_output=True, text=True, timeout=10
-        )
+        branch_result = subprocess.run(["git", "branch", "--show-current"], capture_output=True, text=True, timeout=10)
         current_branch = branch_result.stdout.strip()
         if current_branch in ("main", "master"):
             print(
-                f"Error: --continue-pr cannot be used on '{current_branch}'. "
-                "Check out a feature branch first.",
+                f"Error: --continue-pr cannot be used on '{current_branch}'. Check out a feature branch first.",
                 file=sys.stderr,
             )
             return 1
@@ -629,6 +627,8 @@ def main() -> int:
             work_dir / "implementation.json",
             permission_mode,
             cwd=None,
+            model="opus",
+            effort="high",
         )
         err = check_claude_error(impl_file)
         if err:
@@ -645,6 +645,8 @@ def main() -> int:
             work_dir / "push.json",
             permission_mode,
             cwd=None,
+            model="sonnet",
+            effort="low",
         )
         err = check_claude_error(push_file)
         if err:
@@ -679,6 +681,8 @@ def main() -> int:
             work_dir / "implementation.json",
             permission_mode,
             cwd=worktree_path,
+            model="opus",
+            effort="high",
         )
         err = check_claude_error(impl_file)
         if err:
@@ -695,6 +699,8 @@ def main() -> int:
             work_dir / "pr-creation.json",
             permission_mode,
             cwd=worktree_path,
+            model="sonnet",
+            effort="low",
         )
         err = check_claude_error(pr_file)
         if err:
@@ -739,6 +745,8 @@ def main() -> int:
             work_dir / f"simplify-{iteration}.json",
             permission_mode,
             cwd=worktree_path,
+            model="sonnet",
+            effort="high",
         )
         err = check_claude_error(simplify_file)
         if err:
@@ -754,6 +762,8 @@ def main() -> int:
             work_dir / f"simplify-commit-{iteration}.json",
             permission_mode,
             cwd=worktree_path,
+            model="sonnet",
+            effort="low",
         )
 
         # Step 2: Code review + Security review in parallel
@@ -768,6 +778,8 @@ def main() -> int:
                 work_dir / f"code-review-{iteration}.json",
                 permission_mode,
                 cwd_str,
+                "opus",
+                "high",
             )
             security_review_future: Future = executor.submit(
                 run_claude_bg,
@@ -775,6 +787,8 @@ def main() -> int:
                 work_dir / f"security-review-{iteration}.json",
                 permission_mode,
                 cwd_str,
+                "opus",
+                "high",
             )
             code_review_future.result()
             security_review_future.result()
@@ -820,6 +834,8 @@ def main() -> int:
                 _decision_prompt(code_review_text, security_review_text),
                 work_dir / f"decision-{iteration}.json",
                 permission_mode,
+                model="sonnet",
+                effort="low",
             )
             decision = extract_result(work_dir / f"decision-{iteration}.json")
 
@@ -856,6 +872,8 @@ def main() -> int:
             work_dir / f"fix-{iteration}.json",
             permission_mode,
             cwd=worktree_path,
+            model="opus",
+            effort="high",
         )
 
     ctx.status("Failed", f"Max iterations reached ({args.max_iterations})")

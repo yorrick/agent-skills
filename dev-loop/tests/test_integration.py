@@ -96,6 +96,15 @@ Expected: All tests pass.
 git add src/calculator/core.py tests/test_core.py
 git commit -m "feat: add multiply and divide functions"
 ```
+
+## Validation
+
+### Sanity check
+- Run: `uv run python -c "from calculator.core import multiply, divide; print(multiply(2, 3))"` — exits 0, prints `6`
+- Run: `uv run python -c "from calculator.core import divide; print(divide(10, 2))"` — exits 0, prints `5.0`
+
+### Functional checks
+- `uv run pytest tests/ -v` exits 0 with all tests passing
 """
 
 TIMEOUT_SECONDS = 2700  # 45 minutes
@@ -398,6 +407,27 @@ def verify_local(project_dir: Path) -> None:
     )
     commit_count = len(log_result.stdout.strip().splitlines())
     check(commit_count > 1, f"Feature branch has commits ({commit_count} total)")
+
+    # Smoke test was executed
+    dev_loop_dir = project_dir / ".dev-loop"
+    if dev_loop_dir.exists():
+        run_dirs = sorted((dev_loop_dir / "runs").iterdir()) if (dev_loop_dir / "runs").exists() else []
+        if run_dirs:
+            latest_run = run_dirs[-1]
+            smoke_json = latest_run / "smoke-test.json"
+            check(smoke_json.exists(), "Smoke test was executed (smoke-test.json exists)")
+
+            # Check log mentions smoke test phase
+            log_file = latest_run / "dev-loop.log"
+            if log_file.exists():
+                log_content = log_file.read_text()
+                check("PHASE 1.5: Smoke test" in log_content, "Log contains smoke test phase")
+            else:
+                failed("dev-loop.log not found")
+        else:
+            failed("No run directories found in .dev-loop/runs/")
+    else:
+        failed(".dev-loop directory not found")
 
 
 # --- GitHub verification ---

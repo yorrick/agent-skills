@@ -592,7 +592,13 @@ def _smoke_test_fix_prompt(issue_url: str, smoke_test_output: str) -> str:
     )
 
 
-def _fix_prompt(pr_url: str, code_review_text: str, security_review_text: str, ci_failures: str = "") -> str:
+def _fix_prompt(
+    pr_url: str,
+    code_review_text: str,
+    security_review_text: str,
+    issue_url: str = "",
+    ci_failures: str = "",
+) -> str:
     parts = [
         f"The following issues were found during review of PR {pr_url}. "
         "Fix all Critical, Important, and Medium severity issues. After fixing, run the project's "
@@ -603,6 +609,18 @@ def _fix_prompt(pr_url: str, code_review_text: str, security_review_text: str, c
     ]
     if ci_failures:
         parts.append(f"\n\nCI/CD failures (MUST fix):\n{ci_failures}")
+    if issue_url:
+        issue_number = extract_issue_number(issue_url)
+        parts.append(
+            "\n\nAfter fixing all issues and running quality gates, re-run the smoke test validation. "
+            f"Fetch the plan from issue {issue_url} using:\n"
+            f"  gh issue view {issue_number} --json body --jq .body\n\n"
+            "Look for the Validation section. Execute the validation checks. "
+            "If any long-running processes are needed (servers, etc.), "
+            "start them in the background on a non-standard port (e.g., 8099), "
+            "run the checks, and kill them before finishing. "
+            "If smoke test checks fail, fix those too before committing."
+        )
     return "".join(parts)
 
 
@@ -914,7 +932,7 @@ def main() -> int:
         ctx.status(f"Review {iteration}/{args.max_iterations}", "Fixing issues")
         ctx.log(f"REVIEW {iteration}/{args.max_iterations}: Fixing issues")
         run_claude(
-            _fix_prompt(pr_url, code_review_text, security_review_text, ci_failures),
+            _fix_prompt(pr_url, code_review_text, security_review_text, issue_url=issue_url, ci_failures=ci_failures),
             work_dir / f"fix-{iteration}.json",
             permission_mode,
             cwd=worktree_path,

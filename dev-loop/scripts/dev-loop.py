@@ -501,11 +501,20 @@ def _pr_creation_prompt(issue_url: str) -> str:
     )
 
 
-def _security_review_prompt(pr_url: str) -> str:
+def _security_review_prompt(pr_url: str, previous_findings: str = "") -> str:
     pr_number = extract_pr_number(pr_url)
-    return (
+    parts = [
         f"/security-review\n\n"
         f"Review the changes in PR {pr_url}.\n\n"
+    ]
+    if previous_findings:
+        parts.append(
+            "IMPORTANT: A previous security review iteration found the following issues. "
+            "Check whether each one has been resolved in the current code. "
+            "If any remain unresolved, include them in your findings.\n\n"
+            f"Previous security review findings:\n{previous_findings}\n\n"
+        )
+    parts.append(
         "After completing the security review, you MUST post your findings as a comment "
         f"on the PR using the gh CLI:\n"
         f"  gh pr comment {pr_number} --body '<your findings>'\n\n"
@@ -515,12 +524,13 @@ def _security_review_prompt(pr_url: str) -> str:
         "IMPORTANT: Always post a comment with your findings, even if no issues were found, "
         "and even if other review comments already exist on the PR."
     )
+    return "".join(parts)
 
 
 def _decision_prompt(code_review_text: str, security_review_text: str, ci_failures: str = "") -> str:
     parts = [
-        "Based on these review findings, are there Critical or Important "
-        "issues that MUST be fixed before merging?\n\n"
+        "Based on these review findings, are there Critical, Important, or Medium "
+        "severity issues that MUST be fixed before merging?\n\n"
         f"Code Review findings:\n{code_review_text}\n\n"
         f"Security Review findings:\n{security_review_text}\n\n"
     ]
@@ -528,9 +538,9 @@ def _decision_prompt(code_review_text: str, security_review_text: str, ci_failur
         parts.append(f"CI/CD failures:\n{ci_failures}\n\n")
     parts.append(
         "Answer with EXACTLY one word: YES or NO. "
-        "Only answer YES if there are genuinely Critical or Important issues "
+        "Only answer YES if there are genuinely Critical, Important, or Medium severity issues "
         "OR if CI/CD checks are failing. "
-        "Minor suggestions and nitpicks do not count."
+        "Low severity suggestions and nitpicks do not count."
     )
     return "".join(parts)
 
@@ -538,7 +548,7 @@ def _decision_prompt(code_review_text: str, security_review_text: str, ci_failur
 def _fix_prompt(pr_url: str, code_review_text: str, security_review_text: str, ci_failures: str = "") -> str:
     parts = [
         f"The following issues were found during review of PR {pr_url}. "
-        "Fix all Critical and Important issues. After fixing, run the project's "
+        "Fix all Critical, Important, and Medium severity issues. After fixing, run the project's "
         "quality gates (lint, typecheck, format, tests) and make sure everything "
         "passes. Commit and push the fixes.\n\n"
         f"Code Review findings:\n{code_review_text}\n\n"
@@ -714,6 +724,7 @@ def main() -> int:
         )
 
     # --- Phase 2: Review loop ---
+    previous_security_findings = ""
     for iteration in range(1, args.max_iterations + 1):
         ctx.status(f"Review {iteration}/{args.max_iterations}", "Starting")
         ctx.log(f"REVIEW {iteration}/{args.max_iterations}: Starting")
@@ -759,7 +770,7 @@ def main() -> int:
             )
             security_review_future: Future = executor.submit(
                 run_claude_bg,
-                _security_review_prompt(pr_url),
+                _security_review_prompt(pr_url, previous_security_findings),
                 work_dir / f"security-review-{iteration}.json",
                 permission_mode,
                 cwd_str,
@@ -794,6 +805,7 @@ def main() -> int:
         # Step 3: Decision gate
         code_review_text = extract_result(work_dir / f"code-review-{iteration}.json")
         security_review_text = extract_result(work_dir / f"security-review-{iteration}.json")
+        previous_security_findings = security_review_text
 
         ctx.status(f"Review {iteration}/{args.max_iterations}", "Decision gate")
         ctx.log(f"REVIEW {iteration}/{args.max_iterations}: Decision gate")

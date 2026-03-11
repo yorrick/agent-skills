@@ -596,7 +596,7 @@ def _fix_prompt(
     pr_url: str,
     code_review_text: str,
     security_review_text: str,
-    issue_url: str = "",
+    issue_url: str | None = None,
     ci_failures: str = "",
 ) -> str:
     parts = [
@@ -622,6 +622,66 @@ def _fix_prompt(
             "If smoke test checks fail, fix those too before committing."
         )
     return "".join(parts)
+
+
+def _run_smoke_test_phase(
+    issue_url: str,
+    work_dir: Path,
+    permission_mode: str,
+    ctx: RunContext,
+    cwd: Path | None,
+    label: str,
+) -> bool:
+    """Run smoke test, optionally fix and retry once. Returns True on pass, False on abort."""
+    ctx.status("Phase 1.5", f"Smoke test{label}")
+    ctx.log(f"PHASE 1.5: Smoke test{label}")
+    smoke_file = run_claude(
+        _smoke_test_prompt(issue_url),
+        work_dir / "smoke-test.json",
+        permission_mode,
+        cwd=cwd,
+        model="opus",
+        effort="high",
+    )
+    err = check_claude_error(smoke_file)
+    smoke_result = extract_result(smoke_file) if not err else ""
+
+    if not err and "SMOKE_TEST_FAIL" not in smoke_result:
+        ctx.log(f"PHASE 1.5: Smoke test PASSED{label}")
+        return True
+
+    ctx.status("Phase 1.5", f"Fixing smoke test failures{label}")
+    ctx.log("PHASE 1.5: Smoke test FAILED, running fix cycle")
+    run_claude(
+        _smoke_test_fix_prompt(issue_url, smoke_result or err or ""),
+        work_dir / "smoke-test-fix.json",
+        permission_mode,
+        cwd=cwd,
+        model="opus",
+        effort="high",
+    )
+
+    ctx.status("Phase 1.5", f"Smoke test retry{label}")
+    ctx.log("PHASE 1.5: Smoke test retry")
+    smoke_retry_file = run_claude(
+        _smoke_test_prompt(issue_url),
+        work_dir / "smoke-test-retry.json",
+        permission_mode,
+        cwd=cwd,
+        model="opus",
+        effort="high",
+    )
+    retry_err = check_claude_error(smoke_retry_file)
+    retry_result = extract_result(smoke_retry_file) if not retry_err else ""
+
+    if retry_err or "SMOKE_TEST_FAIL" in retry_result:
+        ctx.status("Error", "Smoke test failed after fix attempt")
+        ctx.log("ERROR: Smoke test still failing after fix attempt")
+        ctx.notify("dev-loop aborted: smoke test failed after fix attempt")
+        return False
+
+    ctx.log(f"PHASE 1.5: Smoke test PASSED{label}")
+    return True
 
 
 def main() -> int:
@@ -703,51 +763,8 @@ def main() -> int:
             return 1
 
         # --- Phase 1.5: Smoke test ---
-        ctx.status("Phase 1.5", "Smoke test (continue-pr)")
-        ctx.log("PHASE 1.5: Smoke test (continue-pr)")
-        smoke_file = run_claude(
-            _smoke_test_prompt(issue_url),
-            work_dir / "smoke-test.json",
-            permission_mode,
-            cwd=None,
-            model="opus",
-            effort="high",
-        )
-        err = check_claude_error(smoke_file)
-        smoke_result = extract_result(smoke_file) if not err else ""
-
-        if err or "SMOKE_TEST_FAIL" in smoke_result:
-            ctx.status("Phase 1.5", "Fixing smoke test failures (continue-pr)")
-            ctx.log("PHASE 1.5: Smoke test FAILED, running fix cycle")
-            run_claude(
-                _smoke_test_fix_prompt(issue_url, smoke_result or err or ""),
-                work_dir / "smoke-test-fix.json",
-                permission_mode,
-                cwd=None,
-                model="opus",
-                effort="high",
-            )
-
-            ctx.status("Phase 1.5", "Smoke test retry (continue-pr)")
-            ctx.log("PHASE 1.5: Smoke test retry")
-            smoke_retry_file = run_claude(
-                _smoke_test_prompt(issue_url),
-                work_dir / "smoke-test-retry.json",
-                permission_mode,
-                cwd=None,
-                model="opus",
-                effort="high",
-            )
-            retry_err = check_claude_error(smoke_retry_file)
-            retry_result = extract_result(smoke_retry_file) if not retry_err else ""
-
-            if retry_err or "SMOKE_TEST_FAIL" in retry_result:
-                ctx.status("Error", "Smoke test failed after fix attempt")
-                ctx.log("ERROR: Smoke test still failing after fix attempt")
-                ctx.notify("dev-loop aborted: smoke test failed after fix attempt")
-                return 1
-
-        ctx.log("PHASE 1.5: Smoke test PASSED (continue-pr)")
+        if not _run_smoke_test_phase(issue_url, work_dir, permission_mode, ctx, cwd=None, label=" (continue-pr)"):
+            return 1
 
         ctx.status("Phase 1b", "Pushing commits (continue-pr)")
         ctx.log("PHASE 1b: Pushing commits (continue-pr)")
@@ -804,51 +821,8 @@ def main() -> int:
             return 1
 
         # --- Phase 1.5: Smoke test ---
-        ctx.status("Phase 1.5", "Smoke test")
-        ctx.log("PHASE 1.5: Smoke test")
-        smoke_file = run_claude(
-            _smoke_test_prompt(issue_url),
-            work_dir / "smoke-test.json",
-            permission_mode,
-            cwd=worktree_path,
-            model="opus",
-            effort="high",
-        )
-        err = check_claude_error(smoke_file)
-        smoke_result = extract_result(smoke_file) if not err else ""
-
-        if err or "SMOKE_TEST_FAIL" in smoke_result:
-            ctx.status("Phase 1.5", "Fixing smoke test failures")
-            ctx.log("PHASE 1.5: Smoke test FAILED, running fix cycle")
-            run_claude(
-                _smoke_test_fix_prompt(issue_url, smoke_result or err or ""),
-                work_dir / "smoke-test-fix.json",
-                permission_mode,
-                cwd=worktree_path,
-                model="opus",
-                effort="high",
-            )
-
-            ctx.status("Phase 1.5", "Smoke test retry")
-            ctx.log("PHASE 1.5: Smoke test retry")
-            smoke_retry_file = run_claude(
-                _smoke_test_prompt(issue_url),
-                work_dir / "smoke-test-retry.json",
-                permission_mode,
-                cwd=worktree_path,
-                model="opus",
-                effort="high",
-            )
-            retry_err = check_claude_error(smoke_retry_file)
-            retry_result = extract_result(smoke_retry_file) if not retry_err else ""
-
-            if retry_err or "SMOKE_TEST_FAIL" in retry_result:
-                ctx.status("Error", "Smoke test failed after fix attempt")
-                ctx.log("ERROR: Smoke test still failing after fix attempt")
-                ctx.notify("dev-loop aborted: smoke test failed after fix attempt")
-                return 1
-
-        ctx.log("PHASE 1.5: Smoke test PASSED")
+        if not _run_smoke_test_phase(issue_url, work_dir, permission_mode, ctx, cwd=worktree_path, label=""):
+            return 1
 
         ctx.status("Phase 1b", "Creating PR")
         ctx.log("PHASE 1b: Creating PR")

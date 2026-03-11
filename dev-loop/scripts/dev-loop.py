@@ -702,6 +702,53 @@ def main() -> int:
             ctx.notify("dev-loop aborted: implementation failed")
             return 1
 
+        # --- Phase 1.5: Smoke test ---
+        ctx.status("Phase 1.5", "Smoke test (continue-pr)")
+        ctx.log("PHASE 1.5: Smoke test (continue-pr)")
+        smoke_file = run_claude(
+            _smoke_test_prompt(issue_url),
+            work_dir / "smoke-test.json",
+            permission_mode,
+            cwd=None,
+            model="opus",
+            effort="high",
+        )
+        err = check_claude_error(smoke_file)
+        smoke_result = extract_result(smoke_file) if not err else ""
+
+        if err or "SMOKE_TEST_FAIL" in smoke_result:
+            ctx.status("Phase 1.5", "Fixing smoke test failures (continue-pr)")
+            ctx.log("PHASE 1.5: Smoke test FAILED, running fix cycle")
+            run_claude(
+                _smoke_test_fix_prompt(issue_url, smoke_result or err),
+                work_dir / "smoke-test-fix.json",
+                permission_mode,
+                cwd=None,
+                model="opus",
+                effort="high",
+            )
+
+            ctx.status("Phase 1.5", "Smoke test retry (continue-pr)")
+            ctx.log("PHASE 1.5: Smoke test retry")
+            smoke_retry_file = run_claude(
+                _smoke_test_prompt(issue_url),
+                work_dir / "smoke-test-retry.json",
+                permission_mode,
+                cwd=None,
+                model="opus",
+                effort="high",
+            )
+            retry_err = check_claude_error(smoke_retry_file)
+            retry_result = extract_result(smoke_retry_file) if not retry_err else ""
+
+            if retry_err or "SMOKE_TEST_FAIL" in retry_result:
+                ctx.status("Error", "Smoke test failed after fix attempt")
+                ctx.log("ERROR: Smoke test still failing after fix attempt")
+                ctx.notify("dev-loop aborted: smoke test failed after fix attempt")
+                return 1
+
+        ctx.log("PHASE 1.5: Smoke test PASSED (continue-pr)")
+
         ctx.status("Phase 1b", "Pushing commits (continue-pr)")
         ctx.log("PHASE 1b: Pushing commits (continue-pr)")
         push_file = run_claude(

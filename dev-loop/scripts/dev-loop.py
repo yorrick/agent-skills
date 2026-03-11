@@ -550,7 +550,55 @@ def _decision_prompt(code_review_text: str, security_review_text: str, ci_failur
     return "".join(parts)
 
 
-def _fix_prompt(pr_url: str, code_review_text: str, security_review_text: str, ci_failures: str = "") -> str:
+def _smoke_test_prompt(issue_url: str) -> str:
+    issue_number = extract_issue_number(issue_url)
+    return (
+        f"Run a smoke test to verify the implementation actually works.\n\n"
+        f"1. Fetch the implementation plan from GitHub issue {issue_url} using:\n"
+        f"   gh issue view {issue_number} --json body --jq .body\n\n"
+        "2. Look for a 'Validation' section (## Validation header) in the plan.\n\n"
+        "3. If a Validation section exists, execute those validation instructions exactly:\n"
+        "   - Start any long-running processes (servers, etc.) in the background\n"
+        "   - Use a non-standard port (e.g., 8099) to avoid conflicts\n"
+        "   - Wait up to 30 seconds for the service to be ready (poll with curl or similar)\n"
+        "   - Run each specified check\n"
+        "   - ALWAYS kill all background processes before exiting, even on failure\n"
+        "   - Report pass/fail for each check\n\n"
+        "4. If NO Validation section exists, fall back to convention-based discovery:\n"
+        "   - Read README.md, CLAUDE.md, pyproject.toml, package.json, Makefile, docker-compose.yml\n"
+        "   - Figure out how to run the application locally\n"
+        "   - Perform a basic sanity check: does it start? Does --help work? "
+        "Does a health endpoint respond?\n"
+        "   - ALWAYS kill all background processes before exiting\n\n"
+        "5. End your response with EXACTLY one of these lines (no extra text after it):\n"
+        "   SMOKE_TEST_PASS\n"
+        "   SMOKE_TEST_FAIL: <brief summary of what failed>\n\n"
+        "IMPORTANT: You MUST clean up all background processes before finishing. "
+        "Use 'kill %1' or 'kill $PID' to stop any servers you started."
+    )
+
+
+def _smoke_test_fix_prompt(issue_url: str, smoke_test_output: str) -> str:
+    issue_number = extract_issue_number(issue_url)
+    return (
+        "The smoke test failed. Fix the code so the application works correctly.\n\n"
+        f"Smoke test output:\n{smoke_test_output}\n\n"
+        f"For context, fetch the implementation plan from GitHub issue {issue_url} using:\n"
+        f"  gh issue view {issue_number} --json body --jq .body\n\n"
+        "Diagnose the root cause from the error output above, fix the code, "
+        "then run the project's quality gates (lint, typecheck, format, tests) "
+        "to make sure your fixes don't break anything.\n\n"
+        "Commit the fixes locally. Do NOT push."
+    )
+
+
+def _fix_prompt(
+    pr_url: str,
+    code_review_text: str,
+    security_review_text: str,
+    issue_url: str | None = None,
+    ci_failures: str = "",
+) -> str:
     parts = [
         f"The following issues were found during review of PR {pr_url}. "
         "Fix all Critical, Important, and Medium severity issues. After fixing, run the project's "
@@ -561,7 +609,79 @@ def _fix_prompt(pr_url: str, code_review_text: str, security_review_text: str, c
     ]
     if ci_failures:
         parts.append(f"\n\nCI/CD failures (MUST fix):\n{ci_failures}")
+    if issue_url:
+        issue_number = extract_issue_number(issue_url)
+        parts.append(
+            "\n\nAfter fixing all issues and running quality gates, re-run the smoke test validation. "
+            f"Fetch the plan from issue {issue_url} using:\n"
+            f"  gh issue view {issue_number} --json body --jq .body\n\n"
+            "Look for the Validation section. Execute the validation checks. "
+            "If any long-running processes are needed (servers, etc.), "
+            "start them in the background on a non-standard port (e.g., 8099), "
+            "run the checks, and kill them before finishing. "
+            "If smoke test checks fail, fix those too before committing."
+        )
     return "".join(parts)
+
+
+def _run_smoke_test_phase(
+    issue_url: str,
+    work_dir: Path,
+    permission_mode: str,
+    ctx: RunContext,
+    cwd: Path | None,
+    label: str,
+) -> bool:
+    """Run smoke test, optionally fix and retry once. Returns True on pass, False on abort."""
+    ctx.status("Phase 1.5", f"Smoke test{label}")
+    ctx.log(f"PHASE 1.5: Smoke test{label}")
+    smoke_file = run_claude(
+        _smoke_test_prompt(issue_url),
+        work_dir / "smoke-test.json",
+        permission_mode,
+        cwd=cwd,
+        model="opus",
+        effort="high",
+    )
+    err = check_claude_error(smoke_file)
+    smoke_result = extract_result(smoke_file) if not err else ""
+
+    if not err and "SMOKE_TEST_FAIL" not in smoke_result:
+        ctx.log(f"PHASE 1.5: Smoke test PASSED{label}")
+        return True
+
+    ctx.status("Phase 1.5", f"Fixing smoke test failures{label}")
+    ctx.log("PHASE 1.5: Smoke test FAILED, running fix cycle")
+    run_claude(
+        _smoke_test_fix_prompt(issue_url, smoke_result or err or ""),
+        work_dir / "smoke-test-fix.json",
+        permission_mode,
+        cwd=cwd,
+        model="opus",
+        effort="high",
+    )
+
+    ctx.status("Phase 1.5", f"Smoke test retry{label}")
+    ctx.log("PHASE 1.5: Smoke test retry")
+    smoke_retry_file = run_claude(
+        _smoke_test_prompt(issue_url),
+        work_dir / "smoke-test-retry.json",
+        permission_mode,
+        cwd=cwd,
+        model="opus",
+        effort="high",
+    )
+    retry_err = check_claude_error(smoke_retry_file)
+    retry_result = extract_result(smoke_retry_file) if not retry_err else ""
+
+    if retry_err or "SMOKE_TEST_FAIL" in retry_result:
+        ctx.status("Error", "Smoke test failed after fix attempt")
+        ctx.log("ERROR: Smoke test still failing after fix attempt")
+        ctx.notify("dev-loop aborted: smoke test failed after fix attempt")
+        return False
+
+    ctx.log(f"PHASE 1.5: Smoke test PASSED{label}")
+    return True
 
 
 def main() -> int:
@@ -642,6 +762,10 @@ def main() -> int:
             ctx.notify("dev-loop aborted: implementation failed")
             return 1
 
+        # --- Phase 1.5: Smoke test ---
+        if not _run_smoke_test_phase(issue_url, work_dir, permission_mode, ctx, cwd=None, label=" (continue-pr)"):
+            return 1
+
         ctx.status("Phase 1b", "Pushing commits (continue-pr)")
         ctx.log("PHASE 1b: Pushing commits (continue-pr)")
         push_file = run_claude(
@@ -694,6 +818,10 @@ def main() -> int:
             ctx.status("Error", "Implementation failed")
             ctx.log(f"ERROR: Implementation failed: {err}")
             ctx.notify("dev-loop aborted: implementation failed")
+            return 1
+
+        # --- Phase 1.5: Smoke test ---
+        if not _run_smoke_test_phase(issue_url, work_dir, permission_mode, ctx, cwd=worktree_path, label=""):
             return 1
 
         ctx.status("Phase 1b", "Creating PR")
@@ -872,7 +1000,7 @@ def main() -> int:
         ctx.status(f"Review {iteration}/{args.max_iterations}", "Fixing issues")
         ctx.log(f"REVIEW {iteration}/{args.max_iterations}: Fixing issues")
         run_claude(
-            _fix_prompt(pr_url, code_review_text, security_review_text, ci_failures),
+            _fix_prompt(pr_url, code_review_text, security_review_text, issue_url=issue_url, ci_failures=ci_failures),
             work_dir / f"fix-{iteration}.json",
             permission_mode,
             cwd=worktree_path,

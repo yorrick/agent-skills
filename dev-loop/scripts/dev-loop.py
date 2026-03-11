@@ -720,7 +720,7 @@ def main() -> int:
             ctx.status("Phase 1.5", "Fixing smoke test failures (continue-pr)")
             ctx.log("PHASE 1.5: Smoke test FAILED, running fix cycle")
             run_claude(
-                _smoke_test_fix_prompt(issue_url, smoke_result or err),
+                _smoke_test_fix_prompt(issue_url, smoke_result or err or ""),
                 work_dir / "smoke-test-fix.json",
                 permission_mode,
                 cwd=None,
@@ -821,7 +821,7 @@ def main() -> int:
             ctx.status("Phase 1.5", "Fixing smoke test failures")
             ctx.log("PHASE 1.5: Smoke test FAILED, running fix cycle")
             run_claude(
-                _smoke_test_fix_prompt(issue_url, smoke_result or err),
+                _smoke_test_fix_prompt(issue_url, smoke_result or err or ""),
                 work_dir / "smoke-test-fix.json",
                 permission_mode,
                 cwd=worktree_path,

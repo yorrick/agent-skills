@@ -578,6 +578,20 @@ def _smoke_test_prompt(issue_url: str) -> str:
     )
 
 
+def _smoke_test_fix_prompt(issue_url: str, smoke_test_output: str) -> str:
+    issue_number = extract_issue_number(issue_url)
+    return (
+        "The smoke test failed. Fix the code so the application works correctly.\n\n"
+        f"Smoke test output:\n{smoke_test_output}\n\n"
+        f"For context, fetch the implementation plan from GitHub issue {issue_url} using:\n"
+        f"  gh issue view {issue_number} --json body --jq .body\n\n"
+        "Diagnose the root cause from the error output above, fix the code, "
+        "then run the project's quality gates (lint, typecheck, format, tests) "
+        "to make sure your fixes don't break anything.\n\n"
+        "Commit the fixes locally. Do NOT push."
+    )
+
+
 def _fix_prompt(pr_url: str, code_review_text: str, security_review_text: str, ci_failures: str = "") -> str:
     parts = [
         f"The following issues were found during review of PR {pr_url}. "

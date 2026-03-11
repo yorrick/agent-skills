@@ -511,8 +511,12 @@ def _security_review_prompt(pr_url: str, previous_findings: str = "") -> str:
     if previous_findings:
         parts.append(
             "IMPORTANT: A previous security review iteration found the following issues. "
-            "Check whether each one has been resolved in the current code. "
-            "If any remain unresolved, include them in your findings.\n\n"
+            "You must do TWO things:\n"
+            "1. Check whether each previous issue has been resolved in the current code. "
+            "If any remain unresolved, include them in your findings.\n"
+            "2. Perform a FULL security review of the current code — the fixes themselves "
+            "may have introduced NEW security issues that were not present before. "
+            "Do not limit your review to only the previously reported issues.\n\n"
             f"Previous security review findings:\n{previous_findings}\n\n"
         )
     parts.append(

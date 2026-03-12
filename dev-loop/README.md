@@ -114,8 +114,14 @@ Ruff for linting/formatting, pyright for type checking:
 
 ```bash
 cd claude-code-plugins  # run from monorepo root
-uv run ruff check dev-loop/scripts/dev-loop.py
-uv run pyright dev-loop/scripts/dev-loop.py
+uv run ruff check dev-loop/scripts/ dev-loop/tests/
+uv run pyright dev-loop/scripts/ dev-loop/tests/
+```
+
+### Running engine unit tests
+
+```bash
+uv run pytest dev-loop/tests/test_engine.py -v
 ```
 
 ### Running integration tests
@@ -142,14 +148,29 @@ dev-loop/
 │   ├── dev-loop.md           # /dev-loop command (orchestrates full lifecycle)
 │   └── review-loop.md        # /review-loop command (review only)
 ├── scripts/
-│   └── dev-loop.py           # Main orchestrator script (runs headless claude sessions)
+│   ├── engine.py             # Async graph execution engine (StateGraph, node helpers)
+│   └── dev-loop.py           # Main orchestrator script (defines workflow as a graph)
 ├── tests/
+│   ├── test_engine.py        # Unit tests for the workflow engine
 │   └── test_integration.py   # End-to-end integration test
 ├── docs/
 │   └── plans/                # Design and implementation plan documents
 ├── CLAUDE.md                 # Development guidelines for Claude
 └── README.md
 ```
+
+### Architecture
+
+The orchestrator (`dev-loop.py`) defines its workflow as a `StateGraph` powered by `engine.py`:
+
+- **engine.py** — A lightweight LangGraph-inspired async graph execution engine with:
+  - `StateGraph` builder: `add_node()`, `add_edge()`, `add_conditional_edges()`, `add_parallel_edges()`
+  - Parallel execution via `asyncio.gather()` with join semantics
+  - Loop detection with configurable `max_iterations` safety valve
+  - Event callbacks (`on_node_start`, `on_node_end`, `on_error`) for observability
+  - CLI node helpers: `claude_node()`, `codex_node()`, `gemini_node()`, `python_node()`, `template_node()`
+
+- **dev-loop.py** — Defines the workflow graph with nodes wrapping `run_claude()` calls and routers for conditional branching (smoke test pass/fail, decision gate fix/done)
 
 ### Publishing a new version
 

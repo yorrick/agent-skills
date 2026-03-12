@@ -766,6 +766,10 @@ def _simplify_node(state: State) -> State:
     """Run simplify pass."""
     cwd = _get_cwd(state)
     iteration = int(state.get("iteration_count", "1"))
+    max_iterations = state.get("max_iterations", "5")
+    pr_url = state.get("pr_url", "")
+    if pr_url:
+        gh_comment(pr_url, f"### dev-loop: Review iteration {iteration}/{max_iterations}")
     simplify_file = run_claude(
         "/simplify",
         Path(state["work_dir"]) / f"simplify-{iteration}.json",

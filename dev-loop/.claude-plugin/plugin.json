@@ -1,6 +1,6 @@
 {
   "name": "dev-loop",
-  "version": "0.22.1",
+  "version": "0.22.2",
   "description": "Automated development loop: brainstorm, plan, implement, PR, then iterative review (simplify + code review + security review) until clean",
   "author": {
     "name": "Yorrick Jansen"

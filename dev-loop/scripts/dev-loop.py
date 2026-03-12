@@ -695,7 +695,7 @@ def _smoke_test_retry_node(state: State) -> State:
             _ctx.log("ERROR: Smoke test still failing after fix attempt")
             _ctx.notify("dev-loop aborted: smoke test failed after fix attempt")
         return {"smoke_test_retry_output": smoke_result, "smoke_test_retry_failed": "true"}
-    return {"smoke_test_retry_output": smoke_result, "smoke_test_retry_failed": "false"}
+    return {"smoke_test_retry_output": smoke_result}
 
 
 def _create_pr_node(state: State) -> State:
@@ -1116,14 +1116,15 @@ def main() -> int:
         return 0
     except MaxIterationsExceeded:
         pr_url = last_known_state.get("pr_url", "")
-        gh_comment(
-            pr_url,
-            (
-                "### dev-loop: Max iterations reached\n\n"
-                f"Review loop exhausted {args.max_iterations} iteration(s) "
-                "without resolving all issues. PR needs manual review."
-            ),
-        )
+        if pr_url:
+            gh_comment(
+                pr_url,
+                (
+                    "### dev-loop: Max iterations reached\n\n"
+                    f"Review loop exhausted {args.max_iterations} iteration(s) "
+                    "without resolving all issues. PR needs manual review."
+                ),
+            )
         ctx.status("Failed", f"Max iterations reached ({args.max_iterations})")
         ctx.log(f"FAILED: Max iterations reached ({args.max_iterations})")
         ctx.notify(f"PR needs manual review ({args.max_iterations} iterations exhausted)")

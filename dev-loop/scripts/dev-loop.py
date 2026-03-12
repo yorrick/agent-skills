@@ -689,11 +689,13 @@ def _smoke_test_retry_node(state: State) -> State:
     )
     err = check_claude_error(smoke_file)
     smoke_result = extract_result(smoke_file) if not err else ""
-    # On retry failure, we continue to create_pr anyway
     if err or "SMOKE_TEST_FAIL" in smoke_result:
         if _ctx:
-            _ctx.log("Smoke test still failing after fix attempt, continuing to PR creation")
-    return {"smoke_test_retry_output": smoke_result}
+            _ctx.status("Error", "Smoke test failed after fix attempt")
+            _ctx.log("ERROR: Smoke test still failing after fix attempt")
+            _ctx.notify("dev-loop aborted: smoke test failed after fix attempt")
+        return {"smoke_test_retry_output": smoke_result, "smoke_test_retry_failed": "true"}
+    return {"smoke_test_retry_output": smoke_result, "smoke_test_retry_failed": "false"}
 
 
 def _create_pr_node(state: State) -> State:
@@ -920,7 +922,9 @@ def _smoke_test_router(state: State) -> str:
 
 
 def _post_smoke_test_router(state: State) -> str:
-    """Route to appropriate PR node based on mode after smoke test retry."""
+    """Route based on smoke test retry result — abort on persistent failure."""
+    if state.get("smoke_test_retry_failed") == "true":
+        return "abort"
     if state.get("mode") == "continue_pr":
         return "continue_pr_push"
     return "create_pr"
@@ -968,13 +972,14 @@ def _build_graph(max_iterations: int) -> StateGraph:
         },
     )
     graph.add_edge("smoke_test_fix", "smoke_test_retry")
-    # After retry, proceed to appropriate PR node based on mode
+    # After retry, proceed to PR node or abort if still failing
     graph.add_conditional_edges(
         "smoke_test_retry",
         _post_smoke_test_router,
         {
             "create_pr": "create_pr",
             "continue_pr_push": "continue_pr_push",
+            "abort": END,
         },
     )
     graph.add_edge("create_pr", "simplify")
@@ -1051,6 +1056,8 @@ def main() -> int:
     graph = _build_graph(args.max_iterations)
 
     # Wire up observability
+    last_known_state: State = {}
+
     @graph.on_node_start
     async def _on_start(node_name: str, state: State) -> None:
         ctx.status(node_name, "Running")
@@ -1059,6 +1066,7 @@ def main() -> int:
     @graph.on_node_end
     async def _on_end(node_name: str, state: State) -> None:
         ctx.log(f"Finished: {node_name}")
+        last_known_state.update(state)
 
     @graph.on_error
     async def _on_err(node_name: str, error: Exception) -> None:
@@ -1107,6 +1115,15 @@ def main() -> int:
         ctx.log(f"PR: {pr_url}")
         return 0
     except MaxIterationsExceeded:
+        pr_url = last_known_state.get("pr_url", "")
+        gh_comment(
+            pr_url,
+            (
+                "### dev-loop: Max iterations reached\n\n"
+                f"Review loop exhausted {args.max_iterations} iteration(s) "
+                "without resolving all issues. PR needs manual review."
+            ),
+        )
         ctx.status("Failed", f"Max iterations reached ({args.max_iterations})")
         ctx.log(f"FAILED: Max iterations reached ({args.max_iterations})")
         ctx.notify(f"PR needs manual review ({args.max_iterations} iterations exhausted)")

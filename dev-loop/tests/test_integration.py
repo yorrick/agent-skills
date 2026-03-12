@@ -423,7 +423,7 @@ def verify_local(project_dir: Path) -> None:
             if log_file.exists():
                 log_content = log_file.read_text()
                 check(
-                    "Starting: smoke_test" in log_content or "PHASE 1.5: Smoke test" in log_content,
+                    "Starting: smoke_test" in log_content,
                     "Log contains smoke test phase",
                 )
             else:

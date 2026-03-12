@@ -421,7 +421,10 @@ def verify_local(project_dir: Path) -> None:
             log_file = latest_run / "dev-loop.log"
             if log_file.exists():
                 log_content = log_file.read_text()
-                check("PHASE 1.5: Smoke test" in log_content, "Log contains smoke test phase")
+                check(
+                    "Starting: smoke_test" in log_content or "PHASE 1.5: Smoke test" in log_content,
+                    "Log contains smoke test phase",
+                )
             else:
                 failed("dev-loop.log not found")
         else:

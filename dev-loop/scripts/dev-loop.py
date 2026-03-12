@@ -244,10 +244,7 @@ def gh_request_review(pr_number: str, reviewers: str) -> None:
         reviewer = reviewer.strip()
         if not reviewer:
             continue
-        if "/" in reviewer:
-            cmd += ["--add-reviewer", reviewer]
-        else:
-            cmd += ["--add-reviewer", reviewer]
+        cmd += ["--add-reviewer", reviewer]
     try:
         subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         print(f"  Requested review from: {reviewers}", flush=True)
@@ -267,20 +264,8 @@ def wait_for_ci(pr_number: str, timeout: int = 600, poll_interval: int = 30) -> 
         ("fail", "<failure details>") if any check fails.
         ("timeout", "") if checks don't complete within timeout.
     """
-    # First check if the PR has any checks at all
-    result = subprocess.run(
-        ["gh", "pr", "checks", pr_number, "--json", "name,state,conclusion"],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    if result.returncode != 0 or not result.stdout.strip() or result.stdout.strip() == "[]":
-        print("  No CI checks found, skipping CI wait", flush=True)
-        if _ctx:
-            _ctx.log("No CI checks found, skipping CI wait")
-        return ("pass", "")
-
     elapsed = 0
+    first_iteration = True
     while elapsed < timeout:
         result = subprocess.run(
             ["gh", "pr", "checks", pr_number, "--json", "name,state,conclusion"],
@@ -288,6 +273,13 @@ def wait_for_ci(pr_number: str, timeout: int = 600, poll_interval: int = 30) -> 
             text=True,
             timeout=30,
         )
+        if first_iteration:
+            first_iteration = False
+            if result.returncode != 0 or not result.stdout.strip() or result.stdout.strip() == "[]":
+                print("  No CI checks found, skipping CI wait", flush=True)
+                if _ctx:
+                    _ctx.log("No CI checks found, skipping CI wait")
+                return ("pass", "")
         if result.returncode != 0:
             print(f"  Warning: failed to check CI status: {result.stderr}", flush=True)
             return ("pass", "")
@@ -621,6 +613,10 @@ def _fix_prompt(
 # to preserve file artifact writing (.dev-loop/runs/) and the integration test contract.
 
 
+def _get_cwd(state: State) -> Path | None:
+    return Path(state["cwd"]) if state.get("cwd") else None
+
+
 def _worktree_setup_node(state: State) -> State:
     """Set up a git worktree for the feature branch."""
     worktree_path = create_worktree_via_claude(
@@ -633,7 +629,7 @@ def _worktree_setup_node(state: State) -> State:
 
 def _implement_node(state: State) -> State:
     """Run implementation via Claude."""
-    cwd = Path(state["cwd"]) if state.get("cwd") else None
+    cwd = _get_cwd(state)
     impl_file = run_claude(
         _implementation_prompt(state["issue_url"]),
         Path(state["work_dir"]) / "implementation.json",
@@ -650,7 +646,7 @@ def _implement_node(state: State) -> State:
 
 def _smoke_test_node(state: State) -> State:
     """Run smoke test."""
-    cwd = Path(state["cwd"]) if state.get("cwd") else None
+    cwd = _get_cwd(state)
     smoke_file = run_claude(
         _smoke_test_prompt(state["issue_url"]),
         Path(state["work_dir"]) / "smoke-test.json",
@@ -666,7 +662,7 @@ def _smoke_test_node(state: State) -> State:
 
 def _smoke_test_fix_node(state: State) -> State:
     """Fix smoke test failures."""
-    cwd = Path(state["cwd"]) if state.get("cwd") else None
+    cwd = _get_cwd(state)
     run_claude(
         _smoke_test_fix_prompt(
             state["issue_url"], state.get("smoke_test_output", "") or state.get("smoke_test_error", "")
@@ -682,7 +678,7 @@ def _smoke_test_fix_node(state: State) -> State:
 
 def _smoke_test_retry_node(state: State) -> State:
     """Re-run smoke test after fix."""
-    cwd = Path(state["cwd"]) if state.get("cwd") else None
+    cwd = _get_cwd(state)
     smoke_file = run_claude(
         _smoke_test_prompt(state["issue_url"]),
         Path(state["work_dir"]) / "smoke-test-retry.json",
@@ -702,7 +698,7 @@ def _smoke_test_retry_node(state: State) -> State:
 
 def _create_pr_node(state: State) -> State:
     """Create PR and assign self."""
-    cwd = Path(state["cwd"]) if state.get("cwd") else None
+    cwd = _get_cwd(state)
     pr_file = run_claude(
         _pr_creation_prompt(state["issue_url"]),
         Path(state["work_dir"]) / "pr-creation.json",
@@ -736,7 +732,7 @@ def _create_pr_node(state: State) -> State:
 
 def _continue_pr_push_node(state: State) -> State:
     """Push commits and detect existing PR for --continue-pr mode."""
-    cwd = Path(state["cwd"]) if state.get("cwd") else None
+    cwd = _get_cwd(state)
     push_file = run_claude(
         "Push all commits on the current branch to the remote.",
         Path(state["work_dir"]) / "push.json",
@@ -766,7 +762,7 @@ def _continue_pr_push_node(state: State) -> State:
 
 def _simplify_node(state: State) -> State:
     """Run simplify pass."""
-    cwd = Path(state["cwd"]) if state.get("cwd") else None
+    cwd = _get_cwd(state)
     iteration = int(state.get("iteration_count", "1"))
     simplify_file = run_claude(
         "/simplify",
@@ -784,7 +780,7 @@ def _simplify_node(state: State) -> State:
 
 def _simplify_commit_node(state: State) -> State:
     """Commit and push simplify changes."""
-    cwd = Path(state["cwd"]) if state.get("cwd") else None
+    cwd = _get_cwd(state)
     iteration = int(state.get("iteration_count", "1"))
     run_claude(
         "If there are any uncommitted changes from the simplify pass, "
@@ -800,7 +796,7 @@ def _simplify_commit_node(state: State) -> State:
 
 def _code_review_node(state: State) -> State:
     """Run code review."""
-    cwd = Path(state["cwd"]) if state.get("cwd") else None
+    cwd = _get_cwd(state)
     iteration = int(state.get("iteration_count", "1"))
     pr_url = state["pr_url"]
     review_file = run_claude(
@@ -819,7 +815,7 @@ def _code_review_node(state: State) -> State:
 
 def _security_review_node(state: State) -> State:
     """Run security review."""
-    cwd = Path(state["cwd"]) if state.get("cwd") else None
+    cwd = _get_cwd(state)
     iteration = int(state.get("iteration_count", "1"))
     pr_url = state["pr_url"]
     previous_findings = state.get("previous_security_findings", "")
@@ -858,14 +854,15 @@ def _decision_node(state: State) -> State:
     ci_failures = state.get("ci_failures", "")
     iteration = int(state.get("iteration_count", "1"))
 
-    # Update previous security findings for next iteration
-    state["previous_security_findings"] = security_review_text
-
     # CI failure automatically means YES (must fix)
     if ci_status == "fail":
         if _ctx:
             _ctx.log("CI failed — forcing fix iteration")
-        return {"decision_output": "YES", "iteration_count": str(iteration)}
+        return {
+            "decision_output": "YES",
+            "iteration_count": str(iteration),
+            "previous_security_findings": security_review_text,
+        }
 
     run_claude(
         _decision_prompt(code_review_text, security_review_text, ci_failures),
@@ -878,12 +875,16 @@ def _decision_node(state: State) -> State:
     decision_label = "YES (issues found)" if "YES" in decision.upper() else "NO (clean)"
     if _ctx:
         _ctx.log(f"REVIEW {iteration}: Decision — {decision_label}")
-    return {"decision_output": decision, "iteration_count": str(iteration)}
+    return {
+        "decision_output": decision,
+        "iteration_count": str(iteration),
+        "previous_security_findings": security_review_text,
+    }
 
 
 def _fix_node(state: State) -> State:
     """Fix issues found during review."""
-    cwd = Path(state["cwd"]) if state.get("cwd") else None
+    cwd = _get_cwd(state)
     iteration = int(state.get("iteration_count", "1"))
     pr_url = state["pr_url"]
     code_review_text = state.get("code_review_output", "")

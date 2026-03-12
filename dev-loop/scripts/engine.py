@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
+import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -137,7 +139,7 @@ class StateGraph:
 
     def _find_start_node(self, start_node: str | None) -> str:
         """Find the first node to execute."""
-        if start_node:
+        if start_node is not None:
             if start_node not in self._nodes:
                 raise ValueError(f"start_node '{start_node}' not found in graph")
             return start_node
@@ -276,9 +278,6 @@ async def _run_cli_subprocess(
     Stdin is closed (DEVNULL). Raises RuntimeError on non-zero exit or
     if the JSON output contains is_error: true.
     """
-    import json as json_mod
-    import os
-
     env = {k: v for k, v in os.environ.items() if k not in (env_strip or [])}
 
     proc = await asyncio.create_subprocess_exec(
@@ -298,11 +297,11 @@ async def _run_cli_subprocess(
 
     # Try to extract result from JSON output
     try:
-        data = json_mod.loads(stdout)
+        data = json.loads(stdout)
         if data.get("is_error"):
             raise RuntimeError(f"CLI error: {data.get('result', 'Unknown error')}")
         return data.get("result", data.get("message", stdout))
-    except (json_mod.JSONDecodeError, AttributeError):
+    except (json.JSONDecodeError, AttributeError):
         return stdout
 
 

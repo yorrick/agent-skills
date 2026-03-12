@@ -256,7 +256,7 @@ def gh_request_review(pr_number: str, reviewers: str) -> None:
             _ctx.log(f"Warning: failed to request review: {e}")
 
 
-def wait_for_ci(pr_number: str, timeout: int = 600, poll_interval: int = 30) -> tuple[str, str]:
+async def wait_for_ci(pr_number: str, timeout: int = 600, poll_interval: int = 30) -> tuple[str, str]:
     """Wait for CI checks to complete and return (status, details).
 
     Returns:
@@ -310,7 +310,7 @@ def wait_for_ci(pr_number: str, timeout: int = 600, poll_interval: int = 30) -> 
         pending = [c["name"] for c in checks if c.get("state") != "COMPLETED"]
         names = ", ".join(pending[:3]) + ("..." if len(pending) > 3 else "")
         print(f"  Waiting for CI ({len(pending)} pending: {names})...", flush=True)
-        time.sleep(poll_interval)
+        await asyncio.sleep(poll_interval)
         elapsed += poll_interval
 
     print("  CI check timeout reached", flush=True)
@@ -644,12 +644,12 @@ def _implement_node(state: State) -> State:
     return {"implementation_output": extract_result(impl_file)}
 
 
-def _smoke_test_node(state: State) -> State:
-    """Run smoke test."""
+def _run_smoke_test(state: State, output_filename: str) -> tuple[str, str]:
+    """Run smoke test and return (result, error)."""
     cwd = _get_cwd(state)
     smoke_file = run_claude(
         _smoke_test_prompt(state["issue_url"]),
-        Path(state["work_dir"]) / "smoke-test.json",
+        Path(state["work_dir"]) / output_filename,
         state.get("permission_mode", "default"),
         cwd=cwd,
         model="opus",
@@ -657,7 +657,13 @@ def _smoke_test_node(state: State) -> State:
     )
     err = check_claude_error(smoke_file)
     smoke_result = extract_result(smoke_file) if not err else ""
-    return {"smoke_test_output": smoke_result, "smoke_test_error": err or ""}
+    return smoke_result, err or ""
+
+
+def _smoke_test_node(state: State) -> State:
+    """Run smoke test."""
+    smoke_result, err = _run_smoke_test(state, "smoke-test.json")
+    return {"smoke_test_output": smoke_result, "smoke_test_error": err}
 
 
 def _smoke_test_fix_node(state: State) -> State:
@@ -678,17 +684,7 @@ def _smoke_test_fix_node(state: State) -> State:
 
 def _smoke_test_retry_node(state: State) -> State:
     """Re-run smoke test after fix."""
-    cwd = _get_cwd(state)
-    smoke_file = run_claude(
-        _smoke_test_prompt(state["issue_url"]),
-        Path(state["work_dir"]) / "smoke-test-retry.json",
-        state.get("permission_mode", "default"),
-        cwd=cwd,
-        model="opus",
-        effort="high",
-    )
-    err = check_claude_error(smoke_file)
-    smoke_result = extract_result(smoke_file) if not err else ""
+    smoke_result, err = _run_smoke_test(state, "smoke-test-retry.json")
     if err or "SMOKE_TEST_FAIL" in smoke_result:
         if _ctx:
             _ctx.status("Error", "Smoke test failed after fix attempt")
@@ -839,11 +835,11 @@ def _security_review_node(state: State) -> State:
     return {"security_review_output": extract_result(review_file)}
 
 
-def _wait_for_ci_node(state: State) -> State:
+async def _wait_for_ci_node(state: State) -> State:
     """Wait for CI checks to complete."""
     pr_url = state["pr_url"]
     pr_number = extract_pr_number(pr_url)
-    ci_status, ci_failures = wait_for_ci(pr_number)
+    ci_status, ci_failures = await wait_for_ci(pr_number)
     iteration = state.get("iteration_count", "1")
     if _ctx:
         _ctx.log(f"REVIEW {iteration}: CI status — {ci_status}")

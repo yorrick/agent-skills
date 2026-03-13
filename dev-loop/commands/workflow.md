@@ -111,10 +111,11 @@ Pick the cheapest/fastest option that can handle the step. Don't use Opus with h
 
 | Task type | Recommended | Example |
 |-----------|-------------|---------|
-| Simple code fix, formatting, renaming | `model="sonnet", effort="low"` | Fixing a typo, renaming a variable |
-| Standard implementation, bug fix | `model="sonnet", effort="medium"` | Implementing a function from clear specs |
+| Trivial fix, formatting, renaming | `model="sonnet", effort="low"` | Fixing a typo, renaming a variable |
+| Fix test failures, standard bug fix | `model="sonnet", effort="medium"` | Fixing code from test output |
+| Implement feature from plan | `model="sonnet", effort="medium"` | Implementing a function from clear specs |
 | Complex reasoning, multi-file refactor | `model="opus", effort="high"` | Architectural changes, tricky bugs |
-| Code review, security audit | `model="opus", effort="high"` | Reviewing PRs for subtle issues |
+| Code review, security audit | `model="sonnet", effort="high"` | Reviewing PRs for subtle issues |
 | Quick generation, boilerplate | `codex_node` or `gemini_node` | Scaffolding, docstrings, simple tests |
 
 ```python

@@ -443,11 +443,13 @@ def python_node(fn: Callable[[State], State] | Callable[[State], Awaitable[State
     blocking the event loop during long-running subprocess calls.
     """
     if inspect.iscoroutinefunction(fn):
+        fn._diagram_label = "python"  # type: ignore[union-attr]
         return fn  # type: ignore[return-value]
 
     async def _node(state: State) -> State:
         return await asyncio.to_thread(fn, state)  # type: ignore[return-value]
 
+    _node._diagram_label = "python"  # type: ignore[attr-defined]
     return _node
 
 

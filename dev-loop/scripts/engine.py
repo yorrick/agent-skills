@@ -354,12 +354,16 @@ def gemini_node(
 
 
 def python_node(fn: Callable[[State], State] | Callable[[State], Awaitable[State]]) -> NodeFn:
-    """Wrap a sync or async function as an async node."""
+    """Wrap a sync or async function as an async node.
+
+    Sync functions are run in a thread pool via asyncio.to_thread to avoid
+    blocking the event loop during long-running subprocess calls.
+    """
     if inspect.iscoroutinefunction(fn):
         return fn  # type: ignore[return-value]
 
     async def _node(state: State) -> State:
-        return fn(state)  # type: ignore[return-value]
+        return await asyncio.to_thread(fn, state)  # type: ignore[return-value]
 
     return _node
 

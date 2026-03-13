@@ -145,24 +145,31 @@ def run_claude(
     return output_file
 
 
+def _read_claude_output(json_file: Path) -> tuple[str | None, str]:
+    """Read claude JSON output once. Returns (error_msg_or_None, result_text)."""
+    try:
+        text = json_file.read_text()
+        data = json.loads(text)
+        if data.get("is_error"):
+            return data.get("result", "Unknown error"), ""
+        return None, data.get("result", data.get("message", json.dumps(data)))
+    except (json.JSONDecodeError, KeyError):
+        try:
+            return None, json_file.read_text()
+        except OSError:
+            return None, ""
+
+
 def check_claude_error(json_file: Path) -> str | None:
     """Check if a claude session output contains an error. Returns error message or None."""
-    try:
-        data = json.loads(json_file.read_text())
-        if data.get("is_error"):
-            return data.get("result", "Unknown error")
-    except (json.JSONDecodeError, KeyError):
-        pass
-    return None
+    err, _ = _read_claude_output(json_file)
+    return err
 
 
 def extract_result(json_file: Path) -> str:
     """Extract the result text from a claude JSON output file."""
-    try:
-        data = json.loads(json_file.read_text())
-        return data.get("result", data.get("message", json.dumps(data)))
-    except (json.JSONDecodeError, KeyError):
-        return json_file.read_text()
+    _, result = _read_claude_output(json_file)
+    return result
 
 
 def extract_pr_url(json_file: Path) -> str | None:
@@ -264,15 +271,19 @@ async def wait_for_ci(pr_number: str, timeout: int = 600, poll_interval: int = 3
         ("fail", "<failure details>") if any check fails.
         ("timeout", "") if checks don't complete within timeout.
     """
-    deadline = time.monotonic() + timeout
-    first_iteration = True
-    while time.monotonic() < deadline:
-        result = subprocess.run(
+
+    def _gh_pr_checks() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
             ["gh", "pr", "checks", pr_number, "--json", "name,state,conclusion"],
             capture_output=True,
             text=True,
             timeout=30,
         )
+
+    deadline = time.monotonic() + timeout
+    first_iteration = True
+    while time.monotonic() < deadline:
+        result = await asyncio.to_thread(_gh_pr_checks)
         if first_iteration:
             first_iteration = False
             if result.returncode != 0 or not result.stdout.strip() or result.stdout.strip() == "[]":
@@ -637,10 +648,10 @@ def _implement_node(state: State) -> State:
         model="opus",
         effort="high",
     )
-    err = check_claude_error(impl_file)
+    err, result = _read_claude_output(impl_file)
     if err:
         raise RuntimeError(f"Implementation failed: {err}")
-    return {"implementation_output": extract_result(impl_file)}
+    return {"implementation_output": result}
 
 
 def _run_smoke_test(state: State, output_filename: str) -> tuple[str, str]:
@@ -654,8 +665,7 @@ def _run_smoke_test(state: State, output_filename: str) -> tuple[str, str]:
         model="opus",
         effort="high",
     )
-    err = check_claude_error(smoke_file)
-    smoke_result = extract_result(smoke_file) if not err else ""
+    err, smoke_result = _read_claude_output(smoke_file)
     return smoke_result, err or ""
 
 
@@ -704,7 +714,7 @@ def _create_pr_node(state: State) -> State:
         model="sonnet",
         effort="low",
     )
-    err = check_claude_error(pr_file)
+    err, _ = _read_claude_output(pr_file)
     if err:
         raise RuntimeError(f"PR creation failed: {err}")
 
@@ -795,13 +805,12 @@ def _simplify_commit_node(state: State) -> State:
     return {}
 
 
-async def _code_review_node(state: State) -> State:
+def _code_review_node(state: State) -> State:
     """Run code review."""
     cwd = _get_cwd(state)
     iteration = int(state.get("iteration_count", "1"))
     pr_url = state["pr_url"]
-    review_file = await asyncio.to_thread(
-        run_claude,
+    review_file = run_claude(
         f"/code-review:code-review {pr_url}",
         Path(state["work_dir"]) / f"code-review-{iteration}.json",
         state.get("permission_mode", "default"),
@@ -809,20 +818,19 @@ async def _code_review_node(state: State) -> State:
         "opus",
         "high",
     )
-    err = check_claude_error(review_file)
+    err, result = _read_claude_output(review_file)
     if err:
         raise RuntimeError(f"Code review failed: {err}")
-    return {"code_review_output": extract_result(review_file)}
+    return {"code_review_output": result}
 
 
-async def _security_review_node(state: State) -> State:
+def _security_review_node(state: State) -> State:
     """Run security review."""
     cwd = _get_cwd(state)
     iteration = int(state.get("iteration_count", "1"))
     pr_url = state["pr_url"]
     previous_findings = state.get("previous_security_findings", "")
-    review_file = await asyncio.to_thread(
-        run_claude,
+    review_file = run_claude(
         _security_review_prompt(pr_url, previous_findings),
         Path(state["work_dir"]) / f"security-review-{iteration}.json",
         state.get("permission_mode", "default"),
@@ -830,10 +838,10 @@ async def _security_review_node(state: State) -> State:
         "opus",
         "high",
     )
-    err = check_claude_error(review_file)
+    err, result = _read_claude_output(review_file)
     if err:
         raise RuntimeError(f"Security review failed: {err}")
-    return {"security_review_output": extract_result(review_file)}
+    return {"security_review_output": result}
 
 
 async def _wait_for_ci_node(state: State) -> State:

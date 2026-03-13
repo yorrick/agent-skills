@@ -29,6 +29,17 @@ NodeFn = Callable[[State], Awaitable[State]]
 RouterFn = Callable[[State], str]
 
 
+class _SafeFormatMap(dict[str, str]):
+    """Dict subclass that returns empty string for missing keys in format_map.
+
+    This makes template interpolation safe in loops — on the first pass,
+    ``{previous_findings}`` resolves to ``""`` instead of raising KeyError.
+    """
+
+    def __missing__(self, key: str) -> str:
+        return ""
+
+
 class _EndSentinel:
     """Sentinel object representing the end of graph execution."""
 
@@ -360,7 +371,7 @@ def claude_node(
     """Create a node that runs a headless Claude session."""
 
     async def _node(state: State) -> State:
-        prompt = prompt_template.format_map(state)
+        prompt = prompt_template.format_map(_SafeFormatMap(state))
         cmd = ["claude", "-p", prompt, "--output-format", "json", "--model", model, "--effort", effort]
         if permission_mode != "default":
             cmd += ["--permission-mode", permission_mode]
@@ -377,7 +388,7 @@ def codex_node(
     """Create a node that runs a headless Codex session."""
 
     async def _node(state: State) -> State:
-        prompt = prompt_template.format_map(state)
+        prompt = prompt_template.format_map(_SafeFormatMap(state))
         cmd = ["codex", "--quiet", "--full-auto", prompt]
         result = await _run_cli_subprocess(cmd)
         return {output_key: result}
@@ -392,7 +403,7 @@ def gemini_node(
     """Create a node that runs a headless Gemini CLI session."""
 
     async def _node(state: State) -> State:
-        prompt = prompt_template.format_map(state)
+        prompt = prompt_template.format_map(_SafeFormatMap(state))
         cmd = ["gemini", "-p", prompt]
         result = await _run_cli_subprocess(cmd)
         return {output_key: result}
@@ -433,7 +444,7 @@ def shell_node(
     """
 
     async def _node(state: State) -> State:
-        command = command_template.format_map(state)
+        command = command_template.format_map(_SafeFormatMap(state))
         proc = await asyncio.create_subprocess_shell(
             command,
             stdin=asyncio.subprocess.DEVNULL,
@@ -457,6 +468,6 @@ def template_node(template: str, output_key: str = "output") -> NodeFn:
     """Create a node that interpolates state keys into a template string."""
 
     async def _node(state: State) -> State:
-        return {output_key: template.format_map(state)}
+        return {output_key: template.format_map(_SafeFormatMap(state))}
 
     return _node

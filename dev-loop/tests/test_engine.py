@@ -525,6 +525,14 @@ async def test_template_node():
     assert result == {"greeting": "Hello Alice, your PR is https://example.com/pr/1"}
 
 
+@pytest.mark.asyncio
+async def test_template_node_missing_keys():
+    """template_node returns empty string for missing keys instead of raising."""
+    node = template_node("Previous: {previous_findings}\nNew: {name}", output_key="out")
+    result = await node({"name": "Alice"})
+    assert result == {"out": "Previous: \nNew: Alice"}
+
+
 # --- shell_node tests ---
 
 

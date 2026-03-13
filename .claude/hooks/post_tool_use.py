@@ -1,6 +1,6 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.12"
 # ///
 """Post-tool-use hook: run ruff format, ruff check --fix, and pyright on edited Python files."""
 

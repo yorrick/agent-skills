@@ -1,7 +1,7 @@
 [project]
 name = "claude-code-plugins"
 version = "0.1.0"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 
 [dependency-groups]
 dev = [
@@ -15,7 +15,7 @@ dev = [
 asyncio_mode = "auto"
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py312"
 line-length = 120
 
 [tool.ruff.lint]
@@ -23,6 +23,6 @@ select = ["E", "F", "I", "UP"]
 ignore = ["UP017"]  # datetime.UTC requires Python 3.11+, we target 3.10
 
 [tool.pyright]
-pythonVersion = "3.10"
+pythonVersion = "3.12"
 typeCheckingMode = "standard"
 extraPaths = ["dev-loop/scripts"]

@@ -111,8 +111,8 @@ class StateGraph:
         self._on_error.append(fn)
         return fn
 
-    def _get_next_nodes(self, current: str) -> list[str] | None:
-        """Get next node(s) after current. Returns None if END reached.
+    def _get_next_node(self, current: str) -> str | None:
+        """Get next node after current. Returns None if END reached.
 
         Note: Conditional and parallel edges are handled separately in run().
         This method only resolves unconditional edges.
@@ -122,7 +122,7 @@ class StateGraph:
                 if edge.target == END or isinstance(edge.target, _EndSentinel):
                     return None
                 if isinstance(edge.target, str):
-                    return [edge.target]
+                    return edge.target
 
         return None
 
@@ -215,10 +215,10 @@ class StateGraph:
                 continue
 
             # 3. Check unconditional edges
-            next_nodes = self._get_next_nodes(current)
-            if next_nodes is None:
+            next_node = self._get_next_node(current)
+            if next_node is None:
                 return state
-            current = next_nodes[0]
+            current = next_node
 
     async def _run_node(self, name: str, state: State) -> State:
         """Run a single node and return its output dict."""

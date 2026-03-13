@@ -264,9 +264,9 @@ async def wait_for_ci(pr_number: str, timeout: int = 600, poll_interval: int = 3
         ("fail", "<failure details>") if any check fails.
         ("timeout", "") if checks don't complete within timeout.
     """
-    elapsed = 0
+    deadline = time.monotonic() + timeout
     first_iteration = True
-    while elapsed < timeout:
+    while time.monotonic() < deadline:
         result = subprocess.run(
             ["gh", "pr", "checks", pr_number, "--json", "name,state,conclusion"],
             capture_output=True,
@@ -311,7 +311,6 @@ async def wait_for_ci(pr_number: str, timeout: int = 600, poll_interval: int = 3
         names = ", ".join(pending[:3]) + ("..." if len(pending) > 3 else "")
         print(f"  Waiting for CI ({len(pending)} pending: {names})...", flush=True)
         await asyncio.sleep(poll_interval)
-        elapsed += poll_interval
 
     print("  CI check timeout reached", flush=True)
     if _ctx:
@@ -383,33 +382,33 @@ def create_worktree_via_claude(issue_url: str, output_file: Path, permission_mod
                 _ctx.log(f"Worktree created at: {worktree_path}")
             return worktree_path
 
-    # Fallback: check git worktree list for our branch
+    # Fallback: scan git worktree list once, matching by path or branch ref
     wt_result = subprocess.run(
         ["git", "worktree", "list", "--porcelain"],
         capture_output=True,
         text=True,
     )
-    for line in wt_result.stdout.splitlines():
-        if line.startswith("worktree ") and branch_name.replace("/", "-") in line:
-            worktree_path = Path(line.split(" ", 1)[1])
-            if worktree_path.exists():
-                print(f"  Worktree found at: {worktree_path}", flush=True)
-                if _ctx:
-                    _ctx.log(f"Worktree found at: {worktree_path}")
-                return worktree_path
-
-    # Second fallback: look for branch in worktree list
-    current_worktree = None
+    current_worktree: str | None = None
+    path_match: Path | None = None
     for line in wt_result.stdout.splitlines():
         if line.startswith("worktree "):
             current_worktree = line.split(" ", 1)[1]
-        if line.startswith("branch ") and branch_name in line and current_worktree:
+            # Match by path (worktree dirs use dashes instead of slashes)
+            if branch_name.replace("/", "-") in current_worktree:
+                path_match = Path(current_worktree)
+        elif line.startswith("branch ") and branch_name in line and current_worktree:
+            # Match by branch ref
             worktree_path = Path(current_worktree)
             if worktree_path.exists():
                 print(f"  Worktree found at: {worktree_path}", flush=True)
                 if _ctx:
                     _ctx.log(f"Worktree found at: {worktree_path}")
                 return worktree_path
+    if path_match and path_match.exists():
+        print(f"  Worktree found at: {path_match}", flush=True)
+        if _ctx:
+            _ctx.log(f"Worktree found at: {path_match}")
+        return path_match
 
     print(
         f"Error: could not find worktree for branch {branch_name}. Check {output_file}",
@@ -866,14 +865,14 @@ def _decision_node(state: State) -> State:
             "previous_security_findings": security_review_text,
         }
 
-    run_claude(
+    decision_file = run_claude(
         _decision_prompt(code_review_text, security_review_text, ci_failures),
         Path(state["work_dir"]) / f"decision-{iteration}.json",
         state.get("permission_mode", "default"),
         model="sonnet",
         effort="low",
     )
-    decision = extract_result(Path(state["work_dir"]) / f"decision-{iteration}.json")
+    decision = extract_result(decision_file)
     decision_label = "YES (issues found)" if "YES" in decision.upper() else "NO (clean)"
     if _ctx:
         _ctx.log(f"REVIEW {iteration}: Decision — {decision_label}")

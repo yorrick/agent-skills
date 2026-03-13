@@ -20,6 +20,10 @@ import pytest
 from engine import END, MaxIterationsExceeded, State, StateGraph, claude_node, python_node, template_node
 
 
+async def _noop(state: dict[str, str]) -> dict[str, str]:
+    return {}
+
+
 def test_add_node():
     """Can add nodes to a graph."""
     graph = StateGraph()
@@ -34,12 +38,8 @@ def test_add_node():
 def test_add_edge():
     """Can add edges between nodes."""
     graph = StateGraph()
-
-    async def noop(state: dict[str, str]) -> dict[str, str]:
-        return {}
-
-    graph.add_node("a", noop)
-    graph.add_node("b", noop)
+    graph.add_node("a", _noop)
+    graph.add_node("b", _noop)
     graph.add_edge("start", "a")
     graph.add_edge("a", "b")
     assert len(graph._edges) == 2
@@ -48,12 +48,8 @@ def test_add_edge():
 def test_add_conditional_edges():
     """Can add conditional edges with a router."""
     graph = StateGraph()
-
-    async def noop(state: dict[str, str]) -> dict[str, str]:
-        return {}
-
-    graph.add_node("a", noop)
-    graph.add_node("b", noop)
+    graph.add_node("a", _noop)
+    graph.add_node("b", _noop)
 
     def router(state: dict[str, str]) -> str:
         return "b"
@@ -65,13 +61,9 @@ def test_add_conditional_edges():
 def test_add_parallel_edges():
     """Can add parallel edges from one source to multiple targets."""
     graph = StateGraph()
-
-    async def noop(state: dict[str, str]) -> dict[str, str]:
-        return {}
-
-    graph.add_node("source", noop)
-    graph.add_node("target1", noop)
-    graph.add_node("target2", noop)
+    graph.add_node("source", _noop)
+    graph.add_node("target1", _noop)
+    graph.add_node("target2", _noop)
     graph.add_parallel_edges("source", ["target1", "target2"])
     assert "source" in graph._parallel_edges
 

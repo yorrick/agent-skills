@@ -20,7 +20,9 @@ line-length = 120
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
+ignore = ["UP017"]  # datetime.UTC requires Python 3.11+, we target 3.10
 
 [tool.pyright]
 pythonVersion = "3.10"
 typeCheckingMode = "standard"
+extraPaths = ["dev-loop/scripts"]

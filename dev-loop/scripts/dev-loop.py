@@ -11,15 +11,19 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import re
 import subprocess
 import sys
 import time
-from concurrent.futures import Future, ProcessPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Import engine from same directory
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from engine import END, MaxIterationsExceeded, State, StateGraph, python_node
 
 
 class RunContext:
@@ -41,7 +45,7 @@ class RunContext:
         repo_root = self._git_root()
         self._start = time.monotonic()
 
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S")
+        timestamp = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d-%H%M%S")
         self._dir = repo_root / ".dev-loop" / "runs" / timestamp
         self._dir.mkdir(parents=True, exist_ok=True)
 
@@ -87,7 +91,7 @@ class RunContext:
 
     def log(self, message: str) -> None:
         """Append a timestamped line to dev-loop.log and print to stdout."""
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        ts = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         line = f"[{ts}] {message}"
         with open(self._dir / "dev-loop.log", "a") as f:
             f.write(line + "\n")
@@ -141,24 +145,31 @@ def run_claude(
     return output_file
 
 
+def _read_claude_output(json_file: Path) -> tuple[str | None, str]:
+    """Read claude JSON output once. Returns (error_msg_or_None, result_text)."""
+    try:
+        text = json_file.read_text()
+        data = json.loads(text)
+        if data.get("is_error"):
+            return data.get("result", "Unknown error"), ""
+        return None, data.get("result", data.get("message", json.dumps(data)))
+    except (json.JSONDecodeError, KeyError):
+        try:
+            return None, json_file.read_text()
+        except OSError:
+            return None, ""
+
+
 def check_claude_error(json_file: Path) -> str | None:
     """Check if a claude session output contains an error. Returns error message or None."""
-    try:
-        data = json.loads(json_file.read_text())
-        if data.get("is_error"):
-            return data.get("result", "Unknown error")
-    except (json.JSONDecodeError, KeyError):
-        pass
-    return None
+    err, _ = _read_claude_output(json_file)
+    return err
 
 
 def extract_result(json_file: Path) -> str:
     """Extract the result text from a claude JSON output file."""
-    try:
-        data = json.loads(json_file.read_text())
-        return data.get("result", data.get("message", json.dumps(data)))
-    except (json.JSONDecodeError, KeyError):
-        return json_file.read_text()
+    _, result = _read_claude_output(json_file)
+    return result
 
 
 def extract_pr_url(json_file: Path) -> str | None:
@@ -240,10 +251,7 @@ def gh_request_review(pr_number: str, reviewers: str) -> None:
         reviewer = reviewer.strip()
         if not reviewer:
             continue
-        if "/" in reviewer:
-            cmd += ["--add-reviewer", reviewer]
-        else:
-            cmd += ["--add-reviewer", reviewer]
+        cmd += ["--add-reviewer", reviewer]
     try:
         subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         print(f"  Requested review from: {reviewers}", flush=True)
@@ -255,7 +263,7 @@ def gh_request_review(pr_number: str, reviewers: str) -> None:
             _ctx.log(f"Warning: failed to request review: {e}")
 
 
-def wait_for_ci(pr_number: str, timeout: int = 600, poll_interval: int = 30) -> tuple[str, str]:
+async def wait_for_ci(pr_number: str, timeout: int = 600, poll_interval: int = 30) -> tuple[str, str]:
     """Wait for CI checks to complete and return (status, details).
 
     Returns:
@@ -263,27 +271,26 @@ def wait_for_ci(pr_number: str, timeout: int = 600, poll_interval: int = 30) -> 
         ("fail", "<failure details>") if any check fails.
         ("timeout", "") if checks don't complete within timeout.
     """
-    # First check if the PR has any checks at all
-    result = subprocess.run(
-        ["gh", "pr", "checks", pr_number, "--json", "name,state,conclusion"],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    if result.returncode != 0 or not result.stdout.strip() or result.stdout.strip() == "[]":
-        print("  No CI checks found, skipping CI wait", flush=True)
-        if _ctx:
-            _ctx.log("No CI checks found, skipping CI wait")
-        return ("pass", "")
 
-    elapsed = 0
-    while elapsed < timeout:
-        result = subprocess.run(
+    def _gh_pr_checks() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
             ["gh", "pr", "checks", pr_number, "--json", "name,state,conclusion"],
             capture_output=True,
             text=True,
             timeout=30,
         )
+
+    deadline = time.monotonic() + timeout
+    first_iteration = True
+    while time.monotonic() < deadline:
+        result = await asyncio.to_thread(_gh_pr_checks)
+        if first_iteration:
+            first_iteration = False
+            if result.returncode != 0 or not result.stdout.strip() or result.stdout.strip() == "[]":
+                print("  No CI checks found, skipping CI wait", flush=True)
+                if _ctx:
+                    _ctx.log("No CI checks found, skipping CI wait")
+                return ("pass", "")
         if result.returncode != 0:
             print(f"  Warning: failed to check CI status: {result.stderr}", flush=True)
             return ("pass", "")
@@ -314,8 +321,7 @@ def wait_for_ci(pr_number: str, timeout: int = 600, poll_interval: int = 30) -> 
         pending = [c["name"] for c in checks if c.get("state") != "COMPLETED"]
         names = ", ".join(pending[:3]) + ("..." if len(pending) > 3 else "")
         print(f"  Waiting for CI ({len(pending)} pending: {names})...", flush=True)
-        time.sleep(poll_interval)
-        elapsed += poll_interval
+        await asyncio.sleep(poll_interval)
 
     print("  CI check timeout reached", flush=True)
     if _ctx:
@@ -387,51 +393,39 @@ def create_worktree_via_claude(issue_url: str, output_file: Path, permission_mod
                 _ctx.log(f"Worktree created at: {worktree_path}")
             return worktree_path
 
-    # Fallback: check git worktree list for our branch
+    # Fallback: scan git worktree list once, matching by path or branch ref
     wt_result = subprocess.run(
         ["git", "worktree", "list", "--porcelain"],
         capture_output=True,
         text=True,
     )
-    for line in wt_result.stdout.splitlines():
-        if line.startswith("worktree ") and branch_name.replace("/", "-") in line:
-            worktree_path = Path(line.split(" ", 1)[1])
-            if worktree_path.exists():
-                print(f"  Worktree found at: {worktree_path}", flush=True)
-                if _ctx:
-                    _ctx.log(f"Worktree found at: {worktree_path}")
-                return worktree_path
-
-    # Second fallback: look for branch in worktree list
-    current_worktree = None
+    current_worktree: str | None = None
+    path_match: Path | None = None
     for line in wt_result.stdout.splitlines():
         if line.startswith("worktree "):
             current_worktree = line.split(" ", 1)[1]
-        if line.startswith("branch ") and branch_name in line and current_worktree:
+            # Match by path (worktree dirs use dashes instead of slashes)
+            if branch_name.replace("/", "-") in current_worktree:
+                path_match = Path(current_worktree)
+        elif line.startswith("branch ") and branch_name in line and current_worktree:
+            # Match by branch ref
             worktree_path = Path(current_worktree)
             if worktree_path.exists():
                 print(f"  Worktree found at: {worktree_path}", flush=True)
                 if _ctx:
                     _ctx.log(f"Worktree found at: {worktree_path}")
                 return worktree_path
+    if path_match and path_match.exists():
+        print(f"  Worktree found at: {path_match}", flush=True)
+        if _ctx:
+            _ctx.log(f"Worktree found at: {path_match}")
+        return path_match
 
     print(
         f"Error: could not find worktree for branch {branch_name}. Check {output_file}",
         file=sys.stderr,
     )
     sys.exit(1)
-
-
-def run_claude_bg(
-    prompt: str,
-    output_file: Path,
-    permission_mode: str = "default",
-    cwd: str | None = None,
-    model: str = "opus",
-    effort: str = "high",
-) -> None:
-    """Wrapper for ProcessPoolExecutor — must be top-level function."""
-    run_claude(prompt, output_file, permission_mode, Path(cwd) if cwd else None, model=model, effort=effort)
 
 
 def check_dependencies() -> bool:
@@ -624,64 +618,392 @@ def _fix_prompt(
     return "".join(parts)
 
 
-def _run_smoke_test_phase(
-    issue_url: str,
-    work_dir: Path,
-    permission_mode: str,
-    ctx: RunContext,
-    cwd: Path | None,
-    label: str,
-) -> bool:
-    """Run smoke test, optionally fix and retry once. Returns True on pass, False on abort."""
-    ctx.status("Phase 1.5", f"Smoke test{label}")
-    ctx.log(f"PHASE 1.5: Smoke test{label}")
+# --- Graph node wrappers ---
+# All nodes use python_node() wrappers around the existing run_claude() function
+# to preserve file artifact writing (.dev-loop/runs/) and the integration test contract.
+
+
+def _get_cwd(state: State) -> Path | None:
+    return Path(state["cwd"]) if state.get("cwd") else None
+
+
+def _worktree_setup_node(state: State) -> State:
+    """Set up a git worktree for the feature branch."""
+    worktree_path = create_worktree_via_claude(
+        state["issue_url"],
+        Path(state["work_dir"]) / "worktree-setup.json",
+        state.get("permission_mode", "default"),
+    )
+    return {"worktree_path": str(worktree_path), "cwd": str(worktree_path)}
+
+
+def _implement_node(state: State) -> State:
+    """Run implementation via Claude."""
+    cwd = _get_cwd(state)
+    impl_file = run_claude(
+        _implementation_prompt(state["issue_url"]),
+        Path(state["work_dir"]) / "implementation.json",
+        state.get("permission_mode", "default"),
+        cwd=cwd,
+        model="opus",
+        effort="high",
+    )
+    err, result = _read_claude_output(impl_file)
+    if err:
+        raise RuntimeError(f"Implementation failed: {err}")
+    return {"implementation_output": result}
+
+
+def _run_smoke_test(state: State, output_filename: str) -> tuple[str, str]:
+    """Run smoke test and return (result, error)."""
+    cwd = _get_cwd(state)
     smoke_file = run_claude(
-        _smoke_test_prompt(issue_url),
-        work_dir / "smoke-test.json",
-        permission_mode,
+        _smoke_test_prompt(state["issue_url"]),
+        Path(state["work_dir"]) / output_filename,
+        state.get("permission_mode", "default"),
         cwd=cwd,
         model="opus",
         effort="high",
     )
-    err = check_claude_error(smoke_file)
-    smoke_result = extract_result(smoke_file) if not err else ""
+    err, smoke_result = _read_claude_output(smoke_file)
+    return smoke_result, err or ""
 
-    if not err and "SMOKE_TEST_FAIL" not in smoke_result:
-        ctx.log(f"PHASE 1.5: Smoke test PASSED{label}")
-        return True
 
-    ctx.status("Phase 1.5", f"Fixing smoke test failures{label}")
-    ctx.log("PHASE 1.5: Smoke test FAILED, running fix cycle")
+def _smoke_test_node(state: State) -> State:
+    """Run smoke test."""
+    smoke_result, err = _run_smoke_test(state, "smoke-test.json")
+    return {"smoke_test_output": smoke_result, "smoke_test_error": err}
+
+
+def _smoke_test_fix_node(state: State) -> State:
+    """Fix smoke test failures."""
+    cwd = _get_cwd(state)
     run_claude(
-        _smoke_test_fix_prompt(issue_url, smoke_result or err or ""),
-        work_dir / "smoke-test-fix.json",
-        permission_mode,
+        _smoke_test_fix_prompt(
+            state["issue_url"], state.get("smoke_test_output", "") or state.get("smoke_test_error", "")
+        ),
+        Path(state["work_dir"]) / "smoke-test-fix.json",
+        state.get("permission_mode", "default"),
         cwd=cwd,
         model="opus",
         effort="high",
     )
+    return {}
 
-    ctx.status("Phase 1.5", f"Smoke test retry{label}")
-    ctx.log("PHASE 1.5: Smoke test retry")
-    smoke_retry_file = run_claude(
-        _smoke_test_prompt(issue_url),
-        work_dir / "smoke-test-retry.json",
-        permission_mode,
+
+def _smoke_test_retry_node(state: State) -> State:
+    """Re-run smoke test after fix."""
+    smoke_result, err = _run_smoke_test(state, "smoke-test-retry.json")
+    if err or "SMOKE_TEST_FAIL" in smoke_result:
+        if _ctx:
+            _ctx.status("Error", "Smoke test failed after fix attempt")
+            _ctx.log("ERROR: Smoke test still failing after fix attempt")
+            _ctx.notify("dev-loop aborted: smoke test failed after fix attempt")
+        return {"smoke_test_retry_output": smoke_result, "smoke_test_retry_failed": "true"}
+    return {"smoke_test_retry_output": smoke_result}
+
+
+def _create_pr_node(state: State) -> State:
+    """Create PR and assign self."""
+    cwd = _get_cwd(state)
+    pr_file = run_claude(
+        _pr_creation_prompt(state["issue_url"]),
+        Path(state["work_dir"]) / "pr-creation.json",
+        state.get("permission_mode", "default"),
+        cwd=cwd,
+        model="sonnet",
+        effort="low",
+    )
+    err, _ = _read_claude_output(pr_file)
+    if err:
+        raise RuntimeError(f"PR creation failed: {err}")
+
+    pr_url = extract_pr_url(Path(state["work_dir"]) / "pr-creation.json")
+    if not pr_url:
+        raise RuntimeError(f"Could not extract PR URL. Check {Path(state['work_dir']) / 'pr-creation.json'}")
+
+    if _ctx:
+        _ctx.log(f"PR created: {pr_url}")
+        _ctx.notify("PR created — starting review loop")
+    gh_assign_self(pr_url)
+    gh_comment(
+        pr_url,
+        (
+            "### dev-loop: Implementation complete\n\n"
+            "Starting automated review loop (simplify + code review + security review).\n\n"
+            f"Max iterations: {state.get('max_iterations', '5')}"
+        ),
+    )
+    return {"pr_url": pr_url}
+
+
+def _continue_pr_push_node(state: State) -> State:
+    """Push commits and detect existing PR for --continue-pr mode."""
+    cwd = _get_cwd(state)
+    push_file = run_claude(
+        "Push all commits on the current branch to the remote.",
+        Path(state["work_dir"]) / "push.json",
+        state.get("permission_mode", "default"),
+        cwd=cwd,
+        model="sonnet",
+        effort="low",
+    )
+    err = check_claude_error(push_file)
+    if err:
+        raise RuntimeError(f"Push failed: {err}")
+
+    pr_url = detect_pr_url()
+    if _ctx:
+        _ctx.log(f"Using existing PR: {pr_url}")
+        _ctx.notify("Implementation complete (continue-pr) -- starting review loop")
+    gh_comment(
+        pr_url,
+        (
+            "### dev-loop: Implementation complete (continue-pr)\n\n"
+            "Starting automated review loop (simplify + code review + security review).\n\n"
+            f"Max iterations: {state.get('max_iterations', '5')}"
+        ),
+    )
+    return {"pr_url": pr_url}
+
+
+def _simplify_node(state: State) -> State:
+    """Run simplify pass."""
+    cwd = _get_cwd(state)
+    iteration = int(state.get("iteration_count", "1"))
+    max_iterations = state.get("max_iterations", "5")
+    pr_url = state.get("pr_url", "")
+    if pr_url:
+        gh_comment(pr_url, f"### dev-loop: Review iteration {iteration}/{max_iterations}")
+    simplify_file = run_claude(
+        "/simplify",
+        Path(state["work_dir"]) / f"simplify-{iteration}.json",
+        state.get("permission_mode", "default"),
+        cwd=cwd,
+        model="sonnet",
+        effort="high",
+    )
+    err = check_claude_error(simplify_file)
+    if err:
+        raise RuntimeError(f"Simplify failed: {err}")
+    return {}
+
+
+def _simplify_commit_node(state: State) -> State:
+    """Commit and push simplify changes."""
+    cwd = _get_cwd(state)
+    iteration = int(state.get("iteration_count", "1"))
+    run_claude(
+        "If there are any uncommitted changes from the simplify pass, "
+        "commit them with a descriptive message and push to the current branch.",
+        Path(state["work_dir"]) / f"simplify-commit-{iteration}.json",
+        state.get("permission_mode", "default"),
+        cwd=cwd,
+        model="sonnet",
+        effort="low",
+    )
+    return {}
+
+
+def _code_review_node(state: State) -> State:
+    """Run code review."""
+    cwd = _get_cwd(state)
+    iteration = int(state.get("iteration_count", "1"))
+    pr_url = state["pr_url"]
+    review_file = run_claude(
+        f"/code-review:code-review {pr_url}",
+        Path(state["work_dir"]) / f"code-review-{iteration}.json",
+        state.get("permission_mode", "default"),
+        cwd,
+        "opus",
+        "high",
+    )
+    err, result = _read_claude_output(review_file)
+    if err:
+        raise RuntimeError(f"Code review failed: {err}")
+    return {"code_review_output": result}
+
+
+def _security_review_node(state: State) -> State:
+    """Run security review."""
+    cwd = _get_cwd(state)
+    iteration = int(state.get("iteration_count", "1"))
+    pr_url = state["pr_url"]
+    previous_findings = state.get("previous_security_findings", "")
+    review_file = run_claude(
+        _security_review_prompt(pr_url, previous_findings),
+        Path(state["work_dir"]) / f"security-review-{iteration}.json",
+        state.get("permission_mode", "default"),
+        cwd,
+        "opus",
+        "high",
+    )
+    err, result = _read_claude_output(review_file)
+    if err:
+        raise RuntimeError(f"Security review failed: {err}")
+    return {"security_review_output": result}
+
+
+async def _wait_for_ci_node(state: State) -> State:
+    """Wait for CI checks to complete."""
+    pr_url = state["pr_url"]
+    pr_number = extract_pr_number(pr_url)
+    ci_status, ci_failures = await wait_for_ci(pr_number)
+    iteration = state.get("iteration_count", "1")
+    if _ctx:
+        _ctx.log(f"REVIEW {iteration}: CI status — {ci_status}")
+    if ci_failures:
+        gh_comment(pr_url, f"### dev-loop: CI/CD failures (iteration {iteration})\n\n```\n{ci_failures}\n```")
+    return {"ci_status": ci_status, "ci_failures": ci_failures}
+
+
+def _decision_node(state: State) -> State:
+    """Evaluate review findings and decide whether to fix or finish."""
+    code_review_text = state.get("code_review_output", "")
+    security_review_text = state.get("security_review_output", "")
+    ci_status = state.get("ci_status", "pass")
+    ci_failures = state.get("ci_failures", "")
+    iteration = int(state.get("iteration_count", "1"))
+
+    # CI failure automatically means YES (must fix)
+    if ci_status == "fail":
+        if _ctx:
+            _ctx.log("CI failed — forcing fix iteration")
+        return {
+            "decision_output": "YES",
+            "iteration_count": str(iteration),
+            "previous_security_findings": security_review_text,
+        }
+
+    decision_file = run_claude(
+        _decision_prompt(code_review_text, security_review_text, ci_failures),
+        Path(state["work_dir"]) / f"decision-{iteration}.json",
+        state.get("permission_mode", "default"),
+        model="sonnet",
+        effort="low",
+    )
+    decision = extract_result(decision_file)
+    decision_label = "YES (issues found)" if "YES" in decision.upper() else "NO (clean)"
+    if _ctx:
+        _ctx.log(f"REVIEW {iteration}: Decision — {decision_label}")
+    return {
+        "decision_output": decision,
+        "iteration_count": str(iteration),
+        "previous_security_findings": security_review_text,
+    }
+
+
+def _fix_node(state: State) -> State:
+    """Fix issues found during review."""
+    cwd = _get_cwd(state)
+    iteration = int(state.get("iteration_count", "1"))
+    pr_url = state["pr_url"]
+    code_review_text = state.get("code_review_output", "")
+    security_review_text = state.get("security_review_output", "")
+    ci_failures = state.get("ci_failures", "")
+    issue_url = state.get("issue_url")
+
+    run_claude(
+        _fix_prompt(pr_url, code_review_text, security_review_text, issue_url=issue_url, ci_failures=ci_failures),
+        Path(state["work_dir"]) / f"fix-{iteration}.json",
+        state.get("permission_mode", "default"),
         cwd=cwd,
         model="opus",
         effort="high",
     )
-    retry_err = check_claude_error(smoke_retry_file)
-    retry_result = extract_result(smoke_retry_file) if not retry_err else ""
+    # Increment iteration count for next round
+    return {"iteration_count": str(iteration + 1)}
 
-    if retry_err or "SMOKE_TEST_FAIL" in retry_result:
-        ctx.status("Error", "Smoke test failed after fix attempt")
-        ctx.log("ERROR: Smoke test still failing after fix attempt")
-        ctx.notify("dev-loop aborted: smoke test failed after fix attempt")
-        return False
 
-    ctx.log(f"PHASE 1.5: Smoke test PASSED{label}")
-    return True
+# --- Router functions ---
+
+
+def _smoke_test_router(state: State) -> str:
+    """Route based on smoke test results and mode."""
+    smoke_output = state.get("smoke_test_output", "")
+    smoke_error = state.get("smoke_test_error", "")
+    if smoke_error or "SMOKE_TEST_FAIL" in smoke_output:
+        return "fail"
+    # In continue-pr mode, go to push instead of create_pr
+    if state.get("mode") == "continue_pr":
+        return "pass_continue"
+    return "pass"
+
+
+def _post_smoke_test_router(state: State) -> str:
+    """Route based on smoke test retry result — abort on persistent failure."""
+    if state.get("smoke_test_retry_failed") == "true":
+        return "abort"
+    if state.get("mode") == "continue_pr":
+        return "continue_pr_push"
+    return "create_pr"
+
+
+def _decision_router(state: State) -> str:
+    """Route based on decision gate output."""
+    decision = state.get("decision_output", "NO")
+    if "YES" in decision.upper():
+        return "fix"
+    return "done"
+
+
+def _build_graph(max_iterations: int) -> StateGraph:
+    """Build the dev-loop workflow graph."""
+    graph = StateGraph(max_iterations=max_iterations)
+
+    # Register all nodes
+    graph.add_node("worktree_setup", python_node(_worktree_setup_node))
+    graph.add_node("implement", python_node(_implement_node))
+    graph.add_node("smoke_test", python_node(_smoke_test_node))
+    graph.add_node("smoke_test_fix", python_node(_smoke_test_fix_node))
+    graph.add_node("smoke_test_retry", python_node(_smoke_test_retry_node))
+    graph.add_node("create_pr", python_node(_create_pr_node))
+    graph.add_node("continue_pr_push", python_node(_continue_pr_push_node))
+    graph.add_node("simplify", python_node(_simplify_node))
+    graph.add_node("simplify_commit", python_node(_simplify_commit_node))
+    graph.add_node("code_review", python_node(_code_review_node))
+    graph.add_node("security_review", python_node(_security_review_node))
+    graph.add_node("wait_for_ci", python_node(_wait_for_ci_node))
+    graph.add_node("decision", python_node(_decision_node))
+    graph.add_node("fix", python_node(_fix_node))
+
+    # Phase 1 edges (default path: worktree -> implement -> smoke_test -> create_pr)
+    graph.add_edge("start", "worktree_setup")
+    graph.add_edge("worktree_setup", "implement")
+    graph.add_edge("implement", "smoke_test")
+    graph.add_conditional_edges(
+        "smoke_test",
+        _smoke_test_router,
+        {
+            "pass": "create_pr",
+            "pass_continue": "continue_pr_push",
+            "fail": "smoke_test_fix",
+        },
+    )
+    graph.add_edge("smoke_test_fix", "smoke_test_retry")
+    # After retry, proceed to PR node or abort if still failing
+    graph.add_conditional_edges(
+        "smoke_test_retry",
+        _post_smoke_test_router,
+        {
+            "create_pr": "create_pr",
+            "continue_pr_push": "continue_pr_push",
+            "abort": END,
+        },
+    )
+    graph.add_edge("create_pr", "simplify")
+    graph.add_edge("continue_pr_push", "simplify")
+
+    # Phase 2 edges (review loop)
+    graph.add_edge("simplify", "simplify_commit")
+    graph.add_parallel_edges("simplify_commit", ["code_review", "security_review"])
+    graph.add_edge("code_review", "wait_for_ci")
+    graph.add_edge("security_review", "wait_for_ci")
+    graph.add_edge("wait_for_ci", "decision")
+    graph.add_conditional_edges("decision", _decision_router, {"fix": "fix", "done": END})
+    graph.add_edge("fix", "simplify")
+
+    return graph
 
 
 def main() -> int:
@@ -727,7 +1049,6 @@ def main() -> int:
         return 1
 
     permission_mode = "bypassPermissions" if args.skip_permissions else "default"
-    pr_url = args.review_only
     ctx = RunContext()
     global _ctx
     _ctx = ctx
@@ -740,290 +1061,97 @@ def main() -> int:
         f" skip_permissions={args.skip_permissions}, reviewers={args.reviewers}"
     )
 
-    # --- Phase 1: Implementation ---
-    worktree_path: Path | None = None
-    if args.continue_pr:
-        # --continue-pr: implement in current directory, push, detect PR, review
-        ctx.status("Phase 1", "Implementing plan (continue-pr)")
-        ctx.log("PHASE 1: Implementing plan in current directory (continue-pr)")
-        impl_file = run_claude(
-            _implementation_prompt(issue_url),
-            work_dir / "implementation.json",
-            permission_mode,
-            cwd=None,
-            model="opus",
-            effort="high",
-        )
-        err = check_claude_error(impl_file)
-        if err:
-            print(f"Error during implementation: {err}", file=sys.stderr)
-            ctx.status("Error", "Implementation failed")
-            ctx.log(f"ERROR: Implementation failed: {err}")
-            ctx.notify("dev-loop aborted: implementation failed")
+    # Build the workflow graph
+    graph = _build_graph(args.max_iterations)
+
+    # Wire up observability
+    last_known_state: State = {}
+
+    @graph.on_node_start
+    async def _on_start(node_name: str, state: State) -> None:
+        ctx.status(node_name, "Running")
+        ctx.log(f"Starting: {node_name}")
+
+    @graph.on_node_end
+    async def _on_end(node_name: str, state: State) -> None:
+        ctx.log(f"Finished: {node_name}")
+        last_known_state.update(state)
+
+    @graph.on_error
+    async def _on_err(node_name: str, error: Exception) -> None:
+        ctx.log(f"ERROR in {node_name}: {error}")
+
+    # Build initial state
+    initial_state: State = {
+        "issue_url": issue_url,
+        "work_dir": str(work_dir),
+        "permission_mode": permission_mode,
+        "max_iterations": str(args.max_iterations),
+        "reviewers": args.reviewers,
+        "previous_security_findings": "",
+        "iteration_count": "1",
+    }
+
+    # Determine start node and mode-specific state
+    start: str | None = None
+    if args.review_only:
+        initial_state["pr_url"] = args.review_only
+        initial_state["cwd"] = ""  # use current directory
+        start = "simplify"
+    elif args.continue_pr:
+        initial_state["cwd"] = ""  # use current directory
+        initial_state["mode"] = "continue_pr"
+        start = "implement"
+
+    try:
+        result = asyncio.run(graph.run(initial_state, start_node=start))
+
+        # Smoke test abort: graph returned normally but the smoke test failed
+        if result.get("smoke_test_retry_failed") == "true":
+            ctx.status("Failed", "Smoke test failed — aborting")
+            ctx.log("FAILED: Smoke test failed after retry — aborting")
+            ctx.notify("dev-loop aborted: smoke test failed after retry")
             return 1
 
-        # --- Phase 1.5: Smoke test ---
-        if not _run_smoke_test_phase(issue_url, work_dir, permission_mode, ctx, cwd=None, label=" (continue-pr)"):
-            return 1
-
-        ctx.status("Phase 1b", "Pushing commits (continue-pr)")
-        ctx.log("PHASE 1b: Pushing commits (continue-pr)")
-        push_file = run_claude(
-            "Push all commits on the current branch to the remote.",
-            work_dir / "push.json",
-            permission_mode,
-            cwd=None,
-            model="sonnet",
-            effort="low",
-        )
-        err = check_claude_error(push_file)
-        if err:
-            print(f"Error during push: {err}", file=sys.stderr)
-            ctx.status("Error", "Push failed")
-            ctx.log(f"ERROR: Push failed: {err}")
-            ctx.notify("dev-loop aborted: push failed")
-            return 1
-
-        pr_url = detect_pr_url()
-        ctx.log(f"Using existing PR: {pr_url}")
-        ctx.notify("Implementation complete (continue-pr) -- starting review loop")
-        gh_comment(
-            pr_url,
-            (
-                "### dev-loop: Implementation complete (continue-pr)\n\n"
-                "Starting automated review loop (simplify + code review + security review).\n\n"
-                f"Max iterations: {args.max_iterations}"
-            ),
-        )
-
-    elif not pr_url:
-        ctx.status("Phase 0", "Setting up worktree")
-        ctx.log("PHASE 0: Setting up worktree")
-        worktree_path = create_worktree_via_claude(issue_url, work_dir / "worktree-setup.json", permission_mode)
-        ctx.log(f"Worktree created at: {worktree_path}")
-
-        ctx.status("Phase 1", "Implementing plan")
-        ctx.log("PHASE 1: Implementing plan")
-        impl_file = run_claude(
-            _implementation_prompt(issue_url),
-            work_dir / "implementation.json",
-            permission_mode,
-            cwd=worktree_path,
-            model="opus",
-            effort="high",
-        )
-        err = check_claude_error(impl_file)
-        if err:
-            print(f"Error during implementation: {err}", file=sys.stderr)
-            ctx.status("Error", "Implementation failed")
-            ctx.log(f"ERROR: Implementation failed: {err}")
-            ctx.notify("dev-loop aborted: implementation failed")
-            return 1
-
-        # --- Phase 1.5: Smoke test ---
-        if not _run_smoke_test_phase(issue_url, work_dir, permission_mode, ctx, cwd=worktree_path, label=""):
-            return 1
-
-        ctx.status("Phase 1b", "Creating PR")
-        ctx.log("PHASE 1b: Creating PR")
-        pr_file = run_claude(
-            _pr_creation_prompt(issue_url),
-            work_dir / "pr-creation.json",
-            permission_mode,
-            cwd=worktree_path,
-            model="sonnet",
-            effort="low",
-        )
-        err = check_claude_error(pr_file)
-        if err:
-            print(f"Error during PR creation: {err}", file=sys.stderr)
-            ctx.status("Error", "PR creation failed")
-            ctx.log(f"ERROR: PR creation failed: {err}")
-            ctx.notify("dev-loop aborted: PR creation failed")
-            return 1
-
-        pr_url = extract_pr_url(work_dir / "pr-creation.json")
-        if not pr_url:
-            print(
-                f"Error: could not extract PR URL. Check {work_dir / 'pr-creation.json'}",
-                file=sys.stderr,
-            )
-            return 1
-
-        ctx.log(f"PR created: {pr_url}")
-        ctx.notify("PR created \u2014 starting review loop")
-        gh_assign_self(pr_url)
-        gh_comment(
-            pr_url,
-            (
-                "### dev-loop: Implementation complete\n\n"
-                "Starting automated review loop (simplify + code review + security review).\n\n"
-                f"Max iterations: {args.max_iterations}"
-            ),
-        )
-
-    # --- Phase 2: Review loop ---
-    previous_security_findings = ""
-    for iteration in range(1, args.max_iterations + 1):
-        ctx.status(f"Review {iteration}/{args.max_iterations}", "Starting")
-        ctx.log(f"REVIEW {iteration}/{args.max_iterations}: Starting")
-        gh_comment(pr_url, f"### dev-loop: Review iteration {iteration}/{args.max_iterations}")
-
-        # Step 1: Simplify
-        ctx.status(f"Review {iteration}/{args.max_iterations}", "Simplify")
-        ctx.log(f"REVIEW {iteration}/{args.max_iterations}: Simplify")
-        simplify_file = run_claude(
-            "/simplify",
-            work_dir / f"simplify-{iteration}.json",
-            permission_mode,
-            cwd=worktree_path,
-            model="sonnet",
-            effort="high",
-        )
-        err = check_claude_error(simplify_file)
-        if err:
-            ctx.status("Error", f"Simplify failed: {err}")
-            ctx.log(f"ERROR: Simplify failed: {err}")
-            ctx.notify("dev-loop aborted: simplify failed")
-            gh_comment(pr_url, f"### dev-loop: Aborted\n\nError during simplify step: {err}")
-            return 1
-
-        run_claude(
-            "If there are any uncommitted changes from the simplify pass, "
-            "commit them with a descriptive message and push to the current branch.",
-            work_dir / f"simplify-commit-{iteration}.json",
-            permission_mode,
-            cwd=worktree_path,
-            model="sonnet",
-            effort="low",
-        )
-
-        # Step 2: Code review + Security review in parallel
-        ctx.status(f"Review {iteration}/{args.max_iterations}", "Code review + Security review (parallel)")
-        ctx.log(f"REVIEW {iteration}/{args.max_iterations}: Code review + Security review (parallel)")
-
-        cwd_str = str(worktree_path) if worktree_path else None
-        with ProcessPoolExecutor(max_workers=2) as executor:
-            code_review_future: Future = executor.submit(
-                run_claude_bg,
-                f"/code-review:code-review {pr_url}",
-                work_dir / f"code-review-{iteration}.json",
-                permission_mode,
-                cwd_str,
-                "opus",
-                "high",
-            )
-            security_review_future: Future = executor.submit(
-                run_claude_bg,
-                _security_review_prompt(pr_url, previous_security_findings),
-                work_dir / f"security-review-{iteration}.json",
-                permission_mode,
-                cwd_str,
-                "opus",
-                "high",
-            )
-            code_review_future.result()
-            security_review_future.result()
-
-        ctx.log(f"Code review: {work_dir / f'code-review-{iteration}.json'}")
-        ctx.log(f"Security review: {work_dir / f'security-review-{iteration}.json'}")
-
-        # Check for errors in review sessions
-        for review_name in ("code-review", "security-review"):
-            review_file = work_dir / f"{review_name}-{iteration}.json"
-            err = check_claude_error(review_file)
-            if err:
-                ctx.status("Error", f"{review_name} failed")
-                ctx.log(f"ERROR: {review_name} failed: {err}")
-                ctx.notify(f"dev-loop aborted: {review_name} failed")
-                gh_comment(pr_url, f"### dev-loop: Aborted\n\nError during {review_name}: {err}")
-                return 1
-
-        # Step 2b: Wait for CI checks
-        ctx.status(f"Review {iteration}/{args.max_iterations}", "Checking CI/CD")
-        ctx.log(f"REVIEW {iteration}/{args.max_iterations}: Checking CI/CD")
-        pr_number = extract_pr_number(pr_url)
-        ci_status, ci_failures = wait_for_ci(pr_number)
-        ctx.log(f"REVIEW {iteration}/{args.max_iterations}: CI status \u2014 {ci_status}")
-
-        if ci_failures:
-            gh_comment(pr_url, f"### dev-loop: CI/CD failures (iteration {iteration})\n\n```\n{ci_failures}\n```")
-
-        # Step 3: Decision gate
-        code_review_text = extract_result(work_dir / f"code-review-{iteration}.json")
-        security_review_text = extract_result(work_dir / f"security-review-{iteration}.json")
-        previous_security_findings = security_review_text
-
-        ctx.status(f"Review {iteration}/{args.max_iterations}", "Decision gate")
-        ctx.log(f"REVIEW {iteration}/{args.max_iterations}: Decision gate")
-
-        # CI failure automatically means YES (must fix)
-        if ci_status == "fail":
-            ctx.log("CI failed \u2014 forcing fix iteration")
-            decision = "YES"
-        else:
-            run_claude(
-                _decision_prompt(code_review_text, security_review_text),
-                work_dir / f"decision-{iteration}.json",
-                permission_mode,
-                model="sonnet",
-                effort="low",
-            )
-            decision = extract_result(work_dir / f"decision-{iteration}.json")
-
-        decision_label = "YES (issues found)" if "YES" in decision.upper() else "NO (clean)"
-        ctx.log(f"REVIEW {iteration}/{args.max_iterations}: Decision \u2014 {decision_label}")
-
-        if "NO" in decision.upper():
-            ctx.status("Done", f"No critical issues after {iteration} iterations")
-            ctx.log(f"DONE: PR ready after {iteration} iterations")
-            ctx.notify(f"PR ready for review after {iteration} iterations")
-            pr_num = extract_pr_number(pr_url)
-            if args.reviewers:
-                gh_request_review(pr_num, args.reviewers)
+        # Post-success actions
+        pr_url = result.get("pr_url", "")
+        iterations = result.get("iteration_count", "?")
+        if args.reviewers and pr_url:
+            gh_request_review(extract_pr_number(pr_url), args.reviewers)
+        if pr_url:
             gh_comment(
                 pr_url,
                 (
                     "### dev-loop: Review complete\n\n"
-                    f"No critical issues found after {iteration} iteration(s). "
-                    "CI passing. PR is ready for human review."
+                    f"No critical issues found after {iterations} iteration(s). "
+                    "PR is ready for human review."
                 ),
             )
-            ctx.log(f"PR: {pr_url}")
-            ctx.log(f"Review artifacts: {work_dir}")
-            return 0
-
-        # Step 4: Fix issues
-        ctx.notify(f"Review {iteration}/{args.max_iterations}: Critical issues found, fixing...")
-        if ci_status == "fail":
-            ctx.notify(f"Review {iteration}/{args.max_iterations}: CI failed, fixing...")
-        ctx.status(f"Review {iteration}/{args.max_iterations}", "Fixing issues")
-        ctx.log(f"REVIEW {iteration}/{args.max_iterations}: Fixing issues")
-        run_claude(
-            _fix_prompt(pr_url, code_review_text, security_review_text, issue_url=issue_url, ci_failures=ci_failures),
-            work_dir / f"fix-{iteration}.json",
-            permission_mode,
-            cwd=worktree_path,
-            model="opus",
-            effort="high",
-        )
-
-    ctx.status("Failed", f"Max iterations reached ({args.max_iterations})")
-    ctx.log(f"FAILED: Max iterations reached ({args.max_iterations})")
-    ctx.notify(f"PR needs manual review ({args.max_iterations} iterations exhausted)")
-    pr_num = extract_pr_number(pr_url)
-    if args.reviewers:
-        gh_request_review(pr_num, args.reviewers)
-    gh_comment(
-        pr_url,
-        (
-            f"### dev-loop: Max iterations reached ({args.max_iterations})\n\n"
-            "There are still outstanding issues. Please review manually."
-        ),
-    )
-    ctx.log(f"PR: {pr_url}")
-    ctx.log(f"Review artifacts: {work_dir}")
-    return 1
+        ctx.status("Done", f"No critical issues after {iterations} iterations")
+        ctx.log(f"DONE: PR ready after {iterations} iterations")
+        ctx.notify(f"PR ready for review after {iterations} iterations")
+        ctx.log(f"PR: {pr_url}")
+        return 0
+    except MaxIterationsExceeded:
+        pr_url = last_known_state.get("pr_url", "")
+        if pr_url:
+            gh_comment(
+                pr_url,
+                (
+                    "### dev-loop: Max iterations reached\n\n"
+                    f"Review loop exhausted {args.max_iterations} iteration(s) "
+                    "without resolving all issues. PR needs manual review."
+                ),
+            )
+        ctx.status("Failed", f"Max iterations reached ({args.max_iterations})")
+        ctx.log(f"FAILED: Max iterations reached ({args.max_iterations})")
+        ctx.notify(f"PR needs manual review ({args.max_iterations} iterations exhausted)")
+        return 1
+    except Exception as e:
+        ctx.status("Error", str(e))
+        ctx.log(f"ERROR: {e}")
+        ctx.notify(f"dev-loop aborted: {e}")
+        return 1
 
 
 if __name__ == "__main__":

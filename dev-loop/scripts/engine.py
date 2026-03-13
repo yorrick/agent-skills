@@ -137,6 +137,73 @@ class StateGraph:
                 return target
         return None
 
+    def to_mermaid(self) -> str:
+        """Generate a Mermaid flowchart string from the graph structure.
+
+        Renders nodes, unconditional edges, conditional edges (with labels),
+        parallel edges, and the END sentinel as a terminal node.
+        """
+        lines: list[str] = ["graph TD"]
+
+        # Collect all referenced node names to determine what to render
+        referenced: set[str] = set()
+        has_start = False
+        has_end = False
+
+        for edge in self._edges:
+            referenced.add(edge.source)
+            if isinstance(edge.target, _EndSentinel):
+                has_end = True
+            else:
+                referenced.add(edge.target)
+            if edge.source == "start":
+                has_start = True
+
+        for ce in self._conditional_edges:
+            referenced.add(ce.source)
+            for target in ce.route_map.values():
+                if isinstance(target, _EndSentinel):
+                    has_end = True
+                else:
+                    referenced.add(target)
+
+        for source, targets in self._parallel_edges.items():
+            referenced.add(source)
+            for t in targets:
+                referenced.add(t)
+
+        # Node declarations
+        if has_start:
+            lines.append("    start([start])")
+
+        for name in self._nodes:
+            if name in referenced or name in self._nodes:
+                lines.append(f"    {name}[{name}]")
+
+        if has_end:
+            lines.append("    END_node((END))")
+
+        # Blank line before edges
+        lines.append("")
+
+        # Unconditional edges
+        for edge in self._edges:
+            target = "END_node" if isinstance(edge.target, _EndSentinel) else edge.target
+            lines.append(f"    {edge.source} --> {target}")
+
+        # Conditional edges (with labels)
+        for ce in self._conditional_edges:
+            for label, target in ce.route_map.items():
+                target_name = "END_node" if isinstance(target, _EndSentinel) else target
+                lines.append(f"    {ce.source} -->|{label}| {target_name}")
+
+        # Parallel edges
+        for source, targets in self._parallel_edges.items():
+            for t in targets:
+                lines.append(f"    {source} --> {t}")
+
+        return "\n".join(lines)
+
     def _find_start_node(self, start_node: str | None) -> str:
         """Find the first node to execute."""
         if start_node is not None:
@@ -364,6 +431,39 @@ def python_node(fn: Callable[[State], State] | Callable[[State], Awaitable[State
 
     async def _node(state: State) -> State:
         return await asyncio.to_thread(fn, state)  # type: ignore[return-value]
+
+    return _node
+
+
+def shell_node(
+    command_template: str,
+    output_key: str = "output",
+    cwd: Path | None = None,
+) -> NodeFn:
+    """Create a node that runs an arbitrary shell command.
+
+    Interpolates state keys into *command_template* using ``{key}`` syntax,
+    then executes via an async subprocess.  Captures stdout as raw text into
+    *output_key*.  Raises ``RuntimeError`` on non-zero exit code.
+    """
+
+    async def _node(state: State) -> State:
+        command = command_template.format_map(state)
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+        )
+        stdout_bytes, stderr_bytes = await proc.communicate()
+        stdout = stdout_bytes.decode() if stdout_bytes else ""
+
+        if proc.returncode != 0:
+            stderr = stderr_bytes.decode() if stderr_bytes else ""
+            raise RuntimeError(f"Shell command failed (exit {proc.returncode}): {stderr[:500]}")
+
+        return {output_key: stdout}
 
     return _node
 

@@ -1,0 +1,35 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "b6237cc79eec",
+  "session_id": "bc336aa2-1152-4451-b76f-193cd3ad122d",
+  "strategy": "manual-commit",
+  "created_at": "2026-03-13T20:05:31.378379Z",
+  "branch": "worktree-workflow-command",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "dev-loop/commands/workflow.md",
+    "dev-loop/scripts/engine.py",
+    "dev-loop/tests/test_engine.py"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "1a11ce42f320",
+  "token_usage": {
+    "input_tokens": 8,
+    "cache_creation_tokens": 30750,
+    "cache_read_tokens": 145070,
+    "output_tokens": 521,
+    "api_call_count": 6
+  },
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-03-13T20:05:31.340966Z",
+    "agent_lines": 0,
+    "human_added": 0,
+    "human_modified": 34,
+    "human_removed": 25,
+    "total_committed": 0,
+    "agent_percentage": 0
+  }
+}

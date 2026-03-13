@@ -105,33 +105,59 @@ def router(state: dict[str, str]) -> str:
     return "fix"
 ```
 
+## Choosing model and effort level
+
+Pick the cheapest/fastest option that can handle the step. Don't use Opus with high effort for everything.
+
+| Task type | Recommended | Example |
+|-----------|-------------|---------|
+| Simple code fix, formatting, renaming | `model="sonnet", effort="low"` | Fixing a typo, renaming a variable |
+| Standard implementation, bug fix | `model="sonnet", effort="medium"` | Implementing a function from clear specs |
+| Complex reasoning, multi-file refactor | `model="opus", effort="high"` | Architectural changes, tricky bugs |
+| Code review, security audit | `model="opus", effort="high"` | Reviewing PRs for subtle issues |
+| Quick generation, boilerplate | `codex_node` or `gemini_node` | Scaffolding, docstrings, simple tests |
+
+```python
+# Quick fix — sonnet is enough
+claude_node("Fix this typo: {error}", model="sonnet", effort="low")
+
+# Deep review — use opus
+claude_node("Review for security issues: {code}", model="opus", effort="high")
+```
+
 ## Example workflows
 
-### 1. Test-fix loop
+### 1. Test-fix loop with commit
 
 ```python
 graph.add_node("test", shell_node("uv run pytest -x", output_key="test_output", check=False))
 graph.add_node("fix", claude_node(
     "These tests failed. Fix the code:\n\n{test_output}",
     output_key="fix_output",
+    model="sonnet", effort="medium",
     permission_mode="bypassPermissions",
 ))
+graph.add_node("commit", shell_node(
+    "git add -A && git commit -m 'fix: resolve test failures' && git push",
+    output_key="commit_output",
+))
 
-async def test_router(state: dict[str, str]) -> str:
+def test_router(state: dict[str, str]) -> str:
     return "done" if "passed" in state["test_output"].lower() else "fix"
 
 graph.add_edge("start", "test")
-graph.add_conditional_edges("test", test_router, {"fix": "fix", "done": END})
+graph.add_conditional_edges("test", test_router, {"fix": "fix", "done": "commit"})
 graph.add_edge("fix", "test")
+graph.add_edge("commit", END)
 ```
 
 ### 2. Parallel lint + typecheck + test
 
 ```python
 graph.add_node("setup", python_node(lambda s: {}))
-graph.add_node("lint", shell_node("uv run ruff check .", output_key="lint_output"))
-graph.add_node("typecheck", shell_node("uv run pyright", output_key="typecheck_output"))
-graph.add_node("test", shell_node("uv run pytest", output_key="test_output"))
+graph.add_node("lint", shell_node("uv run ruff check .", output_key="lint_output", check=False))
+graph.add_node("typecheck", shell_node("uv run pyright", output_key="typecheck_output", check=False))
+graph.add_node("test", shell_node("uv run pytest", output_key="test_output", check=False))
 graph.add_node("report", template_node(
     "Lint:\n{lint_output}\n\nTypecheck:\n{typecheck_output}\n\nTests:\n{test_output}",
     output_key="report",
@@ -145,7 +171,7 @@ graph.add_edge("test", "report")
 graph.add_edge("report", END)
 ```
 
-### 3. Multi-LLM pipeline
+### 3. Multi-LLM pipeline with commit
 
 ```python
 graph.add_node("implement", codex_node(
@@ -155,11 +181,17 @@ graph.add_node("implement", codex_node(
 graph.add_node("review", claude_node(
     "Review this implementation for bugs and improvements:\n\n{code}",
     output_key="review",
+    model="opus", effort="high",
+))
+graph.add_node("commit", shell_node(
+    "git add -A && git commit -m 'feat: {description}' && git push",
+    output_key="commit_output",
 ))
 
 graph.add_edge("start", "implement")
 graph.add_edge("implement", "review")
-graph.add_edge("review", END)
+graph.add_edge("review", "commit")
+graph.add_edge("commit", END)
 ```
 
 ## Important rules
@@ -167,5 +199,6 @@ graph.add_edge("review", END)
 - **Fail fast.** Don't add retries to nodes. If you need retry logic, build it as a loop in the graph (conditional edge back to a fix node).
 - **State is strings.** All state values are strings. Use `python_node` to parse or transform if needed.
 - **Set max_iterations.** Always set a reasonable `max_iterations` to prevent infinite loops. Default is 5.
-- **Use the right LLM.** Claude for complex reasoning and code changes. Codex for code generation. Gemini for quick tasks. Shell for non-LLM commands.
-- **Permission mode.** For Claude nodes that need to edit files, set `permission_mode="bypassPermissions"` to skip approval prompts.
+- **Right-size the model.** Use sonnet/low for simple fixes, opus/high for complex reasoning. Don't over-spend on easy steps.
+- **Permission mode.** For Claude nodes that need to edit files, set `permission_mode="bypassPermissions"` for headless execution.
+- **Always commit at the end.** If the workflow modifies code, add a final `shell_node` that commits and pushes the changes.

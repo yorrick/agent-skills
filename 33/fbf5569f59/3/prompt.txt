@@ -1,0 +1,27 @@
+Fix the failing tests in /tmp/workflow-demo/. Here are the test results:
+
+warning: `VIRTUAL_ENV=/Users/yorrickjansen/.cache/uv/builds-v0/.tmpFTUK5N` does not match the project environment path `.venv` and will be ignored
+============================= test session starts ==============================
+platform darwin -- Python 3.14.2, pytest-9.0.2, pluggy-1.6.0
+rootdir: /private/tmp/workflow-demo
+configfile: pyproject.toml
+collected 2 items
+
+test_math.py .F
+
+=================================== FAILURES ===================================
+________________________________ test_multiply _________________________________
+
+    def test_multiply():
+>       assert multiply(3, 4) == 12
+E       assert 7 == 12
+E        +  where 7 = multiply(3, 4)
+
+test_math.py:9: AssertionError
+=========================== short test summary info ============================
+FAILED test_math.py::test_multiply - assert 7 == 12
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!
+========================= 1 failed, 1 passed in 0.02s ==========================
+
+
+Read the source files, fix the bug, and save the file.

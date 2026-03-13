@@ -194,6 +194,66 @@ graph.add_edge("review", "commit")
 graph.add_edge("commit", END)
 ```
 
+### 4. Implement → test → parallel reviews → fix → commit
+
+The full pattern with code review and security review running in parallel:
+
+```python
+graph.add_node("implement", claude_node(
+    "You are working in {work_dir}. Read the plan at {plan_path} and implement it.",
+    output_key="impl_output", model="sonnet", effort="medium",
+    permission_mode="bypassPermissions",
+))
+graph.add_node("run_tests", shell_node(
+    "cd {work_dir} && uv run pytest -v 2>&1",
+    output_key="test_output", check=False,
+))
+graph.add_node("fix_tests", claude_node(
+    "You are working in {work_dir}. Fix the failing tests:\n\n{test_output}",
+    output_key="fix_tests_output", model="sonnet", effort="low",
+    permission_mode="bypassPermissions",
+))
+graph.add_node("start_reviews", python_node(lambda s: {}))
+graph.add_node("code_review", claude_node(
+    "You are working in {work_dir}. Review the code for bugs, logic errors, and quality issues. "
+    "Return findings with severity (Critical/Important/Medium/Low).",
+    output_key="code_review_output", model="opus", effort="high",
+    permission_mode="bypassPermissions",
+))
+graph.add_node("security_review", claude_node(
+    "You are working in {work_dir}. Review for security issues: injection, data exposure, "
+    "unsafe operations. Return findings with severity.",
+    output_key="security_review_output", model="opus", effort="high",
+    permission_mode="bypassPermissions",
+))
+graph.add_node("decision", python_node(decide_fn))
+graph.add_node("fix_reviews", claude_node(
+    "You are working in {work_dir}. Fix Critical/Important/Medium issues:\n\n"
+    "Code review:\n{code_review_output}\n\nSecurity review:\n{security_review_output}",
+    output_key="fix_reviews_output", model="sonnet", effort="medium",
+    permission_mode="bypassPermissions",
+))
+graph.add_node("commit", shell_node(
+    'cd {work_dir} && git add -A && git diff --cached --quiet && echo "nothing to commit" '
+    '|| git commit -m "feat: implement feature"',
+    output_key="commit_output",
+))
+
+def test_router(state):
+    return "fix" if "failed" in state["test_output"].lower() else "review"
+
+graph.add_edge("start", "implement")
+graph.add_edge("implement", "run_tests")
+graph.add_conditional_edges("run_tests", test_router, {"fix": "fix_tests", "review": "start_reviews"})
+graph.add_edge("fix_tests", "run_tests")
+graph.add_parallel_edges("start_reviews", ["code_review", "security_review"])
+graph.add_edge("code_review", "decision")
+graph.add_edge("security_review", "decision")
+graph.add_conditional_edges("decision", lambda s: s.get("decision", "clean"), {"issues": "fix_reviews", "clean": "commit"})
+graph.add_edge("fix_reviews", "run_tests")
+graph.add_edge("commit", END)
+```
+
 ## Important rules
 
 - **Fail fast.** Don't add retries to nodes. If you need retry logic, build it as a loop in the graph (conditional edge back to a fix node).
@@ -202,3 +262,6 @@ graph.add_edge("commit", END)
 - **Right-size the model.** Use sonnet/low for simple fixes, opus/high for complex reasoning. Don't over-spend on easy steps.
 - **Permission mode.** For Claude nodes that need to edit files, set `permission_mode="bypassPermissions"` for headless execution.
 - **Always commit at the end.** If the workflow modifies code, add a final `shell_node` that commits and pushes the changes.
+- **Safe commits.** Use `git diff --cached --quiet && echo "nothing to commit" || git commit -m "..."` to handle cases where there's nothing to commit.
+- **Working directory in prompts.** Always include `You are working in {work_dir}` in Claude node prompts so headless sessions know where to find files.
+- **Parallel reviews need a fan-out node.** Use a passthrough `python_node(lambda s: {})` before `add_parallel_edges` since conditional and parallel edges on the same node conflict.

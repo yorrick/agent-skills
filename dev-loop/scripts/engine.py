@@ -83,6 +83,7 @@ class StateGraph:
         self.max_iterations = max_iterations
         self.cwd = cwd
         self._nodes: dict[str, NodeFn] = {}
+        self._node_meta: dict[str, str] = {}  # name -> label for diagram
         self._edges: list[_Edge] = []
         self._conditional_edges: list[_ConditionalEdge] = []
         self._parallel_edges: dict[str, list[str]] = {}
@@ -95,6 +96,10 @@ class StateGraph:
     def add_node(self, name: str, fn: NodeFn) -> None:
         """Register a named node with its async callable."""
         self._nodes[name] = fn
+        # Extract diagram label from node metadata if set by node helpers
+        label = getattr(fn, "_diagram_label", None)
+        if label:
+            self._node_meta[name] = label
 
     def add_edge(self, source: str, target: str | _EndSentinel) -> None:
         """Add an unconditional edge from source to target."""
@@ -149,30 +154,38 @@ class StateGraph:
                 return target
         return None
 
+    def _diagram_id(self, name: str) -> str:
+        """Return a diagram-friendly node ID, embedding metadata if present."""
+        meta = self._node_meta.get(name)
+        if meta:
+            # Encode metadata into the ID: "implement" → "implement:codex"
+            return f"{name}:{meta}"
+        return name
+
     def to_mermaid(self) -> str:
         """Generate a Mermaid flowchart string from the graph structure.
 
-        Produces compact Mermaid syntax using inline node references in edges
-        (no separate declarations).  This style renders cleanly with both
-        browser-based Mermaid viewers and the ``mermaid-ascii`` CLI tool.
+        Nodes with metadata (model, effort, etc.) get annotated IDs like
+        ``implement:codex_default`` so the diagram shows what runs each step.
         """
         lines: list[str] = ["graph TD"]
+        did = self._diagram_id
 
         # Unconditional edges
         for edge in self._edges:
-            target = "END" if isinstance(edge.target, _EndSentinel) else edge.target
-            lines.append(f"    {edge.source} --> {target}")
+            target = "END" if isinstance(edge.target, _EndSentinel) else did(edge.target)
+            lines.append(f"    {did(edge.source)} --> {target}")
 
         # Conditional edges (with labels)
         for ce in self._conditional_edges:
             for label, target in ce.route_map.items():
-                target_name = "END" if isinstance(target, _EndSentinel) else target
-                lines.append(f"    {ce.source} -->|{label}| {target_name}")
+                target_name = "END" if isinstance(target, _EndSentinel) else did(target)
+                lines.append(f"    {did(ce.source)} -->|{label}| {target_name}")
 
         # Parallel edges
         for source, targets in self._parallel_edges.items():
             for t in targets:
-                lines.append(f"    {source} --> {t}")
+                lines.append(f"    {did(source)} --> {did(t)}")
 
         return "\n".join(lines)
 
@@ -378,6 +391,7 @@ def claude_node(
         result = await _run_cli_subprocess(cmd, env_strip=["CLAUDECODE", "ANTHROPIC_API_KEY"])
         return {output_key: result}
 
+    _node._diagram_label = f"claude {model}/{effort}"  # type: ignore[attr-defined]
     return _node
 
 
@@ -401,6 +415,8 @@ def codex_node(
         result = await _run_cli_subprocess(cmd)
         return {output_key: result}
 
+    model_label = model or "default"
+    _node._diagram_label = f"codex {model_label}"  # type: ignore[attr-defined]
     return _node
 
 
@@ -416,6 +432,7 @@ def gemini_node(
         result = await _run_cli_subprocess(cmd)
         return {output_key: result}
 
+    _node._diagram_label = "gemini"  # type: ignore[attr-defined]
     return _node
 
 
@@ -469,6 +486,7 @@ def shell_node(
 
         return {output_key: stdout}
 
+    _node._diagram_label = "shell"  # type: ignore[attr-defined]
     return _node
 
 

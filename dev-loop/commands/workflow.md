@@ -44,7 +44,7 @@ async def main():
     # ... define nodes and edges ...
 
     if "--diagram" in sys.argv:
-        print(graph.to_mermaid())
+        print(graph.to_ascii())
         return
 
     result = await graph.run()
@@ -66,7 +66,8 @@ graph.add_edge("a", END)                       # terminate after node "a"
 graph.add_conditional_edges("a", router_fn, {"label1": "b", "label2": END})  # conditional routing
 graph.add_parallel_edges("a", ["b", "c"])       # run b and c concurrently, then join
 result = await graph.run(initial_state)         # execute, returns final state dict
-print(graph.to_mermaid())                       # generate Mermaid flowchart string
+print(graph.to_ascii())                          # render ASCII box-and-arrow diagram
+print(graph.to_mermaid())                       # generate raw Mermaid flowchart string
 ```
 
 State is `dict[str, str]` — all values are strings. Each node receives the full state and returns a dict of keys to merge.

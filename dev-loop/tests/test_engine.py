@@ -543,13 +543,9 @@ def test_to_mermaid_linear_graph():
 
     diagram = graph.to_mermaid()
     assert "graph TD" in diagram
-    assert "start([start])" in diagram
-    assert "a[a]" in diagram
-    assert "b[b]" in diagram
-    assert "END_node((END))" in diagram
     assert "start --> a" in diagram
     assert "a --> b" in diagram
-    assert "b --> END_node" in diagram
+    assert "b --> END" in diagram
 
 
 def test_to_mermaid_conditional_edges():
@@ -568,7 +564,7 @@ def test_to_mermaid_conditional_edges():
 
     diagram = graph.to_mermaid()
     assert "check -->|fix| fix" in diagram
-    assert "check -->|done| END_node" in diagram
+    assert "check -->|done| END" in diagram
     assert "fix --> check" in diagram
 
 
@@ -592,7 +588,7 @@ def test_to_mermaid_parallel_edges():
     assert "source --> b" in diagram
     assert "a --> join" in diagram
     assert "b --> join" in diagram
-    assert "join --> END_node" in diagram
+    assert "join --> END" in diagram
 
 
 def test_to_mermaid_end_sentinel():
@@ -604,8 +600,7 @@ def test_to_mermaid_end_sentinel():
     graph.add_edge("only", END)
 
     diagram = graph.to_mermaid()
-    assert "END_node((END))" in diagram
-    assert "only --> END_node" in diagram
+    assert "only --> END" in diagram
 
 
 def test_to_mermaid_empty_graph():
@@ -613,9 +608,8 @@ def test_to_mermaid_empty_graph():
     graph = StateGraph()
     diagram = graph.to_mermaid()
     assert "graph TD" in diagram
-    # No nodes or edges beyond the header
-    assert "start" not in diagram
-    assert "END_node" not in diagram
+    lines = [line.strip() for line in diagram.splitlines() if line.strip()]
+    assert len(lines) == 1  # only the header
 
 
 # --- shell_node tests ---

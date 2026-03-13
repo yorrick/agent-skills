@@ -1,6 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.10"
+# dependencies = ["mermaid-ascii"]
 # ///
 """Lightweight async graph execution engine for orchestrating headless AI coding agents.
 
@@ -140,61 +141,21 @@ class StateGraph:
     def to_mermaid(self) -> str:
         """Generate a Mermaid flowchart string from the graph structure.
 
-        Renders nodes, unconditional edges, conditional edges (with labels),
-        parallel edges, and the END sentinel as a terminal node.
+        Produces compact Mermaid syntax using inline node references in edges
+        (no separate declarations).  This style renders cleanly with both
+        browser-based Mermaid viewers and the ``mermaid-ascii`` CLI tool.
         """
         lines: list[str] = ["graph TD"]
 
-        # Collect all referenced node names to determine what to render
-        referenced: set[str] = set()
-        has_start = False
-        has_end = False
-
-        for edge in self._edges:
-            referenced.add(edge.source)
-            if isinstance(edge.target, _EndSentinel):
-                has_end = True
-            else:
-                referenced.add(edge.target)
-            if edge.source == "start":
-                has_start = True
-
-        for ce in self._conditional_edges:
-            referenced.add(ce.source)
-            for target in ce.route_map.values():
-                if isinstance(target, _EndSentinel):
-                    has_end = True
-                else:
-                    referenced.add(target)
-
-        for source, targets in self._parallel_edges.items():
-            referenced.add(source)
-            for t in targets:
-                referenced.add(t)
-
-        # Node declarations
-        if has_start:
-            lines.append("    start([start])")
-
-        for name in self._nodes:
-            if name in referenced or name in self._nodes:
-                lines.append(f"    {name}[{name}]")
-
-        if has_end:
-            lines.append("    END_node((END))")
-
-        # Blank line before edges
-        lines.append("")
-
         # Unconditional edges
         for edge in self._edges:
-            target = "END_node" if isinstance(edge.target, _EndSentinel) else edge.target
+            target = "END" if isinstance(edge.target, _EndSentinel) else edge.target
             lines.append(f"    {edge.source} --> {target}")
 
         # Conditional edges (with labels)
         for ce in self._conditional_edges:
             for label, target in ce.route_map.items():
-                target_name = "END_node" if isinstance(target, _EndSentinel) else target
+                target_name = "END" if isinstance(target, _EndSentinel) else target
                 lines.append(f"    {ce.source} -->|{label}| {target_name}")
 
         # Parallel edges
@@ -203,6 +164,25 @@ class StateGraph:
                 lines.append(f"    {source} --> {t}")
 
         return "\n".join(lines)
+
+    def to_ascii(self) -> str:
+        """Render the graph as an ASCII box-and-arrow diagram.
+
+        Uses ``mermaid-ascii`` to convert the Mermaid flowchart into a
+        terminal-friendly representation with Unicode box-drawing characters.
+        """
+        import subprocess as _sp
+
+        mermaid = self.to_mermaid()
+        result = _sp.run(
+            ["mermaid-ascii"],
+            input=mermaid,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return mermaid  # fall back to raw Mermaid
+        return result.stdout
 
     def _find_start_node(self, start_node: str | None) -> str:
         """Find the first node to execute."""

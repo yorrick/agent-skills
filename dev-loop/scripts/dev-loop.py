@@ -1096,19 +1096,28 @@ def main() -> int:
 
     try:
         result = asyncio.run(graph.run(initial_state, start_node=start))
+
+        # Smoke test abort: graph returned normally but the smoke test failed
+        if result.get("smoke_test_retry_failed") == "true":
+            ctx.status("Failed", "Smoke test failed — aborting")
+            ctx.log("FAILED: Smoke test failed after retry — aborting")
+            ctx.notify("dev-loop aborted: smoke test failed after retry")
+            return 1
+
         # Post-success actions
         pr_url = result.get("pr_url", "")
         iterations = result.get("iteration_count", "?")
         if args.reviewers and pr_url:
             gh_request_review(extract_pr_number(pr_url), args.reviewers)
-        gh_comment(
-            pr_url,
-            (
-                "### dev-loop: Review complete\n\n"
-                f"No critical issues found after {iterations} iteration(s). "
-                "PR is ready for human review."
-            ),
-        )
+        if pr_url:
+            gh_comment(
+                pr_url,
+                (
+                    "### dev-loop: Review complete\n\n"
+                    f"No critical issues found after {iterations} iteration(s). "
+                    "PR is ready for human review."
+                ),
+            )
         ctx.status("Done", f"No critical issues after {iterations} iterations")
         ctx.log(f"DONE: PR ready after {iterations} iterations")
         ctx.notify(f"PR ready for review after {iterations} iterations")

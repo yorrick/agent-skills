@@ -1,0 +1,28 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "2d2cf3e376f7",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 9,
+  "files_touched": [
+    ".claude/hooks/post_tool_use.py",
+    ".claude/settings.json",
+    "pyproject.toml",
+    "uv.lock"
+  ],
+  "sessions": [
+    {
+      "metadata": "/2d/2cf3e376f7/0/metadata.json",
+      "transcript": "/2d/2cf3e376f7/0/full.jsonl",
+      "content_hash": "/2d/2cf3e376f7/0/content_hash.txt",
+      "prompt": "/2d/2cf3e376f7/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 176,
+    "cache_creation_tokens": 548745,
+    "cache_read_tokens": 8409850,
+    "output_tokens": 42405,
+    "api_call_count": 100
+  }
+}

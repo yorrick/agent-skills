@@ -1,0 +1,29 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "2c8bc90529d2",
+  "strategy": "manual-commit",
+  "branch": "worktree-workflow-command",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "dev-loop/.claude-plugin/plugin.json",
+    "dev-loop/README.md",
+    "dev-loop/commands/workflow.md",
+    "dev-loop/scripts/engine.py",
+    "dev-loop/tests/test_engine.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/2c/8bc90529d2/0/metadata.json",
+      "transcript": "/2c/8bc90529d2/0/full.jsonl",
+      "content_hash": "/2c/8bc90529d2/0/content_hash.txt",
+      "prompt": "/2c/8bc90529d2/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 31,
+    "cache_creation_tokens": 64791,
+    "cache_read_tokens": 1274364,
+    "output_tokens": 8479,
+    "api_call_count": 26
+  }
+}

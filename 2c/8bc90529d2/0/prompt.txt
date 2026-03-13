@@ -1,0 +1,25 @@
+Fetch the implementation plan from GitHub issue https://github.com/yorrick/claude-code-plugins/issues/6 using: gh issue view 6 --json body --jq .body
+
+Use the superpowers:executing-plans skill to implement the plan task by task. Do NOT use superpowers:using-git-worktrees — the branch and worktree are already set up. Do NOT use superpowers:finishing-a-development-branch — this is a headless session, do not present interactive options. Just implement, verify, and commit.
+
+After completing all tasks:
+
+1. Update documentation to reflect the changes:
+   - Update README.md if the feature adds new commands, APIs, config options, or usage patterns
+   - Add or update docstrings/comments for new public functions, classes, and modules
+   - Update CHANGELOG.md if one exists (add entry under Unreleased)
+   - Create or update Mermaid diagrams in docs/ for:
+     - Architecture diagrams if new components or services were added
+     - Sequence diagrams if new workflows or API flows were introduced
+     - Data flow diagrams if data pipelines or processing changed
+   - Use ```mermaid code blocks in markdown files for diagrams
+   - Only create diagrams that add genuine value — skip if the change is trivial
+
+2. Discover and run the project's quality gates:
+   - Check package.json, Makefile, pyproject.toml, tox.ini, Cargo.toml, or equivalent
+   - Run linting (eslint, ruff, pylint, clippy, etc.)
+   - Run type checking (tsc, mypy, pyright, etc.)
+   - Run formatting check (prettier, black, rustfmt, etc.)
+   - Run the test suite
+
+Fix any failures before proceeding. Once everything passes, commit all work. Do NOT push — just commit locally.

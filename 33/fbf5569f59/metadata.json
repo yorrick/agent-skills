@@ -3,7 +3,7 @@
   "checkpoint_id": "33fbf5569f59",
   "strategy": "manual-commit",
   "branch": "worktree-workflow-command",
-  "checkpoints_count": 4,
+  "checkpoints_count": 5,
   "files_touched": [
     "dev-loop/commands/workflow.md",
     "dev-loop/scripts/engine.py",
@@ -33,13 +33,19 @@
       "transcript": "/33/fbf5569f59/3/full.jsonl",
       "content_hash": "/33/fbf5569f59/3/content_hash.txt",
       "prompt": "/33/fbf5569f59/3/prompt.txt"
+    },
+    {
+      "metadata": "/33/fbf5569f59/4/metadata.json",
+      "transcript": "/33/fbf5569f59/4/full.jsonl",
+      "content_hash": "/33/fbf5569f59/4/content_hash.txt",
+      "prompt": "/33/fbf5569f59/4/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 34,
-    "cache_creation_tokens": 135534,
-    "cache_read_tokens": 567082,
-    "output_tokens": 2574,
-    "api_call_count": 26
+    "input_tokens": 43,
+    "cache_creation_tokens": 180209,
+    "cache_read_tokens": 706171,
+    "output_tokens": 3184,
+    "api_call_count": 33
   }
 }

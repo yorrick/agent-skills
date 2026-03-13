@@ -82,8 +82,8 @@ Run a headless Codex CLI session. Good for code generation tasks.
 **`gemini_node(prompt_template, output_key="output")`**
 Run a headless Gemini CLI session. Good for quick tasks, summaries, alternative perspectives.
 
-**`shell_node(command_template, output_key="output")`**
-Run an arbitrary shell command. Captures stdout as raw text. Raises RuntimeError on non-zero exit.
+**`shell_node(command_template, output_key="output", check=True)`**
+Run an arbitrary shell command. Captures stdout as raw text. Raises RuntimeError on non-zero exit by default. Set `check=False` to capture output regardless of exit code — use this for commands where failure is an expected signal (e.g. tests in a fix loop).
 
 **`python_node(fn)`**
 Wrap a sync or async Python function as a node. The function takes `dict[str, str]` and returns `dict[str, str]`.
@@ -109,11 +109,11 @@ def router(state: dict[str, str]) -> str:
 ### 1. Test-fix loop
 
 ```python
-graph.add_node("test", shell_node("uv run pytest -x", output_key="test_output"))
+graph.add_node("test", shell_node("uv run pytest -x", output_key="test_output", check=False))
 graph.add_node("fix", claude_node(
     "These tests failed. Fix the code:\n\n{test_output}",
     output_key="fix_output",
-    permission_mode="auto",
+    permission_mode="bypassPermissions",
 ))
 
 async def test_router(state: dict[str, str]) -> str:
@@ -167,4 +167,4 @@ graph.add_edge("review", END)
 - **State is strings.** All state values are strings. Use `python_node` to parse or transform if needed.
 - **Set max_iterations.** Always set a reasonable `max_iterations` to prevent infinite loops. Default is 5.
 - **Use the right LLM.** Claude for complex reasoning and code changes. Codex for code generation. Gemini for quick tasks. Shell for non-LLM commands.
-- **Permission mode.** For Claude nodes that need to edit files, set `permission_mode="auto"` to skip approval prompts.
+- **Permission mode.** For Claude nodes that need to edit files, set `permission_mode="bypassPermissions"` to skip approval prompts.

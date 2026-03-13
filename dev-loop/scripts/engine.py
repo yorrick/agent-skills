@@ -439,12 +439,17 @@ def shell_node(
     command_template: str,
     output_key: str = "output",
     cwd: Path | None = None,
+    check: bool = True,
 ) -> NodeFn:
     """Create a node that runs an arbitrary shell command.
 
     Interpolates state keys into *command_template* using ``{key}`` syntax,
     then executes via an async subprocess.  Captures stdout as raw text into
-    *output_key*.  Raises ``RuntimeError`` on non-zero exit code.
+    *output_key*.
+
+    When *check* is ``True`` (default), raises ``RuntimeError`` on non-zero
+    exit.  Set ``check=False`` to always capture output regardless of exit
+    code — useful for commands whose failure is an expected signal (e.g. tests).
     """
 
     async def _node(state: State) -> State:
@@ -459,7 +464,7 @@ def shell_node(
         stdout_bytes, stderr_bytes = await proc.communicate()
         stdout = stdout_bytes.decode() if stdout_bytes else ""
 
-        if proc.returncode != 0:
+        if check and proc.returncode != 0:
             stderr = stderr_bytes.decode() if stderr_bytes else ""
             raise RuntimeError(f"Shell command failed (exit {proc.returncode}): {stderr[:500]}")
 

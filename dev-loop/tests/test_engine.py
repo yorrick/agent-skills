@@ -638,6 +638,14 @@ async def test_shell_node_fails_on_nonzero_exit():
 
 
 @pytest.mark.asyncio
+async def test_shell_node_check_false():
+    """shell_node with check=False captures output even on non-zero exit."""
+    node = shell_node("sh -c 'echo captured; exit 1'", output_key="out", check=False)
+    result = await node({})
+    assert result["out"].strip() == "captured"
+
+
+@pytest.mark.asyncio
 async def test_shell_node_template_interpolation():
     """shell_node interpolates state keys into the command."""
     node = shell_node("echo '{greeting} {name}'", output_key="out")

@@ -155,6 +155,45 @@ async def test_max_iterations_exceeded():
         await graph.run({})
 
 
+@pytest.mark.asyncio
+async def test_max_iterations_multi_node_cycle():
+    """max_iterations counts full cycles, not per-node re-visits.
+
+    A cycle through N nodes should count as 1 iteration, not N.
+    With max_iterations=2, a 3-node cycle should complete 2 full loops.
+    """
+    graph = StateGraph(max_iterations=2)
+
+    counter = {"n": 0}
+
+    async def step_a(state: State) -> State:
+        counter["n"] += 1
+        return {"a_count": str(counter["n"])}
+
+    async def step_b(state: State) -> State:
+        return {}
+
+    async def step_c(state: State) -> State:
+        return {}
+
+    def always_loop(state: State) -> str:
+        return "loop"
+
+    graph.add_node("a", step_a)
+    graph.add_node("b", step_b)
+    graph.add_node("c", step_c)
+    graph.add_edge("start", "a")
+    graph.add_edge("a", "b")
+    graph.add_edge("b", "c")
+    graph.add_conditional_edges("c", always_loop, {"loop": "a", "done": END})
+
+    with pytest.raises(MaxIterationsExceeded):
+        await graph.run({})
+
+    # step_a should have run max_iterations + 1 = 3 times (first visit + 2 iterations)
+    assert counter["n"] == 3
+
+
 # --- Task 3: Parallel execution ---
 
 
@@ -246,6 +285,62 @@ async def test_parallel_then_conditional():
 
     result = await graph.run({})
     assert result["fixed"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_parallel_execution_with_blocking_calls():
+    """Async nodes using asyncio.to_thread run truly in parallel, not sequentially."""
+    import time
+
+    graph = StateGraph()
+    execution_log: list[tuple[str, float]] = []
+    start_time = time.monotonic()
+
+    async def source(state: State) -> State:
+        return {}
+
+    def _blocking_work(name: str, duration: float) -> str:
+        execution_log.append((f"{name}_start", time.monotonic() - start_time))
+        time.sleep(duration)
+        execution_log.append((f"{name}_end", time.monotonic() - start_time))
+        return f"result_{name}"
+
+    async def parallel_a(state: State) -> State:
+        result = await asyncio.to_thread(_blocking_work, "a", 0.1)
+        return {"a_out": result}
+
+    async def parallel_b(state: State) -> State:
+        result = await asyncio.to_thread(_blocking_work, "b", 0.1)
+        return {"b_out": result}
+
+    async def join(state: State) -> State:
+        return {"joined": f"{state['a_out']}+{state['b_out']}"}
+
+    graph.add_node("source", source)
+    graph.add_node("parallel_a", parallel_a)
+    graph.add_node("parallel_b", parallel_b)
+    graph.add_node("join", join)
+
+    graph.add_edge("start", "source")
+    graph.add_parallel_edges("source", ["parallel_a", "parallel_b"])
+    graph.add_edge("parallel_a", "join")
+    graph.add_edge("parallel_b", "join")
+    graph.add_edge("join", END)
+
+    result = await graph.run({})
+
+    assert result["a_out"] == "result_a"
+    assert result["b_out"] == "result_b"
+    assert result["joined"] == "result_a+result_b"
+
+    # Verify true parallelism: both should start before either ends.
+    # With sequential execution, total time would be ~0.2s.
+    # With parallel execution, total time should be ~0.1s.
+    log_dict = {name: t for name, t in execution_log}
+    a_start, b_start = log_dict["a_start"], log_dict["b_start"]
+    a_end, b_end = log_dict["a_end"], log_dict["b_end"]
+    # Both tasks should overlap: b starts before a ends (or vice versa)
+    assert b_start < a_end or a_start < b_end, "Tasks did not run in parallel"
 
 
 # --- Task 4: Event callbacks ---

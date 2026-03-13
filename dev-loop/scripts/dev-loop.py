@@ -795,18 +795,19 @@ def _simplify_commit_node(state: State) -> State:
     return {}
 
 
-def _code_review_node(state: State) -> State:
+async def _code_review_node(state: State) -> State:
     """Run code review."""
     cwd = _get_cwd(state)
     iteration = int(state.get("iteration_count", "1"))
     pr_url = state["pr_url"]
-    review_file = run_claude(
+    review_file = await asyncio.to_thread(
+        run_claude,
         f"/code-review:code-review {pr_url}",
         Path(state["work_dir"]) / f"code-review-{iteration}.json",
         state.get("permission_mode", "default"),
-        cwd=cwd,
-        model="opus",
-        effort="high",
+        cwd,
+        "opus",
+        "high",
     )
     err = check_claude_error(review_file)
     if err:
@@ -814,19 +815,20 @@ def _code_review_node(state: State) -> State:
     return {"code_review_output": extract_result(review_file)}
 
 
-def _security_review_node(state: State) -> State:
+async def _security_review_node(state: State) -> State:
     """Run security review."""
     cwd = _get_cwd(state)
     iteration = int(state.get("iteration_count", "1"))
     pr_url = state["pr_url"]
     previous_findings = state.get("previous_security_findings", "")
-    review_file = run_claude(
+    review_file = await asyncio.to_thread(
+        run_claude,
         _security_review_prompt(pr_url, previous_findings),
         Path(state["work_dir"]) / f"security-review-{iteration}.json",
         state.get("permission_mode", "default"),
-        cwd=cwd,
-        model="opus",
-        effort="high",
+        cwd,
+        "opus",
+        "high",
     )
     err = check_claude_error(review_file)
     if err:

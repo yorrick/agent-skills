@@ -164,18 +164,16 @@ class StateGraph:
         """Execute the graph starting from the given node or the 'start' edge."""
         state: State = dict(initial_state) if initial_state else {}
         visited: dict[str, int] = {}  # node_name -> visit count
-        backward_traversals = 0
 
         current = self._find_start_node(start_node)
 
         while True:
-            # Track visits for loop detection
-            visit_count = visited.get(current, 0)
-            if visit_count > 0:
-                backward_traversals += 1
-                if backward_traversals > self.max_iterations:
-                    raise MaxIterationsExceeded(f"Exceeded {self.max_iterations} loop iterations at node '{current}'")
-            visited[current] = visit_count + 1
+            # Track visits for loop detection — count full cycles, not per-node re-visits.
+            # A node visited N times has been through N-1 complete loop cycles.
+            visit_count = visited.get(current, 0) + 1
+            visited[current] = visit_count
+            if visit_count > self.max_iterations + 1:
+                raise MaxIterationsExceeded(f"Exceeded {self.max_iterations} loop iterations at node '{current}'")
 
             # Execute node
             node_fn = self._nodes.get(current)

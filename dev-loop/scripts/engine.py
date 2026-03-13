@@ -384,12 +384,20 @@ def claude_node(
 def codex_node(
     prompt_template: str,
     output_key: str = "output",
+    model: str | None = None,
+    sandbox: str = "workspace-write",
+    cwd: str | None = None,
 ) -> NodeFn:
-    """Create a node that runs a headless Codex session."""
+    """Create a node that runs a headless Codex session via ``codex exec``."""
 
     async def _node(state: State) -> State:
         prompt = prompt_template.format_map(_SafeFormatMap(state))
-        cmd = ["codex", "--quiet", "--full-auto", prompt]
+        cmd = ["codex", "exec", "--sandbox", sandbox]
+        if model:
+            cmd.extend(["--model", model])
+        if cwd:
+            cmd.extend(["-C", cwd])
+        cmd.append(prompt)
         result = await _run_cli_subprocess(cmd)
         return {output_key: result}
 

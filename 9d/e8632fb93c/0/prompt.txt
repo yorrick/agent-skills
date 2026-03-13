@@ -1,61 +1,20 @@
-/brainstorming So our goal is to know whether it would be easy for an agent to actually run a dev loop-like script on the fly using the engine API in order to solve a problem. Because my idea with the engine is to provide a library that makes it very easy to create new workflows on the fly.
+I also would like the command to display the actual loop it's going to create, like generate a Merman diagram or so on. So basically the agent would create the script on the fly and then we could actually generate a diagram when we run that script with dash dash docs or whatever.
 
-When, for instance, I say "Iterate until the tests pass", the agent could say "Okay, I'm gonna build that loop and iterate n times" and yeah. 
-
-Also, ideally, I would like you to be able to use Codex and Gemini CLI as well for different steps.
+And I want that to be displayed inside the inside claude code.
 
 ---
 
-A
+Did you create a plan or what? 
+I would like to actually implement this using the /dev-loop:dev-loop
 
 ---
 
-Actually I would like to go with option now. I don't want to create a new library and push that on PyPy and so on.
+and yes, A) Engine method — graph.to_mermaid()
 
 ---
 
-a
+In the cloud/worktrees directory, commit and push right away on main just for this small change.
 
 ---
 
-Wow, so the CLI node would just be a shell node, right?
-
----
-
-yes
-
----
-
-B
-
----
-
-A
-
----
-
-a
-
----
-
-a
-
----
-
-yes
-
----
-
-yes
-
----
-
-Yeah, the plugin command should be /workflow.
-
----
-
-yes. I want you to create a work tree in order to build that.
-
----
-
-yes
+In the main branch, ignore dot cloud slash work trees, commit and push right away on main.

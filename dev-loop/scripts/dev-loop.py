@@ -45,7 +45,7 @@ class RunContext:
         repo_root = self._git_root()
         self._start = time.monotonic()
 
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S")
+        timestamp = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d-%H%M%S")
         self._dir = repo_root / ".dev-loop" / "runs" / timestamp
         self._dir.mkdir(parents=True, exist_ok=True)
 
@@ -91,7 +91,7 @@ class RunContext:
 
     def log(self, message: str) -> None:
         """Append a timestamped line to dev-loop.log and print to stdout."""
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        ts = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         line = f"[{ts}] {message}"
         with open(self._dir / "dev-loop.log", "a") as f:
             f.write(line + "\n")

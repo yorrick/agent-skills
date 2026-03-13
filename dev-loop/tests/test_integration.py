@@ -35,8 +35,8 @@ PLAN_CONTENT = """\
 
 **Goal:** Add `multiply` and `divide` functions to the calculator library with tests.
 
-**Architecture:** Two new functions in `src/calculator/core.py` following the existing pattern.\
- Tests in `tests/test_core.py`.
+**Architecture:** Two new functions in `src/calculator/core.py` following the existing pattern.
+Tests in `tests/test_core.py`.
 
 **Tech Stack:** Python 3.10+, pytest
 

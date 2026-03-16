@@ -1,0 +1,169 @@
+So I tried using the workflow command in another repo and here is what I got. 
+
+
+Now I have all the context. Let me design and create the workflow script.
+
+⏺ Write(/tmp/workflow_8271.py)
+  ⎿  Wrote 225 lines to ../../../../tmp/workflow_8271.py
+      1 #!/usr/bin/env -S uv run --script
+      2 # /// script
+      3 # requires-python = ">=3.12"
+      4 # ///
+      5 import sys
+      6 sys.path.insert(0, "/Users/yorrickjansen/.claude/plugins/cache/yorrick/dev-loop/0.24.0/scripts")
+      7
+      8 import asyncio
+      9 from engine import StateGraph, claude_node, shell_node, END
+     … +215 lines (ctrl+o to expand)
+
+⏺ Bash(uv run /tmp/workflow_8271.py --diagram)
+  ⎿  Reading inline script metadata from `/tmp/workflow_8271.py`
+     graph TD
+         start --> implement:claude sonnet/high
+     … +5 lines (ctrl+o to expand)
+
+⏺ Here's the workflow:
+
+  graph TD
+      start --> implement:claude sonnet/high
+      implement:claude sonnet/high --> build_and_test:shell
+      fix:claude sonnet/medium --> build_and_test:shell
+      commit:shell --> END
+      build_and_test:shell -->|fix| fix:claude sonnet/medium
+      build_and_test:shell -->|pass| commit:shell
+
+  Flow: Implement all files → build site & run Playwright tests → if tests fail, fix and retry (up to 8 iterations) → commit when green.
+
+  Ready to run it?
+
+✻ Cooked for 2m 5s
+
+❯ can you show me The visual version.
+
+⏺ Bash(uv run /tmp/workflow_8271.py --diagram | python3 -c "
+      import sys, urllib.parse…)
+  ⎿  Reading inline script metadata from `/tmp/workflow_8271.py`
+     https://mermaid.ink/img/base64:REDACTED
+     REDACTED
+
+⏺ playwright - Navigate to a URL (MCP)(url: "https://mermaid.ink/img/base64:REDACTED
+                                      REDACTED")
+  ⎿  Error: ### Error
+     Error: browserType.launchPersistentContext: Failed to launch the browser process.
+     Browser logs:
+
+     <launching> /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad
+     --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,BoundaryEvent
+     DispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,Translate,AutoDeElevate,RenderDocument,OptimizationHints,AutomationControlled
+     --enable-features=CDPScreenshotNewSurface --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --force-color-profile=srgb --metrics-recording-only
+     --no-first-run --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --edge-skip-compat-layer-relaunch --disable-infobars
+     --disable-search-engine-choice-screen --disable-sync --user-data-dir=/Users/yorrickjansen/Library/Caches/ms-playwright/mcp-chrome-01f82bb --remote-debugging-port=61261 about:blank
+     <launched> pid=2285
+     [pid=2285][out] Opening in existing browser session.
+     [pid=2285] <process did exit: exitCode=0, signal=null>
+     [pid=2285] starting temporary directories cleanup
+     Call log:
+     … +10 lines (ctrl+o to see all)
+
+⏺ Browser launch failed — likely Chrome is already open. No worries, the diagram is just a rendered version of this:
+
+  ┌─────────┐     ┌──────────────────────────┐     ┌──────────────────┐
+  │  start  │────▶│ implement (sonnet/high)  │────▶│ build_and_test   │
+  └─────────┘     └──────────────────────────┘     │    (shell)       │
+                                                    └────────┬─────────┘
+                                                             │
+                                                ┌────────────┴────────────┐
+                                                │                         │
+                                            pass│                     fix │
+                                                ▼                         ▼
+                                      ┌──────────────┐        ┌───────────────────────┐
+                                      │    commit     │        │  fix (sonnet/medium)  │
+                                      │   (shell)    │        └───────────┬───────────┘
+                                      └──────┬───────┘                    │
+                                             │                            │
+                                             ▼                 ┌──────────┘
+                                          ┌─────┐             │ (loops back to
+                                          │ END │             │  build_and_test)
+                                          └─────┘             │
+
+  1. implement — Sonnet creates all files (config, 4 test files, workflow)
+  2. build_and_test — builds the site, starts preview server, runs Playwright
+  3. If tests pass → commit → END
+  4. If tests fail → fix (Sonnet fixes tests) → back to build_and_test (max 8 iterations)
+
+  Ready to run?
+
+✻ Cooked for 1m 9s
+
+❯ I meant the visual version, like the script, the workflow script that you run. It's supposed to show me a mermaid diagram that is rendered to be displayed on the console.
+
+⏺ The --diagram flag outputs the raw Mermaid text. Let me check if the engine has an ASCII diagram mode instead.
+
+⏺ Searched for 1 pattern (ctrl+o to expand)
+
+⏺ It uses mermaid-ascii to render the diagram. The script already calls to_ascii() — let me check why it's outputting raw Mermaid instead.
+
+⏺ Read 1 file (ctrl+o to expand)
+
+⏺ I see — the script uses to_mermaid() instead of to_ascii(). Let me fix that.
+
+⏺ Update(/tmp/workflow_8271.py)
+  ⎿  Added 1 line, removed 1 line
+      215      graph.add_edge("commit", END)
+      216
+      217      if "--diagram" in sys.argv:
+      218 -        print(graph.to_mermaid())
+      218 +        print(graph.to_ascii())
+      219          return
+      220
+      221      result = await graph.run({"work_dir": WORK_DIR})
+
+⏺ Bash(uv run /tmp/workflow_8271.py --diagram)
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ continue
+
+⏺ Bash(uv run /tmp/workflow_8271.py --diagram)
+  ⎿  Error: Exit code 1
+     Reading inline script metadata from `/tmp/workflow_8271.py`
+     Traceback (most recent call last):
+       File "/tmp/workflow_8271.py", line 225, in <module>
+         asyncio.run(main())
+         ~~~~~~~~~~~^^^^^^^^
+       File "/Users/yorrickjansen/.local/share/uv/python/cpython-3.14.2-macos-aarch64-none/lib/python3.14/asyncio/runners.py", line 204, in run
+         return runner.run(main)
+                ~~~~~~~~~~^^^^^^
+       File "/Users/yorrickjansen/.local/share/uv/python/cpython-3.14.2-macos-aarch64-none/lib/python3.14/asyncio/runners.py", line 127, in run
+     … +30 lines (ctrl+o to see all)
+
+⏺ mermaid-ascii isn't installed. Let me install it and retry.
+
+⏺ Bash(npm install -g mermaid-ascii 2>&1 || pip install mermaid-ascii 2>&1 || pipx install mermaid-ascii 2>&1)
+  ⎿  added 2 packages in 724ms
+
+⏺ Bash(uv run /tmp/workflow_8271.py --diagram)
+  ⎿  Reading inline script metadata from `/tmp/workflow_8271.py`
+     ┌──────────────────────────────┐
+     │                              │
+     … +43 lines (ctrl+o to expand)
+
+⏺ There's the visual diagram. Ready to run the workflow?
+
+❯ yes
+
+  Bash(uv run /tmp/workflow_8271.py)
+  ⎿  Running…
+
+
+So apparently it wasn't super clear to the agent that it should always display the visual version of the workflow for running it. And also, they had to install Mermaid ASCII and I find that weird.
+
+---
+
+<task-notification>
+<task-id>bk5tcg9md</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-yorrickjansen-work-claude-code-plugins/9a06976c-c9b1-4512-af7b-b470e0552e84/tasks/bk5tcg9md.output</output-file>
+<status>completed</status>
+<summary>Background command "Run integration test diagram-only mode" completed (exit code 0)</summary>
+</task-notification>
+Read the output file to retrieve the result: /private/tmp/claude-501/-Users-yorrickjansen-work-claude-code-plugins/9a06976c-c9b1-4512-af7b-b470e0552e84/tasks/bk5tcg9md.output

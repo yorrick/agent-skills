@@ -37,12 +37,23 @@ import sys
 sys.path.insert(0, "${CLAUDE_PLUGIN_ROOT}/scripts")
 
 import asyncio
-from engine import StateGraph, claude_node, codex_node, gemini_node, shell_node, python_node, template_node, END
+from engine import (
+    StateGraph, claude_node, codex_node, gemini_node,
+    shell_node, python_node, template_node,
+    detect_available_models, END,
+)
+
+# Detect which AI CLIs are installed
+models = detect_available_models()
+HAS_CODEX = models["codex"]
+HAS_GEMINI = models["gemini"]
 
 async def main():
     graph = StateGraph(max_iterations=5)
 
     # ... define nodes and edges ...
+    # Use codex_node/gemini_node when available and appropriate,
+    # fall back to claude_node otherwise. See model selection guide below.
 
     if "--diagram" in sys.argv:
         print(graph.to_ascii())
@@ -108,72 +119,82 @@ def router(state: dict[str, str]) -> str:
 
 ## Choosing the right model for each step
 
-**Default to `claude_node` for all AI steps.** Only use `codex_node` or `gemini_node` if the user or repo instructions (CLAUDE.md, AGENTS.md) explicitly say Codex/Gemini are available. These tools aren't universally installed and using them will break workflows if they're missing.
+The script template calls `detect_available_models()` at the top, giving you `HAS_CODEX` and `HAS_GEMINI` booleans. Use them to pick the best available model for each step.
 
-### When Codex/Gemini ARE available
+### Decision flow
 
-If the repo instructions confirm Codex or Gemini are set up, prefer them for specific tasks:
+For each AI node, ask:
 
-| Task type | Preferred node | Why |
-|-----------|---------------|-----|
-| Code generation from a clear spec/plan | `codex_node` | Faster for straightforward implementation |
-| Fix test failures (error output provided) | `codex_node` | Mechanical fix with clear error context |
-| Generate tests, boilerplate, scaffolding | `codex_node` | Routine code generation |
-| Summarize findings, format a report | `gemini_node` | Fast text synthesis |
-| Quick triage / classify | `gemini_node` | Fast for simple decisions on text |
+1. **Is it code generation from a clear spec, test fixes, or boilerplate?** → Use `codex_node` if `HAS_CODEX`, otherwise `claude_node` sonnet/medium
+2. **Is it a summary, report, or quick triage?** → Use `gemini_node` if `HAS_GEMINI`, otherwise `claude_node` sonnet/low
+3. **Does it need codebase navigation, multi-file reasoning, or judgment?** → `claude_node` sonnet/medium
+4. **Does it need deep reasoning (architecture, security, subtle bugs)?** → `claude_node` opus/high
 
-### Claude model and effort selection
+### Model selection table
 
-For `claude_node`, pick the cheapest model/effort that can handle the step:
+| Task type | If Codex/Gemini available | Fallback |
+|-----------|--------------------------|----------|
+| Implement feature from a clear plan | `codex_node` | `claude_node` sonnet/medium |
+| Fix test failures (error output provided) | `codex_node` | `claude_node` sonnet/medium |
+| Generate tests, boilerplate, scaffolding | `codex_node` | `claude_node` sonnet/medium |
+| Summarize findings, format a report | `gemini_node` | `claude_node` sonnet/low |
+| Quick triage / classify | `gemini_node` | `claude_node` sonnet/low |
+| Multi-file refactor, architectural changes | `claude_node` sonnet/medium | — |
+| Code review, security audit | `claude_node` sonnet/high | — |
+| Complex reasoning, tricky edge cases | `claude_node` opus/high | — |
+| Trivial fix (typo, rename) | `claude_node` sonnet/low | — |
 
-| Task type | Model / Effort | Example |
-|-----------|---------------|---------|
-| Trivial fix, formatting, renaming | `sonnet` / `low` | Fixing a typo, renaming a variable |
-| Fix test failures, standard bug fix | `sonnet` / `medium` | Fixing code from test output |
-| Implement feature from plan | `sonnet` / `medium` | Implementing a function from clear specs |
-| Multi-file refactor, architectural changes | `sonnet` / `medium` | Refactoring a module |
-| Code review, security audit | `sonnet` / `high` | Reviewing PRs for subtle issues |
-| Complex reasoning, tricky edge cases | `opus` / `high` | Architectural changes, deep debugging |
+### Claude effort levels
+
+| Effort | When to use |
+|--------|-------------|
+| `effort="low"` | Trivial changes: typo fix, rename, simple one-liner, summaries |
+| `effort="medium"` | Standard work: implement a function, fix a bug, refactor a file |
+| `effort="high"` | Deep work: review for subtle issues, multi-file architecture, security audit |
 
 ### Examples
 
 ```python
-# Implement from plan — sonnet/medium is enough for clear specs
-claude_node(
-    "You are working in {work_dir}. Read the plan at {plan_path} and implement it.",
-    model="sonnet", effort="medium",
-    permission_mode="bypassPermissions",
+# Implement from plan — Codex if available, else Claude
+implement_node = (
+    codex_node("Implement this feature in {work_dir}: {description}", output_key="code")
+    if HAS_CODEX else
+    claude_node(
+        "You are working in {work_dir}. Implement this feature: {description}",
+        model="sonnet", effort="medium", permission_mode="bypassPermissions",
+    )
 )
 
-# Fix failing tests — sonnet with low effort
-claude_node(
-    "You are working in {work_dir}. Fix the failing tests:\n\n{test_output}",
-    model="sonnet", effort="low",
-    permission_mode="bypassPermissions",
+# Fix failing tests — Codex if available, else Claude
+fix_node = (
+    codex_node("Fix the failing tests in {work_dir}:\n\n{test_output}", output_key="fix_output")
+    if HAS_CODEX else
+    claude_node(
+        "You are working in {work_dir}. Fix the failing tests:\n\n{test_output}",
+        model="sonnet", effort="medium", permission_mode="bypassPermissions",
+    )
 )
 
-# Code review — sonnet with high effort for careful analysis
+# Summarize — Gemini if available, else Claude
+summary_node = (
+    gemini_node("Summarize these findings:\n\n{review_output}", output_key="summary")
+    if HAS_GEMINI else
+    claude_node(
+        "Summarize these findings:\n\n{review_output}",
+        model="sonnet", effort="low",
+    )
+)
+
+# Code review — always Claude, needs judgment
 claude_node(
     "You are working in {work_dir}. Review for bugs, logic errors, and quality issues.",
-    model="sonnet", effort="high",
-    permission_mode="bypassPermissions",
+    model="sonnet", effort="high", permission_mode="bypassPermissions",
 )
 
-# Deep security audit — opus for maximum reasoning
+# Deep security audit — always Claude opus
 claude_node(
-    "You are working in {work_dir}. Review for security issues: injection, data exposure, "
-    "unsafe operations. Return findings with severity.",
-    model="opus", effort="high",
-    permission_mode="bypassPermissions",
-)
-
-# When repo says Codex is available — use it for code gen
-codex_node("Implement this feature: {description}", output_key="code")
-
-# When repo says Gemini is available — use it for summaries
-gemini_node(
-    "Summarize these review findings:\n\n{code_review_output}",
-    output_key="summary",
+    "You are working in {work_dir}. Review for security issues.",
+    model="opus", effort="high", permission_mode="bypassPermissions",
 )
 ```
 
@@ -314,7 +335,7 @@ graph.add_edge("commit", END)
 - **Fail fast.** Don't add retries to nodes. If you need retry logic, build it as a loop in the graph (conditional edge back to a fix node).
 - **State is strings.** All state values are strings. Use `python_node` to parse or transform if needed.
 - **Set max_iterations.** Always set a reasonable `max_iterations` to prevent infinite loops. Default is 5.
-- **Right-size the model.** Default to `claude_node` — only use `codex_node` or `gemini_node` if the repo instructions confirm they're available. Within Claude, use sonnet/low for trivial fixes, sonnet/medium for standard work, opus/high for deep reasoning.
+- **Right-size the model.** Use `HAS_CODEX`/`HAS_GEMINI` from `detect_available_models()` to pick the best available tool for each step. Use Codex for code gen, Gemini for text tasks, and Claude when you need codebase navigation or deep reasoning. See the model selection guide above.
 - **Permission mode.** For Claude nodes that need to edit files, set `permission_mode="bypassPermissions"` for headless execution.
 - **Always commit at the end.** If the workflow modifies code, add a final `shell_node` that commits and pushes the changes.
 - **Safe commits.** Use `git diff --cached --quiet && echo "nothing to commit" || git commit -m "..."` to handle cases where there's nothing to commit.

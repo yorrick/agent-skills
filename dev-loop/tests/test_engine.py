@@ -23,6 +23,7 @@ from engine import (
     State,
     StateGraph,
     claude_node,
+    detect_available_models,
     python_node,
     shell_node,
     template_node,
@@ -742,3 +743,22 @@ async def test_error_logging_on_failure(capsys: pytest.CaptureFixture[str]) -> N
 
     captured = capsys.readouterr()
     assert "[workflow] ERROR in boom:" in captured.err
+
+
+# --- Model detection tests ---
+
+
+def test_detect_available_models_returns_dict() -> None:
+    """detect_available_models returns a dict with claude, codex, gemini keys."""
+    result = detect_available_models()
+    assert isinstance(result, dict)
+    assert "claude" in result
+    assert "codex" in result
+    assert "gemini" in result
+    assert all(isinstance(v, bool) for v in result.values())
+
+
+def test_detect_available_models_claude_is_available() -> None:
+    """Claude CLI should be available in this environment."""
+    result = detect_available_models()
+    assert result["claude"] is True

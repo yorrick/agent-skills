@@ -19,6 +19,7 @@ import asyncio
 import inspect
 import json
 import os
+import shutil
 import sys
 import time
 from collections.abc import Awaitable, Callable
@@ -356,6 +357,22 @@ class StateGraph:
         if common:
             return common.pop()
         return None
+
+
+# --- CLI availability detection ---
+
+
+def detect_available_models() -> dict[str, bool]:
+    """Detect which AI CLI tools are installed on this system.
+
+    Returns a dict like ``{"claude": True, "codex": True, "gemini": False}``.
+    Uses ``shutil.which`` for fast, non-blocking detection (no subprocesses).
+    """
+    return {
+        "claude": shutil.which("claude") is not None,
+        "codex": shutil.which("codex") is not None,
+        "gemini": shutil.which("gemini") is not None,
+    }
 
 
 # --- CLI subprocess helpers ---

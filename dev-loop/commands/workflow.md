@@ -19,7 +19,7 @@ The workflow engine is at: `${CLAUDE_PLUGIN_ROOT}/scripts/engine.py`
 1. **Understand the request.** Read relevant files if needed to understand the codebase context.
 2. **Design the workflow.** Decide which nodes, edges, and routers are needed. Pick the right node type for each step.
 3. **Write the script.** Create a Python script at `/tmp/workflow_NNNN.py` (use a random 4-digit suffix). Always include `--diagram` flag handling (see template).
-4. **Show the diagram first.** Run with `uv run /tmp/workflow_NNNN.py --diagram` and show the user the Mermaid flowchart so they can see the workflow graph before execution.
+4. **Show the diagram first.** Run with `uv run /tmp/workflow_NNNN.py --diagram` and show the user the rendered ASCII diagram so they can see the workflow graph before execution. The script template already uses `graph.to_ascii()` for this — do NOT change it to `to_mermaid()`. The ASCII version renders a visual box-and-arrow diagram directly in the terminal.
 5. **Run it.** Execute with `uv run /tmp/workflow_NNNN.py`.
 6. **Report the result.** Show the user what happened.
 
@@ -31,6 +31,7 @@ Every generated script follows this structure:
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.12"
+# dependencies = ["mermaid-ascii"]
 # ///
 import sys
 sys.path.insert(0, "${CLAUDE_PLUGIN_ROOT}/scripts")

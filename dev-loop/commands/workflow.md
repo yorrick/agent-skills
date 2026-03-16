@@ -106,25 +106,86 @@ def router(state: dict[str, str]) -> str:
     return "fix"
 ```
 
-## Choosing model and effort level
+## Choosing the right model for each step
 
-Pick the cheapest/fastest option that can handle the step. Don't use Opus with high effort for everything.
+Pick the cheapest/fastest option that can handle the step. Don't default to `claude_node` for everything — **Codex and Gemini are faster and cheaper** for many tasks. Use Claude only when you need its unique strengths (complex reasoning, multi-file refactoring, nuanced review).
 
-| Task type | Recommended | Example |
-|-----------|-------------|---------|
-| Trivial fix, formatting, renaming | `model="sonnet", effort="low"` | Fixing a typo, renaming a variable |
-| Fix test failures, standard bug fix | `model="sonnet", effort="medium"` | Fixing code from test output |
-| Implement feature from plan | `model="sonnet", effort="medium"` | Implementing a function from clear specs |
-| Complex reasoning, multi-file refactor | `model="opus", effort="high"` | Architectural changes, tricky bugs |
-| Code review, security audit | `model="sonnet", effort="high"` | Reviewing PRs for subtle issues |
-| Quick generation, boilerplate | `codex_node` or `gemini_node` | Scaffolding, docstrings, simple tests |
+### Decision flow
+
+Ask yourself for each node:
+
+1. **Is it a shell command?** → `shell_node` (tests, lint, git, etc.)
+2. **Is it pure code generation from a clear spec/plan?** → `codex_node` (fastest for writing code)
+3. **Is it a quick summary, reformatting, or simple text task?** → `gemini_node` (fast, good at text)
+4. **Does it need to read many files, navigate a codebase, or make judgment calls?** → `claude_node`
+5. **Does it need deep reasoning about architecture, subtle bugs, or security?** → `claude_node` with `model="opus", effort="high"`
+
+### Model selection table
+
+| Task type | Node type | Why |
+|-----------|-----------|-----|
+| Implement feature from a clear plan | `codex_node` | Codex excels at code gen from specs — faster than Claude for straightforward implementation |
+| Fix test failures (error output provided) | `codex_node` | Mechanical fix with clear error context — Codex handles this well |
+| Generate tests, boilerplate, scaffolding | `codex_node` | Routine code generation is Codex's sweet spot |
+| Summarize findings, format a report | `gemini_node` | Text synthesis is fast with Gemini |
+| Quick triage / classify (e.g., "are there issues?") | `gemini_node` | Gemini is fast for simple decision-making on text |
+| Multi-file refactor, architectural changes | `claude_node` sonnet/medium | Needs codebase navigation and judgment |
+| Code review, security audit | `claude_node` sonnet/high | Needs careful analysis across files |
+| Complex debugging, tricky edge cases | `claude_node` opus/high | Needs deep reasoning |
+| Trivial fix (typo, rename) | `claude_node` sonnet/low | Simple but needs file access |
+
+### Claude effort levels (only applies to `claude_node`)
+
+| Effort | When to use |
+|--------|-------------|
+| `effort="low"` | Trivial changes: typo fix, rename, simple one-liner |
+| `effort="medium"` | Standard work: implement a function, fix a bug, refactor a file |
+| `effort="high"` | Deep work: review for subtle issues, multi-file architecture, security audit |
+
+### Examples
 
 ```python
-# Quick fix — sonnet is enough
-claude_node("Fix this typo: {error}", model="sonnet", effort="low")
+# Implement from plan — use Codex, it's faster for code gen
+codex_node("Implement this feature: {description}", output_key="code")
 
-# Deep review — use opus
-claude_node("Review for security issues: {code}", model="opus", effort="high")
+# Fix failing tests — Codex can handle mechanical fixes
+codex_node(
+    "Fix the failing tests. Here's the error output:\n\n{test_output}",
+    output_key="fix_output",
+)
+
+# Generate test boilerplate — Codex is great at this
+codex_node(
+    "Write pytest unit tests for the functions in {file_path}:\n\n{code}",
+    output_key="tests",
+)
+
+# Summarize review findings — Gemini is fast for text
+gemini_node(
+    "Summarize these review findings into a brief report:\n\n"
+    "Code review:\n{code_review_output}\n\nSecurity:\n{security_review_output}",
+    output_key="summary",
+)
+
+# Quick triage — Gemini for fast classification
+gemini_node(
+    "Are there any Critical or Important issues in this review? "
+    "Reply 'yes' or 'no'.\n\n{review_output}",
+    output_key="triage",
+)
+
+# Deep code review — Claude with high effort
+claude_node(
+    "Review for security issues: {code}",
+    model="opus", effort="high",
+)
+
+# Multi-file refactor — Claude needed for navigation
+claude_node(
+    "You are working in {work_dir}. Refactor the auth module to use the new token format.",
+    model="sonnet", effort="medium",
+    permission_mode="bypassPermissions",
+)
 ```
 
 ## Example workflows
@@ -173,7 +234,9 @@ graph.add_edge("test", "report")
 graph.add_edge("report", END)
 ```
 
-### 3. Multi-LLM pipeline with commit
+### 3. Multi-LLM pipeline — Codex implements, Claude reviews
+
+Each model does what it's best at: Codex generates code fast, Claude reviews it carefully.
 
 ```python
 graph.add_node("implement", codex_node(
@@ -183,7 +246,7 @@ graph.add_node("implement", codex_node(
 graph.add_node("review", claude_node(
     "Review this implementation for bugs and improvements:\n\n{code}",
     output_key="review",
-    model="opus", effort="high",
+    model="sonnet", effort="high",
 ))
 graph.add_node("commit", shell_node(
     "git add -A && git commit -m 'feat: {description}' && git push",
@@ -196,44 +259,45 @@ graph.add_edge("review", "commit")
 graph.add_edge("commit", END)
 ```
 
-### 4. Implement → test → parallel reviews → fix → commit
+### 4. Implement → test → parallel reviews → fix → commit (multi-LLM)
 
-The full pattern with code review and security review running in parallel:
+The full pattern using the right model for each step — Codex for code gen/fixes, Claude for reviews:
 
 ```python
-graph.add_node("implement", claude_node(
-    "You are working in {work_dir}. Read the plan at {plan_path} and implement it.",
-    output_key="impl_output", model="sonnet", effort="medium",
-    permission_mode="bypassPermissions",
+# Codex for implementation — fast code gen from a clear plan
+graph.add_node("implement", codex_node(
+    "Read the plan at {plan_path} and implement it in {work_dir}.",
+    output_key="impl_output",
 ))
 graph.add_node("run_tests", shell_node(
     "cd {work_dir} && uv run pytest -v 2>&1",
     output_key="test_output", check=False,
 ))
-graph.add_node("fix_tests", claude_node(
-    "You are working in {work_dir}. Fix the failing tests:\n\n{test_output}",
-    output_key="fix_tests_output", model="sonnet", effort="low",
-    permission_mode="bypassPermissions",
+# Codex for test fixes — mechanical fix with clear error output
+graph.add_node("fix_tests", codex_node(
+    "Fix the failing tests in {work_dir}:\n\n{test_output}",
+    output_key="fix_tests_output",
 ))
 graph.add_node("start_reviews", python_node(lambda s: {}))
+# Claude for reviews — needs judgment and careful analysis
 graph.add_node("code_review", claude_node(
     "You are working in {work_dir}. Review the code for bugs, logic errors, and quality issues. "
     "Return findings with severity (Critical/Important/Medium/Low).",
-    output_key="code_review_output", model="opus", effort="high",
+    output_key="code_review_output", model="sonnet", effort="high",
     permission_mode="bypassPermissions",
 ))
 graph.add_node("security_review", claude_node(
     "You are working in {work_dir}. Review for security issues: injection, data exposure, "
     "unsafe operations. Return findings with severity.",
-    output_key="security_review_output", model="opus", effort="high",
+    output_key="security_review_output", model="sonnet", effort="high",
     permission_mode="bypassPermissions",
 ))
 graph.add_node("decision", python_node(decide_fn))
-graph.add_node("fix_reviews", claude_node(
-    "You are working in {work_dir}. Fix Critical/Important/Medium issues:\n\n"
+# Codex for fixes — applying review feedback is mechanical
+graph.add_node("fix_reviews", codex_node(
+    "Fix Critical/Important/Medium issues in {work_dir}:\n\n"
     "Code review:\n{code_review_output}\n\nSecurity review:\n{security_review_output}",
-    output_key="fix_reviews_output", model="sonnet", effort="medium",
-    permission_mode="bypassPermissions",
+    output_key="fix_reviews_output",
 ))
 graph.add_node("commit", shell_node(
     'cd {work_dir} && git add -A && git diff --cached --quiet && echo "nothing to commit" '
@@ -261,7 +325,7 @@ graph.add_edge("commit", END)
 - **Fail fast.** Don't add retries to nodes. If you need retry logic, build it as a loop in the graph (conditional edge back to a fix node).
 - **State is strings.** All state values are strings. Use `python_node` to parse or transform if needed.
 - **Set max_iterations.** Always set a reasonable `max_iterations` to prevent infinite loops. Default is 5.
-- **Right-size the model.** Use sonnet/low for simple fixes, opus/high for complex reasoning. Don't over-spend on easy steps.
+- **Right-size the model.** Default to `codex_node` for code generation and `gemini_node` for text tasks. Only use `claude_node` when you need codebase navigation, multi-file reasoning, or nuanced judgment. See the "Choosing the right model" section above.
 - **Permission mode.** For Claude nodes that need to edit files, set `permission_mode="bypassPermissions"` for headless execution.
 - **Always commit at the end.** If the workflow modifies code, add a final `shell_node` that commits and pushes the changes.
 - **Safe commits.** Use `git diff --cached --quiet && echo "nothing to commit" || git commit -m "..."` to handle cases where there's nothing to commit.

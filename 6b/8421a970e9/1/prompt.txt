@@ -1,0 +1,1 @@
+actually we should default to just claude nodes except if repo instructions specify that we can use codex / gemini

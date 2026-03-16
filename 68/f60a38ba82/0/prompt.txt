@@ -1,0 +1,6 @@
+Create a git worktree for branch 'dev-loop/issue-11' using the superpowers:using-git-worktrees skill. Follow the skill exactly.
+
+After the worktree is created and verified, output EXACTLY this line as the very last line of your response:
+WORKTREE_PATH=<absolute path to the worktree>
+
+Do NOT use superpowers:finishing-a-development-branch — just create the worktree.

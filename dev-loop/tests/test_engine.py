@@ -680,3 +680,65 @@ async def test_shell_node_in_graph():
 
     result = await graph.run({})
     assert result["count"] == "3"
+
+
+# --- Default progress logging tests ---
+
+
+@pytest.mark.asyncio
+async def test_default_logging_when_no_callbacks(capsys: pytest.CaptureFixture[str]) -> None:
+    """Default [workflow] lines appear on stderr when no callbacks are registered."""
+    graph = StateGraph()
+
+    async def node_a(state: State) -> State:
+        return {"a": "done"}
+
+    graph.add_node("a", node_a)
+    graph.add_edge("start", "a")
+    graph.add_edge("a", END)
+
+    await graph.run({})
+
+    captured = capsys.readouterr()
+    assert "[workflow] Starting: a" in captured.err
+    assert "[workflow] Finished: a" in captured.err
+
+
+@pytest.mark.asyncio
+async def test_default_logging_suppressed_with_callbacks(capsys: pytest.CaptureFixture[str]) -> None:
+    """No [workflow] lines appear when on_node_start callback is registered."""
+    graph = StateGraph()
+
+    async def node_a(state: State) -> State:
+        return {"a": "done"}
+
+    graph.add_node("a", node_a)
+    graph.add_edge("start", "a")
+    graph.add_edge("a", END)
+
+    @graph.on_node_start
+    async def _on_start(name: str, state: State) -> None:
+        pass
+
+    await graph.run({})
+
+    captured = capsys.readouterr()
+    assert "[workflow]" not in captured.err
+
+
+@pytest.mark.asyncio
+async def test_error_logging_on_failure(capsys: pytest.CaptureFixture[str]) -> None:
+    """[workflow] ERROR line appears on stderr when a node raises."""
+    graph = StateGraph()
+
+    async def boom(state: State) -> State:
+        raise RuntimeError("kaboom")
+
+    graph.add_node("boom", boom)
+    graph.add_edge("start", "boom")
+
+    with pytest.raises(RuntimeError, match="kaboom"):
+        await graph.run({})
+
+    captured = capsys.readouterr()
+    assert "[workflow] ERROR in boom:" in captured.err

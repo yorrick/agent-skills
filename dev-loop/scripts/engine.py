@@ -19,6 +19,8 @@ import asyncio
 import inspect
 import json
 import os
+import sys
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +40,11 @@ class _SafeFormatMap(dict[str, str]):
 
     def __missing__(self, key: str) -> str:
         return ""
+
+
+def _format_elapsed(seconds: float) -> str:
+    minutes, secs = divmod(int(seconds), 60)
+    return f"{minutes}m{secs:02d}s"
 
 
 class _EndSentinel:
@@ -235,6 +242,7 @@ class StateGraph:
         """Execute the graph starting from the given node or the 'start' edge."""
         state: State = dict(initial_state) if initial_state else {}
         visited: dict[str, int] = {}  # node_name -> visit count
+        use_default_log = not self._on_node_start and not self._on_node_end
 
         current = self._find_start_node(start_node)
 
@@ -251,14 +259,22 @@ class StateGraph:
             if node_fn is None:
                 raise ValueError(f"Node '{current}' not found in graph")
 
+            _node_start = time.monotonic() if use_default_log else 0.0
+            if use_default_log:
+                print(f"[workflow] Starting: {current}", file=sys.stderr)
             await self._emit_node_start(current, state)
             try:
                 result = await node_fn(state)
                 state.update(result)
             except Exception as e:
+                if use_default_log:
+                    print(f"[workflow] ERROR in {current}: {e}", file=sys.stderr)
                 await self._emit_error(current, e)
                 raise
             await self._emit_node_end(current, state)
+            if use_default_log:
+                elapsed = _format_elapsed(time.monotonic() - _node_start)
+                print(f"[workflow] Finished: {current} ({elapsed})", file=sys.stderr)
 
             # Determine next node
             # 1. Check conditional edges
@@ -295,13 +311,22 @@ class StateGraph:
         if node_fn is None:
             raise ValueError(f"Node '{name}' not found in graph")
 
+        use_default_log = not self._on_node_start and not self._on_node_end
+        _node_start = time.monotonic() if use_default_log else 0.0
+        if use_default_log:
+            print(f"[workflow] Starting: {name}", file=sys.stderr)
         await self._emit_node_start(name, state)
         try:
             result = await node_fn(state)
         except Exception as e:
+            if use_default_log:
+                print(f"[workflow] ERROR in {name}: {e}", file=sys.stderr)
             await self._emit_error(name, e)
             raise
         await self._emit_node_end(name, {**state, **result})
+        if use_default_log:
+            elapsed = _format_elapsed(time.monotonic() - _node_start)
+            print(f"[workflow] Finished: {name} ({elapsed})", file=sys.stderr)
         return result
 
     def _find_join_node(self, parallel_targets: list[str]) -> str | None:

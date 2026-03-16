@@ -1,0 +1,1 @@
+Actually, we could just try and detect whether codex is available just by executing a very simple headless codex command. And we could also test whether Gemini CLI is also available. And if they are, then we could ask the user or just we could just use them if they are available.

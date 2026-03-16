@@ -69,6 +69,17 @@ Skip brainstorming and implementation — run the review loop on an existing PR.
 /review-loop <issue-url> --review-only <pr-url> --max-iterations 5
 ```
 
+### `/workflow`
+
+Generate and run an ad-hoc workflow from a natural language description. The agent writes a Python script using the `StateGraph` engine and executes it.
+
+```
+/workflow iterate until the tests pass
+/workflow lint, typecheck, and test in parallel
+```
+
+Generated scripts automatically support a `--diagram` flag that prints a Mermaid flowchart of the workflow graph instead of executing it. The agent always shows the diagram first so you can review the workflow before it runs.
+
 ### Standalone script
 
 You can also run the orchestrator script directly:
@@ -146,7 +157,8 @@ dev-loop/
 │   └── plugin.json          # Plugin manifest (name, version)
 ├── commands/
 │   ├── dev-loop.md           # /dev-loop command (orchestrates full lifecycle)
-│   └── review-loop.md        # /review-loop command (review only)
+│   ├── review-loop.md        # /review-loop command (review only)
+│   └── workflow.md           # /workflow command (ad-hoc workflow generation)
 ├── scripts/
 │   ├── engine.py             # Async graph execution engine (StateGraph, node helpers)
 │   └── dev-loop.py           # Main orchestrator script (defines workflow as a graph)
@@ -168,7 +180,8 @@ The orchestrator (`dev-loop.py`) defines its workflow as a `StateGraph` powered 
   - Parallel execution via `asyncio.gather()` with join semantics
   - Loop detection with configurable `max_iterations` safety valve
   - Event callbacks (`on_node_start`, `on_node_end`, `on_error`) for observability
-  - CLI node helpers: `claude_node()`, `codex_node()`, `gemini_node()`, `python_node()`, `template_node()`
+  - CLI node helpers: `claude_node()`, `codex_node()`, `gemini_node()`, `python_node()`, `shell_node()`, `template_node()`
+  - Mermaid diagram generation via `to_mermaid()` for workflow visualization
 
 - **dev-loop.py** — Defines the workflow graph with nodes wrapping `run_claude()` calls and routers for conditional branching (smoke test pass/fail, decision gate fix/done)
 

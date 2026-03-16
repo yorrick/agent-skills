@@ -1,11 +1,11 @@
 {
   "name": "dev-loop",
-  "version": "0.22.4",
-  "description": "Automated development loop: brainstorm, plan, implement, PR, then iterative review (simplify + code review + security review) until clean",
+  "version": "0.24.0",
+  "description": "Automated development loop and ad-hoc workflow generation for orchestrating AI coding agents",
   "author": {
     "name": "Yorrick Jansen"
   },
   "repository": "https://github.com/yorrick/claude-code-plugins",
   "license": "MIT",
-  "keywords": ["development", "automation", "code-review", "workflow", "loop"]
+  "keywords": ["development", "automation", "code-review", "workflow", "loop", "orchestration"]
 }

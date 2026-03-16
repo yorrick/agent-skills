@@ -1,6 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.10"
+# dependencies = ["mermaid-ascii"]
 # ///
 """Lightweight async graph execution engine for orchestrating headless AI coding agents.
 
@@ -26,6 +27,17 @@ from pathlib import Path
 State = dict[str, str]
 NodeFn = Callable[[State], Awaitable[State]]
 RouterFn = Callable[[State], str]
+
+
+class _SafeFormatMap(dict[str, str]):
+    """Dict subclass that returns empty string for missing keys in format_map.
+
+    This makes template interpolation safe in loops — on the first pass,
+    ``{previous_findings}`` resolves to ``""`` instead of raising KeyError.
+    """
+
+    def __missing__(self, key: str) -> str:
+        return ""
 
 
 class _EndSentinel:
@@ -71,6 +83,7 @@ class StateGraph:
         self.max_iterations = max_iterations
         self.cwd = cwd
         self._nodes: dict[str, NodeFn] = {}
+        self._node_meta: dict[str, str] = {}  # name -> label for diagram
         self._edges: list[_Edge] = []
         self._conditional_edges: list[_ConditionalEdge] = []
         self._parallel_edges: dict[str, list[str]] = {}
@@ -83,6 +96,10 @@ class StateGraph:
     def add_node(self, name: str, fn: NodeFn) -> None:
         """Register a named node with its async callable."""
         self._nodes[name] = fn
+        # Extract diagram label from node metadata if set by node helpers
+        label = getattr(fn, "_diagram_label", None)
+        if label:
+            self._node_meta[name] = label
 
     def add_edge(self, source: str, target: str | _EndSentinel) -> None:
         """Add an unconditional edge from source to target."""
@@ -136,6 +153,60 @@ class StateGraph:
                     raise ValueError(f"Router for '{current}' returned unknown label '{label}'")
                 return target
         return None
+
+    def _diagram_id(self, name: str) -> str:
+        """Return a diagram-friendly node ID, embedding metadata if present."""
+        meta = self._node_meta.get(name)
+        if meta:
+            # Encode metadata into the ID: "implement" → "implement:codex"
+            return f"{name}:{meta}"
+        return name
+
+    def to_mermaid(self) -> str:
+        """Generate a Mermaid flowchart string from the graph structure.
+
+        Nodes with metadata (model, effort, etc.) get annotated IDs like
+        ``implement:codex_default`` so the diagram shows what runs each step.
+        """
+        lines: list[str] = ["graph TD"]
+        did = self._diagram_id
+
+        # Unconditional edges
+        for edge in self._edges:
+            target = "END" if isinstance(edge.target, _EndSentinel) else did(edge.target)
+            lines.append(f"    {did(edge.source)} --> {target}")
+
+        # Conditional edges (with labels)
+        for ce in self._conditional_edges:
+            for label, target in ce.route_map.items():
+                target_name = "END" if isinstance(target, _EndSentinel) else did(target)
+                lines.append(f"    {did(ce.source)} -->|{label}| {target_name}")
+
+        # Parallel edges
+        for source, targets in self._parallel_edges.items():
+            for t in targets:
+                lines.append(f"    {did(source)} --> {did(t)}")
+
+        return "\n".join(lines)
+
+    def to_ascii(self) -> str:
+        """Render the graph as an ASCII box-and-arrow diagram.
+
+        Uses ``mermaid-ascii`` to convert the Mermaid flowchart into a
+        terminal-friendly representation with Unicode box-drawing characters.
+        """
+        import subprocess as _sp
+
+        mermaid = self.to_mermaid()
+        result = _sp.run(
+            ["mermaid-ascii"],
+            input=mermaid,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return mermaid  # fall back to raw Mermaid
+        return result.stdout
 
     def _find_start_node(self, start_node: str | None) -> str:
         """Find the first node to execute."""
@@ -313,28 +384,39 @@ def claude_node(
     """Create a node that runs a headless Claude session."""
 
     async def _node(state: State) -> State:
-        prompt = prompt_template.format_map(state)
+        prompt = prompt_template.format_map(_SafeFormatMap(state))
         cmd = ["claude", "-p", prompt, "--output-format", "json", "--model", model, "--effort", effort]
         if permission_mode != "default":
             cmd += ["--permission-mode", permission_mode]
         result = await _run_cli_subprocess(cmd, env_strip=["CLAUDECODE", "ANTHROPIC_API_KEY"])
         return {output_key: result}
 
+    _node._diagram_label = f"claude {model}/{effort}"  # type: ignore[attr-defined]
     return _node
 
 
 def codex_node(
     prompt_template: str,
     output_key: str = "output",
+    model: str | None = None,
+    sandbox: str = "workspace-write",
+    cwd: str | None = None,
 ) -> NodeFn:
-    """Create a node that runs a headless Codex session."""
+    """Create a node that runs a headless Codex session via ``codex exec``."""
 
     async def _node(state: State) -> State:
-        prompt = prompt_template.format_map(state)
-        cmd = ["codex", "--quiet", "--full-auto", prompt]
+        prompt = prompt_template.format_map(_SafeFormatMap(state))
+        cmd = ["codex", "exec", "--sandbox", sandbox]
+        if model:
+            cmd.extend(["--model", model])
+        if cwd:
+            cmd.extend(["-C", cwd])
+        cmd.append(prompt)
         result = await _run_cli_subprocess(cmd)
         return {output_key: result}
 
+    model_label = model or "default"
+    _node._diagram_label = f"codex {model_label}"  # type: ignore[attr-defined]
     return _node
 
 
@@ -345,11 +427,12 @@ def gemini_node(
     """Create a node that runs a headless Gemini CLI session."""
 
     async def _node(state: State) -> State:
-        prompt = prompt_template.format_map(state)
+        prompt = prompt_template.format_map(_SafeFormatMap(state))
         cmd = ["gemini", "-p", prompt]
         result = await _run_cli_subprocess(cmd)
         return {output_key: result}
 
+    _node._diagram_label = "gemini"  # type: ignore[attr-defined]
     return _node
 
 
@@ -360,11 +443,52 @@ def python_node(fn: Callable[[State], State] | Callable[[State], Awaitable[State
     blocking the event loop during long-running subprocess calls.
     """
     if inspect.iscoroutinefunction(fn):
+        fn._diagram_label = "python"  # type: ignore[union-attr]
         return fn  # type: ignore[return-value]
 
     async def _node(state: State) -> State:
         return await asyncio.to_thread(fn, state)  # type: ignore[return-value]
 
+    _node._diagram_label = "python"  # type: ignore[attr-defined]
+    return _node
+
+
+def shell_node(
+    command_template: str,
+    output_key: str = "output",
+    cwd: Path | None = None,
+    check: bool = True,
+) -> NodeFn:
+    """Create a node that runs an arbitrary shell command.
+
+    Interpolates state keys into *command_template* using ``{key}`` syntax,
+    then executes via an async subprocess.  Captures stdout as raw text into
+    *output_key*.
+
+    When *check* is ``True`` (default), raises ``RuntimeError`` on non-zero
+    exit.  Set ``check=False`` to always capture output regardless of exit
+    code — useful for commands whose failure is an expected signal (e.g. tests).
+    """
+
+    async def _node(state: State) -> State:
+        command = command_template.format_map(_SafeFormatMap(state))
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+        )
+        stdout_bytes, stderr_bytes = await proc.communicate()
+        stdout = stdout_bytes.decode() if stdout_bytes else ""
+
+        if check and proc.returncode != 0:
+            stderr = stderr_bytes.decode() if stderr_bytes else ""
+            raise RuntimeError(f"Shell command failed (exit {proc.returncode}): {stderr[:500]}")
+
+        return {output_key: stdout}
+
+    _node._diagram_label = "shell"  # type: ignore[attr-defined]
     return _node
 
 
@@ -372,6 +496,6 @@ def template_node(template: str, output_key: str = "output") -> NodeFn:
     """Create a node that interpolates state keys into a template string."""
 
     async def _node(state: State) -> State:
-        return {output_key: template.format_map(state)}
+        return {output_key: template.format_map(_SafeFormatMap(state))}
 
     return _node

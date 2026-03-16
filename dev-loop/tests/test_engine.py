@@ -17,7 +17,16 @@ import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from engine import END, MaxIterationsExceeded, State, StateGraph, claude_node, python_node, template_node
+from engine import (
+    END,
+    MaxIterationsExceeded,
+    State,
+    StateGraph,
+    claude_node,
+    python_node,
+    shell_node,
+    template_node,
+)
 
 
 async def _noop(state: dict[str, str]) -> dict[str, str]:
@@ -514,3 +523,160 @@ async def test_template_node():
     node = template_node("Hello {name}, your PR is {pr_url}", output_key="greeting")
     result = await node({"name": "Alice", "pr_url": "https://example.com/pr/1"})
     assert result == {"greeting": "Hello Alice, your PR is https://example.com/pr/1"}
+
+
+@pytest.mark.asyncio
+async def test_template_node_missing_keys():
+    """template_node returns empty string for missing keys instead of raising."""
+    node = template_node("Previous: {previous_findings}\nNew: {name}", output_key="out")
+    result = await node({"name": "Alice"})
+    assert result == {"out": "Previous: \nNew: Alice"}
+
+
+# --- shell_node tests ---
+
+
+# --- to_mermaid() tests ---
+
+
+def test_to_mermaid_linear_graph():
+    """Linear graph produces correct Mermaid diagram."""
+    graph = StateGraph()
+
+    graph.add_node("a", _noop)
+    graph.add_node("b", _noop)
+    graph.add_edge("start", "a")
+    graph.add_edge("a", "b")
+    graph.add_edge("b", END)
+
+    diagram = graph.to_mermaid()
+    assert "graph TD" in diagram
+    assert "start --> a" in diagram
+    assert "a --> b" in diagram
+    assert "b --> END" in diagram
+
+
+def test_to_mermaid_conditional_edges():
+    """Conditional edges include labels in the diagram."""
+    graph = StateGraph()
+
+    graph.add_node("check", _noop)
+    graph.add_node("fix", _noop)
+
+    def router(state: dict[str, str]) -> str:
+        return "fix"
+
+    graph.add_edge("start", "check")
+    graph.add_conditional_edges("check", router, {"fix": "fix", "done": END})
+    graph.add_edge("fix", "check")
+
+    diagram = graph.to_mermaid()
+    assert "check -->|fix| fix" in diagram
+    assert "check -->|done| END" in diagram
+    assert "fix --> check" in diagram
+
+
+def test_to_mermaid_parallel_edges():
+    """Parallel edges are represented in the diagram."""
+    graph = StateGraph()
+
+    graph.add_node("source", _noop)
+    graph.add_node("a", _noop)
+    graph.add_node("b", _noop)
+    graph.add_node("join", _noop)
+
+    graph.add_edge("start", "source")
+    graph.add_parallel_edges("source", ["a", "b"])
+    graph.add_edge("a", "join")
+    graph.add_edge("b", "join")
+    graph.add_edge("join", END)
+
+    diagram = graph.to_mermaid()
+    assert "source --> a" in diagram
+    assert "source --> b" in diagram
+    assert "a --> join" in diagram
+    assert "b --> join" in diagram
+    assert "join --> END" in diagram
+
+
+def test_to_mermaid_end_sentinel():
+    """END sentinel renders as terminal node."""
+    graph = StateGraph()
+
+    graph.add_node("only", _noop)
+    graph.add_edge("start", "only")
+    graph.add_edge("only", END)
+
+    diagram = graph.to_mermaid()
+    assert "only --> END" in diagram
+
+
+def test_to_mermaid_empty_graph():
+    """Empty graph produces minimal diagram."""
+    graph = StateGraph()
+    diagram = graph.to_mermaid()
+    assert "graph TD" in diagram
+    lines = [line.strip() for line in diagram.splitlines() if line.strip()]
+    assert len(lines) == 1  # only the header
+
+
+# --- shell_node tests ---
+
+
+@pytest.mark.asyncio
+async def test_shell_node_captures_stdout():
+    """shell_node captures stdout as raw text."""
+    node = shell_node("echo 'hello world'", output_key="out")
+    result = await node({})
+    assert result["out"].strip() == "hello world"
+
+
+@pytest.mark.asyncio
+async def test_shell_node_fails_on_nonzero_exit():
+    """shell_node raises RuntimeError on non-zero exit code."""
+    node = shell_node("sh -c 'echo oops >&2; exit 1'", output_key="out")
+    with pytest.raises(RuntimeError, match="Shell command failed"):
+        await node({})
+
+
+@pytest.mark.asyncio
+async def test_shell_node_check_false():
+    """shell_node with check=False captures output even on non-zero exit."""
+    node = shell_node("sh -c 'echo captured; exit 1'", output_key="out", check=False)
+    result = await node({})
+    assert result["out"].strip() == "captured"
+
+
+@pytest.mark.asyncio
+async def test_shell_node_template_interpolation():
+    """shell_node interpolates state keys into the command."""
+    node = shell_node("echo '{greeting} {name}'", output_key="out")
+    result = await node({"greeting": "hi", "name": "alice"})
+    assert result["out"].strip() == "hi alice"
+
+
+@pytest.mark.asyncio
+async def test_shell_node_empty_stdout():
+    """shell_node stores empty string for commands with no output."""
+    node = shell_node("true", output_key="out")
+    result = await node({})
+    assert result["out"] == ""
+
+
+@pytest.mark.asyncio
+async def test_shell_node_in_graph():
+    """shell_node works as a node in a full graph execution."""
+    graph = StateGraph()
+
+    graph.add_node("list", shell_node("echo 'a\nb\nc'", output_key="items"))
+
+    async def count_lines(state: State) -> State:
+        return {"count": str(len(state["items"].strip().splitlines()))}
+
+    graph.add_node("count", python_node(count_lines))
+    graph.add_edge("start", "list")
+    graph.add_edge("list", "count")
+    graph.add_edge("count", END)
+
+    result = await graph.run({})
+    assert result["count"] == "3"

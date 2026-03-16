@@ -1,0 +1,35 @@
+I'm using the workflow command in the repo and here is what I see. 
+
+
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Shell details
+
+  Status: running
+  Runtime: 17m 20s
+  Command: uv run /tmp/workflow_8271.py
+
+  Output:
+  ╭─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ Reading inline script metadata from `/tmp/workflow_8271.py`                                                                 │
+  │                                                                                                                             │
+  │                                                                                                                             │
+  │                                                                                                                             │
+  │                                                                                                                             │
+  │                                                                                                                             │
+  │                                                                                                                             │
+  │                                                                                                                             │
+  │                                                                                                                             │
+  │                                                                                                                             │
+  ╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+  Showing 1 lines
+
+Which is nothing. We don't have any kind of feedback. The dev loop is just basically silent and we don't know what happens. What happened? So can we improve that? Also, yeah, does it work only with GitHub issues or does it work with a spec plan as well?
+
+---
+
+option 1. use /dev-loop:workflow to implement it
+
+---
+
+ok

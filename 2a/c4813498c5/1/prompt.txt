@@ -1,0 +1,5 @@
+You are working in /Users/yorrickjansen/work/claude-code-plugins. Execute Task 12 from the plan at /Users/yorrickjansen/work/claude-code-plugins/docs/superpowers/plans/2026-03-17-workflow-eval-framework.md.
+
+1. Add 'dev-loop/tests/workflow_eval/results/' to .gitignore
+2. Add a '## Workflow eval tests' section to dev-loop/CLAUDE.md with instructions    on running evals, adding scenarios, etc. as specified in the plan
+3. Commit with message: 'docs: add workflow eval testing instructions and gitignore results'

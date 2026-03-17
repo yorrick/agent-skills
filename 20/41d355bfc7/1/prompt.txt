@@ -1,0 +1,96 @@
+pick the most important issue (but not tool restrictions) and /brainstorming about it
+
+---
+
+both
+
+---
+
+wait it's confusing, because i,m using workflow and dev-loop on the project that contains those commands too, thats meta. explain again
+
+---
+
+add smoke test
+
+---
+
+C
+
+---
+
+add it
+
+---
+
+B
+
+---
+
+are we going to update /dev-loop?
+
+---
+
+oh ok so it's just the skill
+
+---
+
+ye
+
+---
+
+yes
+
+---
+
+yes
+
+---
+
+continue
+
+---
+
+yup
+
+---
+
+go
+
+---
+
+yes
+
+---
+
+run it
+
+---
+
+where are the logs
+
+---
+
+i thought we added logs earlier
+
+---
+
+create an issue to implement real time logs - note also that we'll need to find a solution for parallel strps
+
+---
+
+follow integration test exec
+
+---
+
+<task-notification>
+<task-id>bgf0w1zt7</task-id>
+<tool-use-id>toolu_015447B7v67QPCdQMo63Ly73</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-yorrickjansen-work-claude-code-plugins/a5aff118-d0f8-42e1-a0aa-bf47d26b4229/tasks/bgf0w1zt7.output</output-file>
+<status>completed</status>
+<summary>Background command "Run the full integration test (requires Codex CLI, ~15 min)" completed (exit code 0)</summary>
+</task-notification>
+Read the output file to retrieve the result: /private/tmp/claude-501/-Users-yorrickjansen-work-claude-code-plugins/a5aff118-d0f8-42e1-a0aa-bf47d26b4229/tasks/bgf0w1zt7.output
+
+---
+
+push

@@ -23,7 +23,9 @@ from engine import (
     State,
     StateGraph,
     claude_node,
+    codex_node,
     detect_available_models,
+    gemini_node,
     python_node,
     shell_node,
     template_node,
@@ -762,3 +764,42 @@ def test_detect_available_models_claude_is_available() -> None:
     """Claude CLI should be available in this environment."""
     result = detect_available_models()
     assert result["claude"] is True
+
+
+# --- _prompt_template attribute tests ---
+
+
+def test_claude_node_has_prompt_template():
+    """claude_node exposes its prompt template as _prompt_template."""
+    node = claude_node("Fix this: {error}", output_key="fix")
+    assert node._prompt_template == "Fix this: {error}"  # type: ignore[attr-defined]
+
+
+def test_codex_node_has_prompt_template():
+    """codex_node exposes its prompt template as _prompt_template."""
+    node = codex_node("Implement: {spec}", output_key="code")
+    assert node._prompt_template == "Implement: {spec}"  # type: ignore[attr-defined]
+
+
+def test_gemini_node_has_prompt_template():
+    """gemini_node exposes its prompt template as _prompt_template."""
+    node = gemini_node("Summarize: {findings}", output_key="summary")
+    assert node._prompt_template == "Summarize: {findings}"  # type: ignore[attr-defined]
+
+
+def test_shell_node_has_prompt_template():
+    """shell_node exposes its command template as _prompt_template."""
+    node = shell_node("uv run pytest {test_path}", output_key="test_out")
+    assert node._prompt_template == "uv run pytest {test_path}"  # type: ignore[attr-defined]
+
+
+def test_template_node_has_prompt_template():
+    """template_node exposes its template string as _prompt_template."""
+    node = template_node("Report: {lint}\n{tests}", output_key="report")
+    assert node._prompt_template == "Report: {lint}\n{tests}"  # type: ignore[attr-defined]
+
+
+def test_template_node_has_diagram_label():
+    """template_node has a _diagram_label."""
+    node = template_node("Report: {output}", output_key="report")
+    assert node._diagram_label == "template"  # type: ignore[attr-defined]

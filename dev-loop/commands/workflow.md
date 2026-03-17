@@ -200,6 +200,22 @@ claude_node(
 
 ## Example workflows
 
+### Context patterns for review workflows
+
+These patterns are distilled from the `dev-loop.py` orchestrator. Apply them whenever your workflow includes a review loop.
+
+**1. Review the PR diff, not raw files.** Use `/code-review:code-review {pr_url}` and `/security-review` with the PR URL. These skills examine what *changed*, catching regressions and avoiding noise from pre-existing code. Don't prompt the LLM to "review the code in {work_dir}" — it will scan everything and miss what matters.
+
+**2. Track previous findings across iterations.** Carry `previous_security_findings` as a separate state key. The security review prompt should instruct the reviewer to (a) check whether previous issues have been resolved, and (b) perform a full new review since fixes may introduce new issues.
+
+**3. Post findings as PR comments.** Review nodes should post findings via `gh pr comment {pr_number}`. This creates an audit trail visible to humans and other tools without reading workflow state.
+
+**4. Use an LLM for the decision gate.** Don't regex-match review output. Use `claude_node` with sonnet/low to evaluate findings and answer YES/NO. Only Critical/Important/Medium severity triggers a fix; Low severity and nitpicks are skipped. Short-circuit to YES if CI is failing.
+
+**5. Run quality gates after every fix.** Every fix prompt must include instructions to run the project's lint, typecheck, format, and test suite, and fix any failures before committing. This prevents fix iterations from introducing new problems.
+
+**6. Smoke test before creating the PR.** Verify the implementation works before entering the review loop. Look for a `## Validation` section in the plan; fall back to convention-based discovery (README, package.json, docker-compose.yml). End with `SMOKE_TEST_PASS` or `SMOKE_TEST_FAIL: <summary>` for router parsing.
+
 ### 1. Test-fix loop with commit
 
 ```python

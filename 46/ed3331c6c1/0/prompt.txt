@@ -1,0 +1,48 @@
+update CLAUDE.md, add to it that avery change must be validated by linting, formating, type chaking, and also that agent must asses whether docs need to be updated for each change (and update docs if need be of course). Then, add an issue to document /workflow
+
+---
+
+oh also, we want to /simplify + /code-review:code-review + /security-review every big change
+
+---
+
+open an issue in GH
+
+---
+
+(and add that issues are managed in GH in CLAUDE.md)
+
+---
+
+actually CLAUDE.md should say that we want to use /brainstorming to write plans, then execute them with /workflow
+
+---
+
+then depending on complexity, we should use /simplify , /code-review:code-review /security-review as needed (and also all other potential steps, like uddating docs etc)
+
+---
+
+btw, how can i make sure /brainstorming uses opus + max effort?
+
+---
+
+<task-notification>
+<task-id>bsuztxp6n</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-yorrickjansen-work-claude-code-plugins/185136bc-648d-4ba4-ad73-7caa4d4a50eb/tasks/bsuztxp6n.output</output-file>
+<status>killed</status>
+<summary>Background command "find /Users/yorrickjansen -path "*/node_modules" -prune -o -type f -name "*.md" -print | xargs grep -l "frontmatter\|^---" | xargs grep -l "model\|effort" | head -10" was stopped</summary>
+</task-notification>
+Read the output file to retrieve the result: /private/tmp/claude-501/-Users-yorrickjansen-work-claude-code-plugins/185136bc-648d-4ba4-ad73-7caa4d4a50eb/tasks/bsuztxp6n.output
+
+---
+
+add it to CLAUDE.md
+
+---
+
+also, add to CLAUDE.md that whever we see things to improve, we should create an issue in GH for tracking
+
+---
+
+always use opus + max effort for brainstorming, not for everything!

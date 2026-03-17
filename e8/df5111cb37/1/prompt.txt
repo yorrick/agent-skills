@@ -1,0 +1,41 @@
+are #8 and #15 the same issues?
+
+---
+
+separate. start /brainstorming for 15
+
+---
+
+continue
+
+---
+
+continue
+
+---
+
+ok so actually it's just the integrtion test that does not display logs right? running a workflow script manually would display real time logs?
+
+---
+
+do both
+
+---
+
+B
+
+---
+
+B
+
+---
+
+A
+
+---
+
+yes
+
+---
+
+yes

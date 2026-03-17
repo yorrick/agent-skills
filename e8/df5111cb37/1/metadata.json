@@ -1,0 +1,33 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "e8df5111cb37",
+  "session_id": "74b095ff-28df-462b-9438-60737d6aafee",
+  "strategy": "manual-commit",
+  "created_at": "2026-03-17T01:09:57.174166Z",
+  "branch": "main",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "docs/superpowers/specs/2026-03-16-stream-test-logs-design.md"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "9fac2d2f8860",
+  "token_usage": {
+    "input_tokens": 44,
+    "cache_creation_tokens": 65366,
+    "cache_read_tokens": 701518,
+    "output_tokens": 3225,
+    "api_call_count": 22
+  },
+  "session_metrics": {
+    "turn_count": 7
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-03-17T01:09:57.070229Z",
+    "agent_lines": 54,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 54,
+    "agent_percentage": 100
+  }
+}

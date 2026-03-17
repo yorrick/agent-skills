@@ -3,7 +3,7 @@
   "checkpoint_id": "7e421ae69c6b",
   "strategy": "manual-commit",
   "branch": "main",
-  "checkpoints_count": 0,
+  "checkpoints_count": 3,
   "files_touched": [
     "dev-loop/tests/workflow_eval/scenarios/conftest.py"
   ],
@@ -13,13 +13,19 @@
       "transcript": "/7e/421ae69c6b/0/full.jsonl",
       "content_hash": "/7e/421ae69c6b/0/content_hash.txt",
       "prompt": ""
+    },
+    {
+      "metadata": "/7e/421ae69c6b/1/metadata.json",
+      "transcript": "/7e/421ae69c6b/1/full.jsonl",
+      "content_hash": "/7e/421ae69c6b/1/content_hash.txt",
+      "prompt": "/7e/421ae69c6b/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 0,
-    "cache_creation_tokens": 0,
-    "cache_read_tokens": 0,
-    "output_tokens": 0,
-    "api_call_count": 0
+    "input_tokens": 143,
+    "cache_creation_tokens": 253103,
+    "cache_read_tokens": 9651898,
+    "output_tokens": 42382,
+    "api_call_count": 95
   }
 }

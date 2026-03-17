@@ -3,5 +3,4 @@ prompt = """
 Fix the calculate_average function in src/mathlib.py —
 it crashes on empty lists with a ZeroDivisionError.
 The test in tests/test_mathlib.py already covers this case.
-This is a Python project — check CLAUDE.md for quality gates.
 """

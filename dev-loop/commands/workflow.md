@@ -16,12 +16,13 @@ The workflow engine is at: `${CLAUDE_PLUGIN_ROOT}/scripts/engine.py`
 
 ## What to do
 
-1. **Understand the request and the repo.** Read relevant files to understand the codebase context. **Always check for CLAUDE.md** (or AGENTS.md, GEMINI.md) in the repo root and parent directories — these contain project-specific quality gates, testing requirements, and development conventions that the workflow MUST incorporate. For example, if CLAUDE.md says "run ruff check" or "run playwright tests", add dedicated nodes for those steps.
-2. **Design the workflow.** Decide which nodes, edges, and routers are needed. Pick the right node type for each step. **Look for parallelization opportunities** — tasks that touch different files can run concurrently via `add_parallel_edges`. See the parallelization rules below. **Incorporate all quality gates from CLAUDE.md** — if the repo specifies lint, typecheck, format, or test commands, add them as explicit nodes (shell_node or baked into LLM prompts).
-3. **Write the script.** Create a Python script at `/tmp/workflow_NNNN.py` (use a random 4-digit suffix). Always include `--diagram` flag handling (see template).
-4. **Show the diagram first.** Run with `uv run /tmp/workflow_NNNN.py --diagram` and show the user the rendered ASCII diagram so they can see the workflow graph before execution. The script template already uses `graph.to_ascii()` for this — do NOT change it to `to_mermaid()`. The ASCII version renders a visual box-and-arrow diagram directly in the terminal.
-5. **Run it.** Execute with `uv run /tmp/workflow_NNNN.py`.
-6. **Report the result.** Show the user what happened.
+1. **Read CLAUDE.md first.** Before anything else, check for `CLAUDE.md`, `AGENTS.md`, or `GEMINI.md` in the repo root and parent directories. If found, read it. These files contain quality gates (lint, typecheck, format commands), testing requirements, and dev conventions. Every instruction in these files MUST be reflected in the workflow — as dedicated `shell_node` steps or included in LLM node prompts. Do not skip this step.
+2. **Understand the request.** Read relevant source files to understand the codebase context.
+3. **Design the workflow.** Decide which nodes, edges, and routers are needed. Pick the right node type for each step. **Look for parallelization opportunities** — tasks that touch different files can run concurrently via `add_parallel_edges`. See the parallelization rules below.
+4. **Write the script.** Create a Python script at `/tmp/workflow_NNNN.py` (use a random 4-digit suffix). Always include `--diagram` flag handling (see template).
+5. **Show the diagram first.** Run with `uv run /tmp/workflow_NNNN.py --diagram` and show the user the rendered ASCII diagram so they can see the workflow graph before execution. The script template already uses `graph.to_ascii()` for this — do NOT change it to `to_mermaid()`. The ASCII version renders a visual box-and-arrow diagram directly in the terminal.
+6. **Run it.** Execute with `uv run /tmp/workflow_NNNN.py`.
+7. **Report the result.** Show the user what happened.
 
 ## Script template
 

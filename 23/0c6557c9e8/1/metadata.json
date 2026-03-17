@@ -1,0 +1,33 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "230c6557c9e8",
+  "session_id": "888c33d3-3597-4418-a278-23e664432c9c",
+  "strategy": "manual-commit",
+  "created_at": "2026-03-17T00:44:43.143316Z",
+  "branch": "main",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "docs/superpowers/plans/2026-03-16-workflow-prompt-alignment.md"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "21a0617b3afd",
+  "token_usage": {
+    "input_tokens": 114,
+    "cache_creation_tokens": 251498,
+    "cache_read_tokens": 5492918,
+    "output_tokens": 29487,
+    "api_call_count": 78
+  },
+  "session_metrics": {
+    "turn_count": 12
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-03-17T00:44:42.141547Z",
+    "agent_lines": 734,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 734,
+    "agent_percentage": 100
+  }
+}

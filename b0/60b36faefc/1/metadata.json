@@ -1,0 +1,33 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "b060b36faefc",
+  "session_id": "9a5ec5e9-2dfe-4caf-9ef9-8cbbd954bf95",
+  "strategy": "manual-commit",
+  "created_at": "2026-03-17T18:37:14.129698Z",
+  "branch": "feat/workflow-eval-framework",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "dev-loop/tests/workflow_eval/test_scenarios.py"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "01320fb2af82",
+  "token_usage": {
+    "input_tokens": 3012,
+    "cache_creation_tokens": 517799,
+    "cache_read_tokens": 34823782,
+    "output_tokens": 73658,
+    "api_call_count": 229
+  },
+  "session_metrics": {
+    "turn_count": 25
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-03-17T18:37:11.924596Z",
+    "agent_lines": 0,
+    "human_added": 16,
+    "human_modified": 23,
+    "human_removed": 0,
+    "total_committed": 16,
+    "agent_percentage": 0
+  }
+}

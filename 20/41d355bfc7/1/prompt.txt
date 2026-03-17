@@ -94,3 +94,7 @@ Read the output file to retrieve the result: /private/tmp/claude-501/-Users-yorr
 ---
 
 push
+
+---
+
+push dev-loop/CLAUDE.md too

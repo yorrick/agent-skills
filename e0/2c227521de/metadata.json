@@ -3,7 +3,7 @@
   "checkpoint_id": "e02c227521de",
   "strategy": "manual-commit",
   "branch": "feat/workflow-eval-framework",
-  "checkpoints_count": 0,
+  "checkpoints_count": 3,
   "files_touched": [
     "dev-loop/tests/workflow_eval/scenarios/bugfix_backend_instructions/scenario.toml",
     "dev-loop/tests/workflow_eval/scenarios/feature_backend_instructions/scenario.toml"
@@ -14,13 +14,19 @@
       "transcript": "/e0/2c227521de/0/full.jsonl",
       "content_hash": "/e0/2c227521de/0/content_hash.txt",
       "prompt": ""
+    },
+    {
+      "metadata": "/e0/2c227521de/1/metadata.json",
+      "transcript": "/e0/2c227521de/1/full.jsonl",
+      "content_hash": "/e0/2c227521de/1/content_hash.txt",
+      "prompt": "/e0/2c227521de/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 0,
-    "cache_creation_tokens": 0,
-    "cache_read_tokens": 0,
-    "output_tokens": 0,
-    "api_call_count": 0
+    "input_tokens": 254,
+    "cache_creation_tokens": 477639,
+    "cache_read_tokens": 24586923,
+    "output_tokens": 59247,
+    "api_call_count": 181
   }
 }

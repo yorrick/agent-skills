@@ -2,3 +2,4 @@
 .dev-loop/
 .worktrees/
 .claude/worktrees/
+dev-loop/tests/workflow_eval/results/

@@ -23,3 +23,14 @@ Every feature of the workflow engine must be covered by tests:
 - **Unit tests** (`tests/test_engine.py`): For engine internals — graph construction, execution order, conditional/parallel edges, callbacks, logging behavior, model detection, node helpers (`claude_node`, `shell_node`, `python_node`, `template_node`), and diagram generation. Run with `uv run pytest dev-loop/tests/test_engine.py`.
 - **Integration tests** (`tests/test_workflow_integration.py`): For end-to-end workflow execution — scaffolds a real project, generates a multi-LLM workflow script, runs it, and verifies implementation correctness, test results, git state, and progress logging. Run with `uv run dev-loop/tests/test_workflow_integration.py`.
 - When adding a new engine feature, add unit tests at minimum. If the feature affects end-to-end workflow behavior (e.g. progress logging, execution flow), also add assertions to the integration test.
+
+## Workflow eval tests
+
+Eval tests verify that the `/workflow` skill generates structurally sound workflows. They call headless Claude to generate a workflow script, import the graph, and run Python assertions.
+
+- Run all evals: `uv run pytest -m eval -v`
+- Run a specific scenario: `uv run pytest -m eval -k bugfix_bare -v -s`
+- Scenarios live in `tests/workflow_eval/scenarios/` — each is a self-contained directory
+- Adding a scenario: create a new directory with `scenario.toml`, `repo/`, and `assertions.py`
+- Generated scripts are saved to `tests/workflow_eval/results/` for manual inspection
+- These tests make LLM calls — run them when iterating on the `/workflow` skill prompt, not on every commit

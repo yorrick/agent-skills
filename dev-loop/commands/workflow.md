@@ -16,9 +16,9 @@ The workflow engine is at: `${CLAUDE_PLUGIN_ROOT}/scripts/engine.py`
 
 ## What to do
 
-1. **Read CLAUDE.md first.** Before anything else, check for `CLAUDE.md`, `AGENTS.md`, or `GEMINI.md` in the repo root and parent directories. If found, read it. These files contain quality gates (lint, typecheck, format commands), testing requirements, and dev conventions. Every instruction in these files MUST be reflected in the workflow — as dedicated `shell_node` steps or included in LLM node prompts. Do not skip this step.
+1. **Read CLAUDE.md and list quality gates.** Before anything else, read `CLAUDE.md` (or `AGENTS.md`, `GEMINI.md`) in the repo root. If it exists, extract every quality gate command it mentions (e.g., `uv run ruff check .`, `uv run pyright`, `npx playwright test`, `npm run build`). Write them down — you will need to add a workflow node for each one.
 2. **Understand the request.** Read relevant source files to understand the codebase context.
-3. **Design the workflow.** Decide which nodes, edges, and routers are needed. Pick the right node type for each step. **Look for parallelization opportunities** — tasks that touch different files can run concurrently via `add_parallel_edges`. See the parallelization rules below.
+3. **Design the workflow.** Decide which nodes, edges, and routers are needed. Pick the right node type for each step. **For every quality gate from step 1, add a dedicated `shell_node`** (or include the command in an LLM node prompt). If CLAUDE.md says "run ruff check", there must be a node that runs ruff. If it says "run pyright", there must be a node for pyright. No exceptions. **Look for parallelization opportunities** — independent quality gates can run in parallel via `add_parallel_edges`.
 4. **Write the script.** Create a Python script at `/tmp/workflow_NNNN.py` (use a random 4-digit suffix). Always include `--diagram` flag handling (see template).
 5. **Show the diagram first.** Run with `uv run /tmp/workflow_NNNN.py --diagram` and show the user the rendered ASCII diagram so they can see the workflow graph before execution. The script template already uses `graph.to_ascii()` for this — do NOT change it to `to_mermaid()`. The ASCII version renders a visual box-and-arrow diagram directly in the terminal.
 6. **Run it.** Execute with `uv run /tmp/workflow_NNNN.py`.

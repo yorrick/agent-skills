@@ -139,38 +139,46 @@ def import_graph(workflow_path: Path) -> StateGraph:
 
     Sets up sys.path and env so the script's imports resolve.
     """
-    # Set CLAUDE_PLUGIN_ROOT so the script's sys.path.insert resolves
+    # Set CLAUDE_PLUGIN_ROOT so the script's sys.path.insert resolves.
+    # Restore the original value (or unset) after import.
+    old_plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT")
     os.environ["CLAUDE_PLUGIN_ROOT"] = str(PLUGIN_DIR)
 
     # Ensure engine is importable from the script's perspective
     if str(SCRIPTS_DIR) not in sys.path:
         sys.path.insert(0, str(SCRIPTS_DIR))
 
-    # Safety check: verify the script has build_graph() and if __name__ guard
-    # before importing. If not, the import would execute the workflow.
-    script_text = workflow_path.read_text()
-    if "def build_graph" not in script_text:
-        raise RuntimeError(
-            f"Generated script {workflow_path} does not contain a build_graph() function. "
-            f"Cannot import safely. First 500 chars:\n{script_text[:500]}"
-        )
-    if "if __name__" not in script_text:
-        raise RuntimeError(
-            f"Generated script {workflow_path} has no if __name__ guard. Importing would execute the workflow."
-        )
+    try:
+        # Safety check: verify the script has build_graph() and if __name__ guard
+        # before importing. If not, the import would execute the workflow.
+        script_text = workflow_path.read_text()
+        if "def build_graph" not in script_text:
+            raise RuntimeError(
+                f"Generated script {workflow_path} does not contain a build_graph() function. "
+                f"Cannot import safely. First 500 chars:\n{script_text[:500]}"
+            )
+        if "if __name__" not in script_text:
+            raise RuntimeError(
+                f"Generated script {workflow_path} has no if __name__ guard. Importing would execute the workflow."
+            )
 
-    spec = importlib.util.spec_from_file_location("workflow_gen", workflow_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load module from {workflow_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+        spec = importlib.util.spec_from_file_location("workflow_gen", workflow_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Cannot load module from {workflow_path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
 
-    build_graph = getattr(module, "build_graph", None)
-    if build_graph is None:
-        raise RuntimeError(f"Generated script {workflow_path} does not have a build_graph() function")
+        build_graph = getattr(module, "build_graph", None)
+        if build_graph is None:
+            raise RuntimeError(f"Generated script {workflow_path} does not have a build_graph() function")
 
-    # Pass all models as available for deterministic topology
-    return build_graph(models={"claude": True, "codex": True, "gemini": True})
+        # Pass all models as available for deterministic topology
+        return build_graph(models={"claude": True, "codex": True, "gemini": True})
+    finally:
+        if old_plugin_root is None:
+            os.environ.pop("CLAUDE_PLUGIN_ROOT", None)
+        else:
+            os.environ["CLAUDE_PLUGIN_ROOT"] = old_plugin_root
 
 
 scenarios = discover_scenarios()

@@ -107,15 +107,22 @@ class GraphInspector:
             if current in visited:
                 continue
             visited.add(current)
-            # Find nodes that have an edge TO current
+            # Find nodes that have an edge TO current (unconditional)
             for edge in self.graph._edges:
                 if edge.target == current and edge.source not in ancestors:
                     ancestors.add(edge.source)
                     queue.append(edge.source)
+            # Parallel edges
             for source, targets in self.graph._parallel_edges.items():
                 if current in targets and source not in ancestors:
                     ancestors.add(source)
                     queue.append(source)
+            # Conditional edges (target in route_map matches current)
+            for ce in self.graph._conditional_edges:
+                for target in ce.route_map.values():
+                    if target == current and ce.source not in ancestors:
+                        ancestors.add(ce.source)
+                        queue.append(ce.source)
         return ancestors
 
     def node_count(self) -> int:

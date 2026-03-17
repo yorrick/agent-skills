@@ -3,7 +3,7 @@
   "checkpoint_id": "1df611d88a9b",
   "strategy": "manual-commit",
   "branch": "main",
-  "checkpoints_count": 0,
+  "checkpoints_count": 1,
   "files_touched": [
     "docs/superpowers/plans/2026-03-17-workflow-eval-framework.md"
   ],
@@ -13,13 +13,19 @@
       "transcript": "/1d/f611d88a9b/0/full.jsonl",
       "content_hash": "/1d/f611d88a9b/0/content_hash.txt",
       "prompt": ""
+    },
+    {
+      "metadata": "/1d/f611d88a9b/1/metadata.json",
+      "transcript": "/1d/f611d88a9b/1/full.jsonl",
+      "content_hash": "/1d/f611d88a9b/1/content_hash.txt",
+      "prompt": "/1d/f611d88a9b/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 0,
-    "cache_creation_tokens": 0,
-    "cache_read_tokens": 0,
-    "output_tokens": 0,
-    "api_call_count": 0
+    "input_tokens": 34,
+    "cache_creation_tokens": 113317,
+    "cache_read_tokens": 2224003,
+    "output_tokens": 20935,
+    "api_call_count": 26
   }
 }

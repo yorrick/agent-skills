@@ -1,0 +1,5 @@
+can we install/give the workflow skill to be closer to how things run reallY?
+
+also, what does 'These are manual evals, not CI. Run them when iterating on the `/workflow` skill prompt.' mean? 
+
+i want the evals to be pytests

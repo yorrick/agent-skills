@@ -28,7 +28,8 @@ Every feature of the workflow engine must be covered by tests:
 
 Eval tests verify that the `/workflow` skill generates structurally sound workflows. They call headless Claude to generate a workflow script, import the graph, and run Python assertions.
 
-- Run all evals: `uv run pytest -m eval -v`
+- Run all evals in parallel: `uv run pytest -m eval -n auto -v`
+- Run all evals sequentially: `uv run pytest -m eval -v`
 - Run a specific scenario: `uv run pytest -m eval -k bugfix_bare -v -s`
 - Scenarios live in `tests/workflow_eval/scenarios/` — each is a self-contained directory
 - Adding a scenario: create a new directory with `scenario.toml`, `repo/`, and `assertions.py`

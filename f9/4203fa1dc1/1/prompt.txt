@@ -1,0 +1,20 @@
+You are working in /Users/yorrickjansen/work/claude-code-plugins. Execute Tasks 5 through 11 from the plan at /Users/yorrickjansen/work/claude-code-plugins/docs/superpowers/plans/2026-03-17-workflow-eval-framework.md.
+
+Read the plan's Tasks 5-11 sections carefully, then create ALL 7 scenario directories under dev-loop/tests/workflow_eval/scenarios/. For each scenario, create:
+- scenario.toml (name + prompt)
+- repo/ directory with all scaffold files
+- assertions.py with assert_workflow(graph, h) function
+
+The 7 scenarios are:
+1. bugfix_bare — Fix calculate_average, no CLAUDE.md
+2. bugfix_backend_instructions — Same fix, with CLAUDE.md (pytest, ruff, pyright, docs)
+3. feature_bare — Add calculate_median, no CLAUDE.md
+4. feature_backend_instructions — Add calculate_median, with CLAUDE.md
+5. frontend_feature_instructions — Add Settings page, with CLAUDE.md (playwright)
+6. fullstack_feature_instructions — User profile API+UI, with CLAUDE.md (pytest+playwright)
+7. refactoring_bare — Extract stats module, no CLAUDE.md
+
+Follow the exact file contents specified in the plan for each scenario.
+After creating all 7, commit with message: 'feat(eval): add 7 workflow eval scenarios'
+Include in body: 'Scenarios cover bug fixes, feature dev, frontend, full-stack, and
+refactoring across bare repos and repos with dev lifecycle instructions.'

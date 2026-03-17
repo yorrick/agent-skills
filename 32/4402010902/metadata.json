@@ -3,7 +3,7 @@
   "checkpoint_id": "324402010902",
   "strategy": "manual-commit",
   "branch": "main",
-  "checkpoints_count": 0,
+  "checkpoints_count": 2,
   "files_touched": [
     "dev-loop/commands/workflow.md"
   ],
@@ -13,13 +13,19 @@
       "transcript": "/32/4402010902/0/full.jsonl",
       "content_hash": "/32/4402010902/0/content_hash.txt",
       "prompt": ""
+    },
+    {
+      "metadata": "/32/4402010902/1/metadata.json",
+      "transcript": "/32/4402010902/1/full.jsonl",
+      "content_hash": "/32/4402010902/1/content_hash.txt",
+      "prompt": "/32/4402010902/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 0,
-    "cache_creation_tokens": 0,
-    "cache_read_tokens": 0,
-    "output_tokens": 0,
-    "api_call_count": 0
+    "input_tokens": 127,
+    "cache_creation_tokens": 265109,
+    "cache_read_tokens": 6640887,
+    "output_tokens": 31228,
+    "api_call_count": 87
   }
 }

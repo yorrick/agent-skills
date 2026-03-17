@@ -150,3 +150,7 @@ Read the output file to retrieve the result: /private/tmp/claude-501/-Users-yorr
 <summary>Background command "Eval run 3 with parallel execution" completed (exit code 0)</summary>
 </task-notification>
 Read the output file to retrieve the result: /private/tmp/claude-501/-Users-yorrickjansen-work-claude-code-plugins/c9003741-8183-46dc-94ad-30f1d1a9c250/tasks/b6f0jicoe.output
+
+---
+
+OK, so we worked on main, so you need to create a branch and then create a PR. Push everything, create a PR, and then I want you to iterate and run the evals. First, fix the skill, then run the evals. And once you have two runs in a row where all seven tests pass, you can stop.

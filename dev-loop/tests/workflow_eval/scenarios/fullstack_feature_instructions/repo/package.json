@@ -1,0 +1,10 @@
+{
+  "name": "fullstack-app",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "next dev",
+    "test": "npx playwright test"
+  },
+  "dependencies": { "next": "^14.0.0", "react": "^18.0.0" },
+  "devDependencies": { "@playwright/test": "^1.40.0" }
+}

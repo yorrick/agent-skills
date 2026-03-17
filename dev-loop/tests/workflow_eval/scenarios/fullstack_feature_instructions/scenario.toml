@@ -1,0 +1,7 @@
+name = "Full-stack feature with comprehensive instructions"
+prompt = """
+Add a user profile feature:
+- Backend: Add a /api/profile endpoint in src/api/routes.py that returns user profile data
+- Frontend: Add a Profile page component at src/components/Profile.tsx that displays the data
+- Add both backend tests (pytest) and frontend e2e tests (playwright)
+"""

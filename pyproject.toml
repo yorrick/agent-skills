@@ -8,11 +8,15 @@ dev = [
     "pyright>=1.1",
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
+    "pytest-xdist>=3.5",
     "ruff>=0.9",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = [
+    "eval: LLM-based eval tests (slow, requires Claude CLI)",
+]
 
 [tool.ruff]
 target-version = "py312"
@@ -26,3 +30,4 @@ ignore = ["UP017"]  # datetime.UTC requires Python 3.11+, we target 3.10
 pythonVersion = "3.12"
 typeCheckingMode = "standard"
 extraPaths = ["dev-loop/scripts"]
+exclude = ["**/workflow_eval/scenarios/**/repo/**"]

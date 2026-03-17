@@ -16,12 +16,13 @@ The workflow engine is at: `${CLAUDE_PLUGIN_ROOT}/scripts/engine.py`
 
 ## What to do
 
-1. **Understand the request.** Read relevant files if needed to understand the codebase context.
-2. **Design the workflow.** Decide which nodes, edges, and routers are needed. Pick the right node type for each step.
-3. **Write the script.** Create a Python script at `/tmp/workflow_NNNN.py` (use a random 4-digit suffix). Always include `--diagram` flag handling (see template).
-4. **Show the diagram first.** Run with `uv run /tmp/workflow_NNNN.py --diagram` and show the user the rendered ASCII diagram so they can see the workflow graph before execution. The script template already uses `graph.to_ascii()` for this — do NOT change it to `to_mermaid()`. The ASCII version renders a visual box-and-arrow diagram directly in the terminal.
-5. **Run it.** Execute with `uv run /tmp/workflow_NNNN.py`.
-6. **Report the result.** Show the user what happened.
+1. **Read CLAUDE.md and list quality gates.** Before anything else, read `CLAUDE.md` (or `AGENTS.md`, `GEMINI.md`) in the repo root. If it exists, extract every quality gate command it mentions (e.g., `uv run ruff check .`, `uv run pyright`, `npx playwright test`, `npm run build`). Write them down — you will need to add a workflow node for each one.
+2. **Understand the request.** Read relevant source files to understand the codebase context.
+3. **Design the workflow.** Decide which nodes, edges, and routers are needed. Pick the right node type for each step. **For every quality gate from step 1, add a dedicated `shell_node`** (or include the command in an LLM node prompt). If CLAUDE.md says "run ruff check", there must be a node that runs ruff. If it says "run pyright", there must be a node for pyright. No exceptions. **Look for parallelization opportunities** — independent quality gates can run in parallel via `add_parallel_edges`.
+4. **Write the script.** Create a Python script at `/tmp/workflow_NNNN.py` (use a random 4-digit suffix). Always include `--diagram` flag handling (see template).
+5. **Show the diagram first.** Run with `uv run /tmp/workflow_NNNN.py --diagram` and show the user the rendered ASCII diagram so they can see the workflow graph before execution. The script template already uses `graph.to_ascii()` for this — do NOT change it to `to_mermaid()`. The ASCII version renders a visual box-and-arrow diagram directly in the terminal.
+6. **Run it.** Execute with `uv run /tmp/workflow_NNNN.py`.
+7. **Report the result.** Show the user what happened.
 
 ## Script template
 
@@ -33,6 +34,7 @@ Every generated script follows this structure:
 # requires-python = ">=3.12"
 # dependencies = ["mermaid-ascii"]
 # ///
+import os
 import sys
 sys.path.insert(0, "${CLAUDE_PLUGIN_ROOT}/scripts")
 
@@ -43,26 +45,30 @@ from engine import (
     detect_available_models, END,
 )
 
-# Detect which AI CLIs are installed
-models = detect_available_models()
-HAS_CODEX = models["codex"]
-HAS_GEMINI = models["gemini"]
 
-async def main():
+def build_graph(models: dict[str, bool] | None = None) -> StateGraph:
+    """Build the workflow graph. Accepts optional models dict for testing."""
+    if models is None:
+        models = detect_available_models()
+    HAS_CODEX = models["codex"]
+    HAS_GEMINI = models["gemini"]
+
     graph = StateGraph(max_iterations=5)
 
     # ... define nodes and edges ...
     # Use codex_node/gemini_node when available and appropriate,
     # fall back to claude_node otherwise. See model selection guide below.
 
+    return graph
+
+
+if __name__ == "__main__":
+    graph = build_graph()
     if "--diagram" in sys.argv:
         print(graph.to_ascii())
-        return
-
-    result = await graph.run()
-    print(result.get("output", ""))
-
-asyncio.run(main())
+        sys.exit(0)
+    initial_state = {"work_dir": os.getcwd()}
+    asyncio.run(graph.run(initial_state))
 ```
 
 ## API reference
@@ -220,71 +226,92 @@ These patterns are distilled from the `dev-loop.py` orchestrator. Apply them whe
 ### 1. Test-fix loop with commit
 
 ```python
-graph.add_node("test", shell_node("uv run pytest -x", output_key="test_output", check=False))
-graph.add_node("fix", claude_node(
-    "These tests failed. Fix the code:\n\n{test_output}",
-    output_key="fix_output",
-    model="sonnet", effort="medium",
-    permission_mode="bypassPermissions",
-))
-graph.add_node("commit", shell_node(
-    "git add -A && git commit -m 'fix: resolve test failures' && git push",
-    output_key="commit_output",
-))
+def build_graph(models: dict[str, bool] | None = None) -> StateGraph:
+    if models is None:
+        models = detect_available_models()
 
-def test_router(state: dict[str, str]) -> str:
-    return "done" if "passed" in state["test_output"].lower() else "fix"
+    graph = StateGraph(max_iterations=5)
 
-graph.add_edge("start", "test")
-graph.add_conditional_edges("test", test_router, {"fix": "fix", "done": "commit"})
-graph.add_edge("fix", "test")
-graph.add_edge("commit", END)
+    graph.add_node("test", shell_node("uv run pytest -x", output_key="test_output", check=False))
+    graph.add_node("fix", claude_node(
+        "These tests failed. Fix the code:\n\n{test_output}",
+        output_key="fix_output",
+        model="sonnet", effort="medium",
+        permission_mode="bypassPermissions",
+    ))
+    graph.add_node("commit", shell_node(
+        "git add -A && git commit -m 'fix: resolve test failures' && git push",
+        output_key="commit_output",
+    ))
+
+    def test_router(state: dict[str, str]) -> str:
+        return "done" if "passed" in state["test_output"].lower() else "fix"
+
+    graph.add_edge("start", "test")
+    graph.add_conditional_edges("test", test_router, {"fix": "fix", "done": "commit"})
+    graph.add_edge("fix", "test")
+    graph.add_edge("commit", END)
+    return graph
 ```
 
 ### 2. Parallel lint + typecheck + test
 
 ```python
-graph.add_node("setup", python_node(lambda s: {}))
-graph.add_node("lint", shell_node("uv run ruff check .", output_key="lint_output", check=False))
-graph.add_node("typecheck", shell_node("uv run pyright", output_key="typecheck_output", check=False))
-graph.add_node("test", shell_node("uv run pytest", output_key="test_output", check=False))
-graph.add_node("report", template_node(
-    "Lint:\n{lint_output}\n\nTypecheck:\n{typecheck_output}\n\nTests:\n{test_output}",
-    output_key="report",
-))
+def build_graph(models: dict[str, bool] | None = None) -> StateGraph:
+    if models is None:
+        models = detect_available_models()
 
-graph.add_edge("start", "setup")
-graph.add_parallel_edges("setup", ["lint", "typecheck", "test"])
-graph.add_edge("lint", "report")
-graph.add_edge("typecheck", "report")
-graph.add_edge("test", "report")
-graph.add_edge("report", END)
+    graph = StateGraph(max_iterations=5)
+
+    graph.add_node("setup", python_node(lambda s: {}))
+    graph.add_node("lint", shell_node("uv run ruff check .", output_key="lint_output", check=False))
+    graph.add_node("typecheck", shell_node("uv run pyright", output_key="typecheck_output", check=False))
+    graph.add_node("test", shell_node("uv run pytest", output_key="test_output", check=False))
+    graph.add_node("report", template_node(
+        "Lint:\n{lint_output}\n\nTypecheck:\n{typecheck_output}\n\nTests:\n{test_output}",
+        output_key="report",
+    ))
+
+    graph.add_edge("start", "setup")
+    graph.add_parallel_edges("setup", ["lint", "typecheck", "test"])
+    graph.add_edge("lint", "report")
+    graph.add_edge("typecheck", "report")
+    graph.add_edge("test", "report")
+    graph.add_edge("report", END)
+    return graph
 ```
 
 ### 3. Implement → review → commit
 
 ```python
-graph.add_node("implement", claude_node(
-    "You are working in {work_dir}. Implement this feature: {description}",
-    output_key="code",
-    model="sonnet", effort="medium",
-    permission_mode="bypassPermissions",
-))
-graph.add_node("review", claude_node(
-    "You are working in {work_dir}. Review this implementation for bugs and improvements.",
-    output_key="review",
-    model="sonnet", effort="high",
-    permission_mode="bypassPermissions",
-))
-graph.add_node("commit", shell_node(
-    "cd {work_dir} && git add -A && git commit -m 'feat: {description}' && git push",
-    output_key="commit_output",
-))
+def build_graph(models: dict[str, bool] | None = None) -> StateGraph:
+    if models is None:
+        models = detect_available_models()
 
-graph.add_edge("start", "implement")
-graph.add_edge("implement", "review")
-graph.add_edge("review", "commit")
-graph.add_edge("commit", END)
+    graph = StateGraph(max_iterations=5)
+
+    graph.add_node("implement", claude_node(
+        "You are working in {work_dir}. Implement this feature: {description}",
+        output_key="code",
+        model="sonnet", effort="medium",
+        permission_mode="bypassPermissions",
+    ))
+    graph.add_node("review", claude_node(
+        "You are working in {work_dir}. Review this implementation for bugs and improvements.",
+        output_key="review",
+        model="sonnet", effort="high",
+        permission_mode="bypassPermissions",
+    ))
+    graph.add_node("commit", shell_node(
+        "cd {work_dir} && git add -A && git commit -m 'feat: {description}' && git push",
+        output_key="commit_output",
+    ))
+
+    graph.add_edge("start", "implement")
+    graph.add_edge("implement", "review")
+    graph.add_edge("review", "commit")
+    graph.add_edge("commit", END)
+    return graph
 ```
 
 ### 4. Full pipeline: implement → smoke test → PR → simplify → review loop
@@ -294,90 +321,9 @@ The full pattern matching `dev-loop.py`'s battle-tested pipeline. Applies all si
 ```python
 import subprocess, time
 
-# --- Implementation ---
-graph.add_node("implement", claude_node(
-    "You are working in {work_dir}. Read the plan at {plan_path} and implement it.\n\n"
-    "After completing all tasks:\n"
-    "1. Update documentation (README, docstrings, diagrams) to reflect changes\n"
-    "2. Run the project's quality gates (lint, typecheck, format, tests)\n"
-    "Fix any failures before proceeding.",
-    output_key="impl_output", model="opus", effort="high",
-    permission_mode="bypassPermissions",
-))
 
-# --- Smoke test (context pattern 6) ---
-graph.add_node("smoke_test", claude_node(
-    "You are working in {work_dir}. Run a smoke test to verify the implementation.\n\n"
-    "1. Read the plan at {plan_path}. Look for a '## Validation' section.\n"
-    "2. If found, execute those validation instructions exactly.\n"
-    "3. If NOT found, fall back to convention-based discovery:\n"
-    "   - Read README.md, pyproject.toml, package.json, Makefile, docker-compose.yml\n"
-    "   - Run a basic sanity check (does it start? does --help work?)\n"
-    "4. ALWAYS kill all background processes before finishing.\n\n"
-    "End with EXACTLY one line:\n"
-    "  SMOKE_TEST_PASS\n"
-    "  SMOKE_TEST_FAIL: <brief summary>",
-    output_key="smoke_test_output", model="opus", effort="high",
-    permission_mode="bypassPermissions",
-))
+# --- Helper functions (module-level, don't affect graph topology) ---
 
-graph.add_node("smoke_test_fix", claude_node(
-    "You are working in {work_dir}. The smoke test failed:\n\n{smoke_test_output}\n\n"
-    "Diagnose the root cause, fix the code, then run quality gates "
-    "(lint, typecheck, format, tests). Commit fixes locally.",
-    output_key="smoke_test_fix_output", model="opus", effort="high",
-    permission_mode="bypassPermissions",
-))
-
-# No separate retry node — smoke_test_fix loops back to smoke_test.
-# If the smoke test fails a second time, max_iterations will stop the loop.
-
-# --- PR creation ---
-graph.add_node("create_pr", claude_node(
-    "You are working in {work_dir}. Push the current branch and create a PR:\n"
-    "  git push -u origin HEAD\n"
-    "  gh pr create --title '<descriptive title>' --body '<summary of changes>'\n\n"
-    "Return the PR URL.",
-    output_key="pr_url", model="sonnet", effort="low",
-    permission_mode="bypassPermissions",
-))
-
-# --- Simplify ---
-graph.add_node("simplify", claude_node(
-    "/simplify",
-    output_key="simplify_output", model="sonnet", effort="high",
-    permission_mode="bypassPermissions",
-))
-
-graph.add_node("simplify_commit", claude_node(
-    "If there are any uncommitted changes from the simplify pass, "
-    "commit them with a descriptive message and push to the current branch.",
-    output_key="simplify_commit_output", model="sonnet", effort="low",
-    permission_mode="bypassPermissions",
-))
-
-# --- Parallel reviews (context patterns 1, 2, 3) ---
-graph.add_node("code_review", claude_node(
-    "/code-review:code-review {pr_url}",
-    output_key="code_review_output", model="opus", effort="high",
-    permission_mode="bypassPermissions",
-))
-
-graph.add_node("security_review", claude_node(
-    "/security-review\n\n"
-    "Review the changes in PR {pr_url}.\n\n"
-    "IMPORTANT: A previous security review found these issues. "
-    "Check if they are resolved AND do a full new review "
-    "(fixes may introduce new issues):\n\n"
-    "{previous_security_findings}\n\n"
-    "After completing the review, post findings as a PR comment:\n"
-    "  gh pr comment <pr_number> --body '<findings>'\n\n"
-    "Format with a '### Security Review' header and severity categories.",
-    output_key="security_review_output", model="opus", effort="high",
-    permission_mode="bypassPermissions",
-))
-
-# --- Wait for CI ---
 def _wait_for_ci_fn(state: dict[str, str]) -> dict[str, str]:
     """Poll CI checks until complete. Returns ci_status and ci_failures."""
     pr_url = state.get("pr_url", "")
@@ -399,9 +345,7 @@ def _wait_for_ci_fn(state: dict[str, str]) -> dict[str, str]:
         time.sleep(30)
     return {"ci_status": "pass", "ci_failures": ""}  # timeout = assume pass
 
-graph.add_node("wait_for_ci", python_node(_wait_for_ci_fn))
 
-# --- Decision gate (context pattern 4) ---
 def _decision_fn(state: dict[str, str]) -> dict[str, str]:
     """Evaluate reviews + CI. Carry previous_security_findings, increment iteration.
 
@@ -428,67 +372,213 @@ def _decision_fn(state: dict[str, str]) -> dict[str, str]:
         "iteration_count": str(iteration + 1),
     }
 
-graph.add_node("decision_llm", claude_node(
-    "Based on these review findings, are there Critical, Important, or Medium "
-    "severity issues that MUST be fixed?\n\n"
-    "Code Review:\n{code_review_output}\n\n"
-    "Security Review:\n{security_review_output}\n\n"
-    "CI failures:\n{ci_failures}\n\n"
-    "Answer EXACTLY: YES or NO. Only YES for Critical/Important/Medium issues "
-    "or CI failures. Low severity and nitpicks do not count.",
-    output_key="decision_llm_output", model="sonnet", effort="low",
-))
-graph.add_node("decision", python_node(_decision_fn))
 
-# --- Fix (context pattern 5) ---
-graph.add_node("fix", claude_node(
-    "Fix all Critical, Important, and Medium severity issues from this review "
-    "of PR {pr_url}.\n\n"
-    "Code Review:\n{code_review_output}\n\n"
-    "Security Review:\n{security_review_output}\n\n"
-    "CI failures:\n{ci_failures}\n\n"
-    "After fixing, run quality gates (lint, typecheck, format, tests). "
-    "Fix any failures. Commit and push.",
-    output_key="fix_output", model="opus", effort="high",
-    permission_mode="bypassPermissions",
-))
+def build_graph(models: dict[str, bool] | None = None) -> StateGraph:
+    if models is None:
+        models = detect_available_models()
+    HAS_CODEX = models["codex"]
+    HAS_GEMINI = models["gemini"]
 
-# --- Routers ---
-def smoke_test_router(state: dict[str, str]) -> str:
-    error = state.get("smoke_test_error", "")
-    output = state.get("smoke_test_output", "")
-    if error or "SMOKE_TEST_FAIL" in output:
-        return "fail"
-    return "pass"
+    graph = StateGraph(max_iterations=5)
 
-def decision_router(state: dict[str, str]) -> str:
-    if "YES" in state.get("decision_output", "NO").upper():
-        return "fix"
-    return "done"
+    # --- Implementation ---
+    graph.add_node("implement", claude_node(
+        "You are working in {work_dir}. Read the plan at {plan_path} and implement it.\n\n"
+        "After completing all tasks:\n"
+        "1. Update documentation (README, docstrings, diagrams) to reflect changes\n"
+        "2. Run the project's quality gates (lint, typecheck, format, tests)\n"
+        "Fix any failures before proceeding.",
+        output_key="impl_output", model="opus", effort="high",
+        permission_mode="bypassPermissions",
+    ))
 
-# --- Edges ---
-# Phase 1: implement → smoke test → PR
-graph.add_edge("start", "implement")
-graph.add_edge("implement", "smoke_test")
-graph.add_conditional_edges("smoke_test", smoke_test_router, {
-    "pass": "create_pr", "fail": "smoke_test_fix",
-})
-graph.add_edge("smoke_test_fix", "smoke_test")  # retry by re-entering smoke_test
+    # --- Smoke test (context pattern 6) ---
+    graph.add_node("smoke_test", claude_node(
+        "You are working in {work_dir}. Run a smoke test to verify the implementation.\n\n"
+        "1. Read the plan at {plan_path}. Look for a '## Validation' section.\n"
+        "2. If found, execute those validation instructions exactly.\n"
+        "3. If NOT found, fall back to convention-based discovery:\n"
+        "   - Read README.md, pyproject.toml, package.json, Makefile, docker-compose.yml\n"
+        "   - Run a basic sanity check (does it start? does --help work?)\n"
+        "4. ALWAYS kill all background processes before finishing.\n\n"
+        "End with EXACTLY one line:\n"
+        "  SMOKE_TEST_PASS\n"
+        "  SMOKE_TEST_FAIL: <brief summary>",
+        output_key="smoke_test_output", model="opus", effort="high",
+        permission_mode="bypassPermissions",
+    ))
 
-# Phase 2: simplify → review loop
-graph.add_edge("create_pr", "simplify")
-graph.add_edge("simplify", "simplify_commit")
-graph.add_parallel_edges("simplify_commit", ["code_review", "security_review"])
-graph.add_edge("code_review", "wait_for_ci")
-graph.add_edge("security_review", "wait_for_ci")
-graph.add_edge("wait_for_ci", "decision_llm")
-graph.add_edge("decision_llm", "decision")
-graph.add_conditional_edges("decision", decision_router, {"fix": "fix", "done": END})
-graph.add_edge("fix", "simplify")  # loop back to review
+    graph.add_node("smoke_test_fix", claude_node(
+        "You are working in {work_dir}. The smoke test failed:\n\n{smoke_test_output}\n\n"
+        "Diagnose the root cause, fix the code, then run quality gates "
+        "(lint, typecheck, format, tests). Commit fixes locally.",
+        output_key="smoke_test_fix_output", model="opus", effort="high",
+        permission_mode="bypassPermissions",
+    ))
+
+    # No separate retry node — smoke_test_fix loops back to smoke_test.
+    # If the smoke test fails a second time, max_iterations will stop the loop.
+
+    # --- PR creation ---
+    graph.add_node("create_pr", claude_node(
+        "You are working in {work_dir}. Push the current branch and create a PR:\n"
+        "  git push -u origin HEAD\n"
+        "  gh pr create --title '<descriptive title>' --body '<summary of changes>'\n\n"
+        "Return the PR URL.",
+        output_key="pr_url", model="sonnet", effort="low",
+        permission_mode="bypassPermissions",
+    ))
+
+    # --- Simplify ---
+    graph.add_node("simplify", claude_node(
+        "/simplify",
+        output_key="simplify_output", model="sonnet", effort="high",
+        permission_mode="bypassPermissions",
+    ))
+
+    graph.add_node("simplify_commit", claude_node(
+        "If there are any uncommitted changes from the simplify pass, "
+        "commit them with a descriptive message and push to the current branch.",
+        output_key="simplify_commit_output", model="sonnet", effort="low",
+        permission_mode="bypassPermissions",
+    ))
+
+    # --- Parallel reviews (context patterns 1, 2, 3) ---
+    graph.add_node("code_review", claude_node(
+        "/code-review:code-review {pr_url}",
+        output_key="code_review_output", model="opus", effort="high",
+        permission_mode="bypassPermissions",
+    ))
+
+    graph.add_node("security_review", claude_node(
+        "/security-review\n\n"
+        "Review the changes in PR {pr_url}.\n\n"
+        "IMPORTANT: A previous security review found these issues. "
+        "Check if they are resolved AND do a full new review "
+        "(fixes may introduce new issues):\n\n"
+        "{previous_security_findings}\n\n"
+        "After completing the review, post findings as a PR comment:\n"
+        "  gh pr comment <pr_number> --body '<findings>'\n\n"
+        "Format with a '### Security Review' header and severity categories.",
+        output_key="security_review_output", model="opus", effort="high",
+        permission_mode="bypassPermissions",
+    ))
+
+    # --- Wait for CI ---
+    graph.add_node("wait_for_ci", python_node(_wait_for_ci_fn))
+
+    # --- Decision gate (context pattern 4) ---
+    graph.add_node("decision_llm", claude_node(
+        "Based on these review findings, are there Critical, Important, or Medium "
+        "severity issues that MUST be fixed?\n\n"
+        "Code Review:\n{code_review_output}\n\n"
+        "Security Review:\n{security_review_output}\n\n"
+        "CI failures:\n{ci_failures}\n\n"
+        "Answer EXACTLY: YES or NO. Only YES for Critical/Important/Medium issues "
+        "or CI failures. Low severity and nitpicks do not count.",
+        output_key="decision_llm_output", model="sonnet", effort="low",
+    ))
+    graph.add_node("decision", python_node(_decision_fn))
+
+    # --- Fix (context pattern 5) ---
+    graph.add_node("fix", claude_node(
+        "Fix all Critical, Important, and Medium severity issues from this review "
+        "of PR {pr_url}.\n\n"
+        "Code Review:\n{code_review_output}\n\n"
+        "Security Review:\n{security_review_output}\n\n"
+        "CI failures:\n{ci_failures}\n\n"
+        "After fixing, run quality gates (lint, typecheck, format, tests). "
+        "Fix any failures. Commit and push.",
+        output_key="fix_output", model="opus", effort="high",
+        permission_mode="bypassPermissions",
+    ))
+
+    # --- Routers ---
+    def smoke_test_router(state: dict[str, str]) -> str:
+        error = state.get("smoke_test_error", "")
+        output = state.get("smoke_test_output", "")
+        if error or "SMOKE_TEST_FAIL" in output:
+            return "fail"
+        return "pass"
+
+    def decision_router(state: dict[str, str]) -> str:
+        if "YES" in state.get("decision_output", "NO").upper():
+            return "fix"
+        return "done"
+
+    # --- Edges ---
+    # Phase 1: implement → smoke test → PR
+    graph.add_edge("start", "implement")
+    graph.add_edge("implement", "smoke_test")
+    graph.add_conditional_edges("smoke_test", smoke_test_router, {
+        "pass": "create_pr", "fail": "smoke_test_fix",
+    })
+    graph.add_edge("smoke_test_fix", "smoke_test")  # retry by re-entering smoke_test
+
+    # Phase 2: simplify → review loop
+    graph.add_edge("create_pr", "simplify")
+    graph.add_edge("simplify", "simplify_commit")
+    graph.add_parallel_edges("simplify_commit", ["code_review", "security_review"])
+    graph.add_edge("code_review", "wait_for_ci")
+    graph.add_edge("security_review", "wait_for_ci")
+    graph.add_edge("wait_for_ci", "decision_llm")
+    graph.add_edge("decision_llm", "decision")
+    graph.add_conditional_edges("decision", decision_router, {"fix": "fix", "done": END})
+    graph.add_edge("fix", "simplify")  # loop back to review
+
+    return graph
+```
+
+### 5. Parallel plan tasks with deferred commit
+
+When a plan has independent tasks that touch different files, run them in parallel. Each parallel node does its work but does NOT commit. A shared commit node after the join handles all changes.
+
+```python
+def build_graph(models: dict[str, bool] | None = None) -> StateGraph:
+    if models is None:
+        models = detect_available_models()
+
+    graph = StateGraph(max_iterations=3)
+
+    # Two independent tasks that touch different files
+    graph.add_node("fan_out", python_node(lambda s: {}))
+    graph.add_node("task_a", claude_node(
+        "You are working in {work_dir}. Implement task A: {task_a_description}\n\n"
+        "Do NOT commit — just make the changes and run tests.",
+        output_key="task_a_output",
+        model="sonnet", effort="medium",
+        permission_mode="bypassPermissions",
+    ))
+    graph.add_node("task_b", claude_node(
+        "You are working in {work_dir}. Implement task B: {task_b_description}\n\n"
+        "Do NOT commit — just make the changes and run tests.",
+        output_key="task_b_output",
+        model="sonnet", effort="medium",
+        permission_mode="bypassPermissions",
+    ))
+    # Shared commit after both tasks complete
+    graph.add_node("commit_all", shell_node(
+        'cd {work_dir} && git add -A && git diff --cached --quiet && echo "nothing to commit" '
+        '|| git commit -m "feat: implement task A and task B"',
+        output_key="commit_output",
+    ))
+
+    graph.add_edge("start", "fan_out")
+    graph.add_parallel_edges("fan_out", ["task_a", "task_b"])
+    graph.add_edge("task_a", "commit_all")
+    graph.add_edge("task_b", "commit_all")
+    graph.add_edge("commit_all", END)
+
+    return graph
 ```
 
 ## Important rules
 
+- **Use `build_graph()`.** Always put graph construction in a `build_graph(models=None)` function.
+  The `if __name__` block calls it and runs the graph. This makes scripts importable for testing.
+  `build_graph()` must accept an optional `models` dict (defaulting to `detect_available_models()`)
+  so callers can control model availability.
+- **Honor CLAUDE.md quality gates.** If the repo has a CLAUDE.md (or AGENTS.md) that specifies quality gates (lint, typecheck, format, tests), the workflow MUST include them. Add them as explicit `shell_node` steps or include them in LLM node prompts. Never skip repo-defined quality gates — they exist for a reason.
 - **Fail fast.** Don't add retries to nodes. If you need retry logic, build it as a loop in the graph (conditional edge back to a fix node).
 - **State is strings.** All state values are strings. Use `python_node` to parse or transform if needed.
 - **Set max_iterations.** Always set a reasonable `max_iterations` to prevent infinite loops. Default is 5.
@@ -498,3 +588,5 @@ graph.add_edge("fix", "simplify")  # loop back to review
 - **Safe commits.** Use `git diff --cached --quiet && echo "nothing to commit" || git commit -m "..."` to handle cases where there's nothing to commit.
 - **Working directory in prompts.** Always include `You are working in {work_dir}` in Claude node prompts so headless sessions know where to find files.
 - **Parallel reviews need a fan-out node.** Use a passthrough `python_node(lambda s: {})` before `add_parallel_edges` since conditional and parallel edges on the same node conflict.
+- **Parallelize independent work.** When executing a plan with multiple tasks that touch different files, run them concurrently with `add_parallel_edges`. Parallel work nodes must NOT commit — each node does its implementation only (edit files, run tests). Add a shared commit node after the parallel group that stages and commits all changes together. This avoids git race conditions while maximizing throughput. See example 5 below.
+- **Identify parallelizable tasks.** Two tasks can run in parallel when: (a) they modify different files, (b) neither depends on the other's output, and (c) neither needs to read files the other will modify. When in doubt, keep tasks sequential — incorrect parallelization causes subtle bugs.

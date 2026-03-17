@@ -434,6 +434,7 @@ def claude_node(
         return {output_key: result}
 
     _node._diagram_label = f"claude {model}/{effort}"  # type: ignore[attr-defined]
+    _node._prompt_template = prompt_template  # type: ignore[attr-defined]
     return _node
 
 
@@ -459,6 +460,7 @@ def codex_node(
 
     model_label = model or "default"
     _node._diagram_label = f"codex {model_label}"  # type: ignore[attr-defined]
+    _node._prompt_template = prompt_template  # type: ignore[attr-defined]
     return _node
 
 
@@ -475,6 +477,7 @@ def gemini_node(
         return {output_key: result}
 
     _node._diagram_label = "gemini"  # type: ignore[attr-defined]
+    _node._prompt_template = prompt_template  # type: ignore[attr-defined]
     return _node
 
 
@@ -531,6 +534,7 @@ def shell_node(
         return {output_key: stdout}
 
     _node._diagram_label = "shell"  # type: ignore[attr-defined]
+    _node._prompt_template = command_template  # type: ignore[attr-defined]
     return _node
 
 
@@ -540,4 +544,6 @@ def template_node(template: str, output_key: str = "output") -> NodeFn:
     async def _node(state: State) -> State:
         return {output_key: template.format_map(_SafeFormatMap(state))}
 
+    _node._diagram_label = "template"  # type: ignore[attr-defined]
+    _node._prompt_template = template  # type: ignore[attr-defined]
     return _node

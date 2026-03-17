@@ -1,0 +1,27 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "9e8a3766b49c",
+  "strategy": "manual-commit",
+  "branch": "feat/workflow-eval-framework",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "dev-loop/commands/workflow.md",
+    "dev-loop/tests/workflow_eval/scenarios/bugfix_backend_instructions/scenario.toml",
+    "dev-loop/tests/workflow_eval/scenarios/feature_backend_instructions/scenario.toml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/9e/8a3766b49c/0/metadata.json",
+      "transcript": "/9e/8a3766b49c/0/full.jsonl",
+      "content_hash": "/9e/8a3766b49c/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}

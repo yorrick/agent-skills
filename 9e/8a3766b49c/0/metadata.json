@@ -1,0 +1,34 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "9e8a3766b49c",
+  "session_id": "4d3e5ce0-fc18-47c4-9fdd-0b243f9379c9",
+  "strategy": "manual-commit",
+  "created_at": "2026-03-17T18:03:11.705667Z",
+  "branch": "feat/workflow-eval-framework",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "dev-loop/commands/workflow.md",
+    "dev-loop/tests/workflow_eval/scenarios/bugfix_backend_instructions/scenario.toml",
+    "dev-loop/tests/workflow_eval/scenarios/feature_backend_instructions/scenario.toml"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "1f674cbc75ab",
+  "checkpoint_transcript_start": 20,
+  "transcript_lines_at_start": 20,
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-03-17T18:03:11.659636Z",
+    "agent_lines": 0,
+    "human_added": 0,
+    "human_modified": 7,
+    "human_removed": 1,
+    "total_committed": 0,
+    "agent_percentage": 0
+  }
+}

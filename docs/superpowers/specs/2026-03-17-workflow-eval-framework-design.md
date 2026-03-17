@@ -197,21 +197,17 @@ class GraphInspector:
 
 #### `generate_workflow`
 
-The core mechanism. Reads the `/workflow` skill content (commands/workflow.md), constructs a prompt that includes the skill instructions and the scenario's prompt, then runs headless Claude:
+The core mechanism. Runs headless Claude with the dev-loop plugin installed via `--plugin-dir`, so Claude has the actual `/workflow` skill available — exactly like a real user session:
 
 ```bash
-claude -p "<combined_prompt>" \
+claude -p "Use /workflow to generate a workflow for: <scenario_prompt>. Generate the script only, do not execute it." \
     --model sonnet \
     --permission-mode bypassPermissions \
+    --plugin-dir <dev-loop-plugin-dir> \
     --cwd <repo_path>
 ```
 
-Claude runs with the scaffolded repo as cwd, so it picks up any CLAUDE.md in the repo. It generates a `/tmp/workflow_*.py` file. The test locates it by globbing `/tmp/workflow_*.py` (filtered by modification time to avoid collisions).
-
-The combined prompt includes:
-1. The full workflow.md skill content (so Claude knows how to generate workflows)
-2. The scenario's prompt (the task to generate a workflow for)
-3. An instruction to generate the workflow script (not execute it)
+Claude runs with the scaffolded repo as cwd, so it picks up any CLAUDE.md in the repo. It has the `/workflow` skill loaded via the plugin, so it generates the workflow the same way it would in a real session. The generated script is written to `/tmp/workflow_*.py`. The test locates it by globbing for the most recently modified match (and cleans up stale files before each run to avoid collisions).
 
 #### `import_graph`
 
@@ -290,7 +286,15 @@ uv run pytest dev-loop/tests/workflow_eval/test_scenarios.py -k bugfix_bare -v
 uv run pytest dev-loop/tests/workflow_eval/test_scenarios.py -k bugfix_bare -v -s
 ```
 
-These are manual evals, not CI. Run them when iterating on the `/workflow` skill prompt.
+These are standard pytests. They're too slow for CI (each scenario makes an LLM call), but they run like any other test suite. Mark them with `@pytest.mark.eval` so they can be excluded from fast test runs and included explicitly:
+
+```bash
+# Run only eval tests
+uv run pytest -m eval -v
+
+# Run everything except evals
+uv run pytest -m "not eval" -v
+```
 
 ### Dealing with non-determinism
 

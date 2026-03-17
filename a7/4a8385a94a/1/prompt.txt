@@ -1,0 +1,55 @@
+/brainstorming i would like to be able to unit test workflow generation - start with a plan, then run an agent that build the workflow.py file, and inspect the results. i would like to test a couple cases, from simple bug fixes to feature dev, in different contexts: on test repo with no instructions regarding the dev livecycle, and test repos where we have more instructions regarding dev, like run playwright (if frontent), always update docs, etc
+
+---
+
+Yes, this is right. I want to test what kind of workflows agent creates given the guidelines and I would then potentially improve my prompt, you know, do evals and improve the skill, basically the workflow skill.
+
+---
+
+I mean, can't we just look at the model for choices and things like that if we import and inspect the state graph object?
+
+---
+
+1. I really want to run cloud because the goal of those tests is to evaluate the workflow skill and make sure it actually is generating useful/efficient workflows.
+
+---
+
+That's good. Now I'm wondering about how do we evaluate the output, like the actual workflow that was built. Should we use another LLM to do that or is there a way we could use just regular Python assertions? I'd rather use Python assertions because this is faster, deterministic and of course free.
+
+---
+
+1.
+
+---
+
+Yes, why not? We could add more scenarios.
+
+---
+
+yes
+
+---
+
+continue
+
+---
+
+Can you compare both approaches? Honestly, initially I was thinking of option B, but I know like parameterized fixtures are also very efficient.
+
+---
+
+B
+
+---
+
+Okay, yes, for point one, yes, makes sense. And also, yeah, that as a requirement in the workflow skill itself. That said, I think we already could run the script with dash dash diagram without execution. I did that multiple times and it was instantaneous.
+
+And for point two, yeah, you can also do that small engine change.
+
+---
+
+yes
+
+---
+
+looks right

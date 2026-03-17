@@ -46,3 +46,7 @@ also, add to CLAUDE.md that whever we see things to improve, we should create an
 ---
 
 always use opus + max effort for brainstorming, not for everything!
+
+---
+
+commit push chnages

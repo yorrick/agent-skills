@@ -1,0 +1,35 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "861524f3ab2d",
+  "session_id": "4d3e5ce0-fc18-47c4-9fdd-0b243f9379c9",
+  "strategy": "manual-commit",
+  "created_at": "2026-03-17T01:14:47.062845Z",
+  "branch": "main",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "dev-loop/scripts/engine.py",
+    "dev-loop/tests/test_engine.py",
+    "dev-loop/tests/test_workflow_integration.py",
+    "docs/superpowers/specs/2026-03-16-stream-test-logs-design.md"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "1f674cbc75ab",
+  "checkpoint_transcript_start": 20,
+  "transcript_lines_at_start": 20,
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-03-17T01:14:47.036287Z",
+    "agent_lines": 17,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 17,
+    "agent_percentage": 100
+  }
+}

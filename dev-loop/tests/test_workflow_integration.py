@@ -566,6 +566,7 @@ def main() -> int:
                 if not line:
                     break
                 output_lines.append(line)
+                print(line, end="", flush=True)
 
         try:
             proc.wait(timeout=60)
@@ -580,6 +581,7 @@ def main() -> int:
     if proc.stdout:
         for line in proc.stdout:
             output_lines.append(line)
+            print(line, end="", flush=True)
 
     elapsed = int(time.monotonic() - start)
     m, s = divmod(elapsed, 60)
@@ -599,17 +601,17 @@ def main() -> int:
     # callbacks are registered (the generated workflow script doesn't register any).
     banner("Verify default progress logging")
     check(
-        "[workflow] Starting:" in stdout,
-        "Default progress log: [workflow] Starting lines present",
+        "[workflow:" in stdout and "] Starting" in stdout,
+        "Default progress log: [workflow:*] Starting lines present",
     )
     check(
-        "[workflow] Finished:" in stdout,
-        "Default progress log: [workflow] Finished lines present",
+        "[workflow:" in stdout and "] Finished" in stdout,
+        "Default progress log: [workflow:*] Finished lines present",
     )
     # Spot-check node names in the logs — verify new pipeline steps
     for node_name in ["implement", "run_tests", "smoke_test", "simplify", "decision"]:
         check(
-            f"[workflow] Starting: {node_name}" in stdout,
+            f"[workflow:{node_name}] Starting" in stdout,
             f"Default progress log: '{node_name}' node logged",
         )
 

@@ -262,20 +262,20 @@ class StateGraph:
 
             _node_start = time.monotonic() if use_default_log else 0.0
             if use_default_log:
-                print(f"[workflow] Starting: {current}", file=sys.stderr)
+                print(f"[workflow:{current}] Starting", file=sys.stderr)
             await self._emit_node_start(current, state)
             try:
                 result = await node_fn(state)
                 state.update(result)
             except Exception as e:
                 if use_default_log:
-                    print(f"[workflow] ERROR in {current}: {e}", file=sys.stderr)
+                    print(f"[workflow:{current}] ERROR: {e}", file=sys.stderr)
                 await self._emit_error(current, e)
                 raise
             await self._emit_node_end(current, state)
             if use_default_log:
                 elapsed = _format_elapsed(time.monotonic() - _node_start)
-                print(f"[workflow] Finished: {current} ({elapsed})", file=sys.stderr)
+                print(f"[workflow:{current}] Finished ({elapsed})", file=sys.stderr)
 
             # Determine next node
             # 1. Check conditional edges
@@ -315,19 +315,19 @@ class StateGraph:
         use_default_log = not self._on_node_start and not self._on_node_end
         _node_start = time.monotonic() if use_default_log else 0.0
         if use_default_log:
-            print(f"[workflow] Starting: {name}", file=sys.stderr)
+            print(f"[workflow:{name}] Starting", file=sys.stderr)
         await self._emit_node_start(name, state)
         try:
             result = await node_fn(state)
         except Exception as e:
             if use_default_log:
-                print(f"[workflow] ERROR in {name}: {e}", file=sys.stderr)
+                print(f"[workflow:{name}] ERROR: {e}", file=sys.stderr)
             await self._emit_error(name, e)
             raise
         await self._emit_node_end(name, {**state, **result})
         if use_default_log:
             elapsed = _format_elapsed(time.monotonic() - _node_start)
-            print(f"[workflow] Finished: {name} ({elapsed})", file=sys.stderr)
+            print(f"[workflow:{name}] Finished ({elapsed})", file=sys.stderr)
         return result
 
     def _find_join_node(self, parallel_targets: list[str]) -> str | None:

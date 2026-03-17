@@ -701,8 +701,8 @@ async def test_default_logging_when_no_callbacks(capsys: pytest.CaptureFixture[s
     await graph.run({})
 
     captured = capsys.readouterr()
-    assert "[workflow] Starting: a" in captured.err
-    assert "[workflow] Finished: a" in captured.err
+    assert "[workflow:a] Starting" in captured.err
+    assert "[workflow:a] Finished" in captured.err
 
 
 @pytest.mark.asyncio
@@ -742,7 +742,7 @@ async def test_error_logging_on_failure(capsys: pytest.CaptureFixture[str]) -> N
         await graph.run({})
 
     captured = capsys.readouterr()
-    assert "[workflow] ERROR in boom:" in captured.err
+    assert "[workflow:boom] ERROR:" in captured.err
 
 
 # --- Model detection tests ---

@@ -2,7 +2,7 @@
 
 **Issue:** [#15](https://github.com/yorrickjansen/claude-code-plugins/issues/15)
 **Date:** 2026-03-16
-**Status:** Draft
+**Status:** Implemented
 
 ## Problem
 

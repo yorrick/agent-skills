@@ -1,0 +1,17 @@
+pick the most important issue (but not tool restrictions) and /brainstorming about it
+
+---
+
+both
+
+---
+
+wait it's confusing, because i,m using workflow and dev-loop on the project that contains those commands too, thats meta. explain again
+
+---
+
+add smoke test
+
+---
+
+C

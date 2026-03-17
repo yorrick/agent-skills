@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "b060b36faefc",
+  "strategy": "manual-commit",
+  "branch": "feat/workflow-eval-framework",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "dev-loop/tests/workflow_eval/helpers.py",
+    "dev-loop/tests/workflow_eval/test_scenarios.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/b0/60b36faefc/0/metadata.json",
+      "transcript": "/b0/60b36faefc/0/full.jsonl",
+      "content_hash": "/b0/60b36faefc/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}

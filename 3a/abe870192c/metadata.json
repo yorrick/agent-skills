@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "3aabe870192c",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "dev-loop/.claude-plugin/plugin.json",
+    "docs/superpowers/specs/2026-03-17-workflow-eval-framework-design.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/3a/abe870192c/0/metadata.json",
+      "transcript": "/3a/abe870192c/0/full.jsonl",
+      "content_hash": "/3a/abe870192c/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}

@@ -1,0 +1,6 @@
+name = "Feature development on bare repo"
+prompt = """
+Add a new function calculate_median(numbers: list[float]) -> float
+to src/mathlib.py. It should return the median value of a list of numbers.
+Also add tests for it in tests/test_mathlib.py.
+"""

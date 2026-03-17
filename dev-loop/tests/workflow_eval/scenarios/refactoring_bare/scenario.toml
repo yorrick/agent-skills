@@ -1,0 +1,6 @@
+name = "Refactoring on bare repo"
+prompt = """
+The src/mathlib.py file has grown too large. Extract the statistics-related
+functions (calculate_average, calculate_std_dev) into a new module
+src/stats.py. Update all imports accordingly.
+"""

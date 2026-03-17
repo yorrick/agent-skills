@@ -1,0 +1,6 @@
+name = "Bug fix on bare repo"
+prompt = """
+Fix the calculate_average function in src/mathlib.py —
+it crashes on empty lists with a ZeroDivisionError.
+The test in tests/test_mathlib.py already covers this case.
+"""

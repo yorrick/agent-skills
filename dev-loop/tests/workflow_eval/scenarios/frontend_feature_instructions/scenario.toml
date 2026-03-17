@@ -1,0 +1,6 @@
+name = "Frontend feature with Playwright instructions"
+prompt = """
+Add a new Settings page component at src/components/Settings.tsx.
+It should display user preferences and allow toggling dark mode.
+Add e2e tests for it.
+"""

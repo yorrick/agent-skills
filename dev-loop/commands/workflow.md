@@ -16,8 +16,8 @@ The workflow engine is at: `${CLAUDE_PLUGIN_ROOT}/scripts/engine.py`
 
 ## What to do
 
-1. **Understand the request.** Read relevant files if needed to understand the codebase context.
-2. **Design the workflow.** Decide which nodes, edges, and routers are needed. Pick the right node type for each step. **Look for parallelization opportunities** — tasks that touch different files can run concurrently via `add_parallel_edges`. See the parallelization rules below.
+1. **Understand the request and the repo.** Read relevant files to understand the codebase context. **Always check for CLAUDE.md** (or AGENTS.md, GEMINI.md) in the repo root and parent directories — these contain project-specific quality gates, testing requirements, and development conventions that the workflow MUST incorporate. For example, if CLAUDE.md says "run ruff check" or "run playwright tests", add dedicated nodes for those steps.
+2. **Design the workflow.** Decide which nodes, edges, and routers are needed. Pick the right node type for each step. **Look for parallelization opportunities** — tasks that touch different files can run concurrently via `add_parallel_edges`. See the parallelization rules below. **Incorporate all quality gates from CLAUDE.md** — if the repo specifies lint, typecheck, format, or test commands, add them as explicit nodes (shell_node or baked into LLM prompts).
 3. **Write the script.** Create a Python script at `/tmp/workflow_NNNN.py` (use a random 4-digit suffix). Always include `--diagram` flag handling (see template).
 4. **Show the diagram first.** Run with `uv run /tmp/workflow_NNNN.py --diagram` and show the user the rendered ASCII diagram so they can see the workflow graph before execution. The script template already uses `graph.to_ascii()` for this — do NOT change it to `to_mermaid()`. The ASCII version renders a visual box-and-arrow diagram directly in the terminal.
 5. **Run it.** Execute with `uv run /tmp/workflow_NNNN.py`.
@@ -577,6 +577,7 @@ def build_graph(models: dict[str, bool] | None = None) -> StateGraph:
   The `if __name__` block calls it and runs the graph. This makes scripts importable for testing.
   `build_graph()` must accept an optional `models` dict (defaulting to `detect_available_models()`)
   so callers can control model availability.
+- **Honor CLAUDE.md quality gates.** If the repo has a CLAUDE.md (or AGENTS.md) that specifies quality gates (lint, typecheck, format, tests), the workflow MUST include them. Add them as explicit `shell_node` steps or include them in LLM node prompts. Never skip repo-defined quality gates — they exist for a reason.
 - **Fail fast.** Don't add retries to nodes. If you need retry logic, build it as a loop in the graph (conditional edge back to a fix node).
 - **State is strings.** All state values are strings. Use `python_node` to parse or transform if needed.
 - **Set max_iterations.** Always set a reasonable `max_iterations` to prevent infinite loops. Default is 5.

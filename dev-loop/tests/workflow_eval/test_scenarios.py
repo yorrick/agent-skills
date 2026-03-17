@@ -12,9 +12,10 @@ Usage:
 
 from __future__ import annotations
 
-import glob
 import importlib.util
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -69,15 +70,21 @@ def scaffold_repo(scenario_dir: Path, tmp_path: Path) -> Path:
     return repo_dst
 
 
-def _cleanup_stale_workflows() -> None:
-    """Remove stale workflow files from /tmp to avoid glob collisions."""
-    for f in glob.glob("/tmp/workflow_*.py"):
-        try:
-            # Only remove files older than 60 seconds
-            if time.time() - os.path.getmtime(f) > 60:
-                os.unlink(f)
-        except OSError:
-            pass
+def _extract_workflow_path(claude_output: str) -> Path | None:
+    """Extract the workflow script path from Claude's JSON output."""
+    try:
+        data = json.loads(claude_output)
+        result_text = data.get("result", "")
+    except (json.JSONDecodeError, AttributeError):
+        result_text = claude_output
+
+    # Look for /tmp/workflow_NNNN.py pattern in the output
+    match = re.search(r"/tmp/workflow_\w+\.py", result_text)
+    if match:
+        path = Path(match.group())
+        if path.exists():
+            return path
+    return None
 
 
 def generate_workflow(prompt: str, repo_path: Path) -> Path:
@@ -85,11 +92,6 @@ def generate_workflow(prompt: str, repo_path: Path) -> Path:
 
     Returns path to the generated workflow.py file.
     """
-    _cleanup_stale_workflows()
-
-    # Record existing workflow files to find the new one
-    before = set(glob.glob("/tmp/workflow_*.py"))
-
     combined_prompt = (
         f"Use /workflow to generate a workflow for the following task. "
         f"Generate the script only, do not execute it.\n\n"
@@ -124,14 +126,12 @@ def generate_workflow(prompt: str, repo_path: Path) -> Path:
             f"Claude failed to generate workflow (exit {result.returncode}):\nstderr: {result.stderr[:1000]}"
         )
 
-    # Find the newly created workflow file
-    after = set(glob.glob("/tmp/workflow_*.py"))
-    new_files = after - before
-    if not new_files:
-        raise RuntimeError(f"No workflow file generated in /tmp/. Claude output:\n{result.stdout[:2000]}")
+    # Extract the workflow path from Claude's output
+    workflow_path = _extract_workflow_path(result.stdout)
+    if workflow_path is None:
+        raise RuntimeError(f"No workflow file found in Claude output:\n{result.stdout[:2000]}")
 
-    # Return the most recently modified new file
-    return Path(max(new_files, key=os.path.getmtime))
+    return workflow_path
 
 
 def import_graph(workflow_path: Path) -> StateGraph:

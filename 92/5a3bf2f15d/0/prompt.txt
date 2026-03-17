@@ -1,0 +1,14 @@
+You are working in /Users/yorrickjansen/work/claude-code-plugins. Execute Task 1 from the plan at /Users/yorrickjansen/work/claude-code-plugins/docs/superpowers/plans/2026-03-17-workflow-eval-framework.md.
+
+Read the plan's Task 1 section carefully, then:
+1. Add tests for _prompt_template to dev-loop/tests/test_engine.py (add codex_node and gemini_node to imports too)
+2. Add _prompt_template attribute to claude_node, codex_node, gemini_node, shell_node, and template_node in dev-loop/scripts/engine.py
+3. Add _diagram_label = 'template' to template_node in engine.py
+4. Run: uv run pytest dev-loop/tests/test_engine.py -v to verify all tests pass
+5. Run: uv run ruff check dev-loop/scripts/engine.py dev-loop/tests/test_engine.py
+6. Run: uv run ruff format --check dev-loop/scripts/engine.py dev-loop/tests/test_engine.py
+7. Run: uv run pyright
+8. Commit with message: 'feat(engine): add _prompt_template attribute to node helpers'
+   Include in body: 'Expose the prompt/command template string on claude_node, codex_node,
+   gemini_node, shell_node, and template_node. Also add _diagram_label
+   to template_node. Enables structural inspection of generated workflows.'

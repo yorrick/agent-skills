@@ -1,0 +1,32 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "57e597a18c07",
+  "session_id": "4d3e5ce0-fc18-47c4-9fdd-0b243f9379c9",
+  "strategy": "manual-commit",
+  "created_at": "2026-03-17T00:49:01.007067Z",
+  "branch": "main",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "dev-loop/tests/test_workflow_integration.py"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "1f674cbc75ab",
+  "checkpoint_transcript_start": 20,
+  "transcript_lines_at_start": 20,
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-03-17T00:49:00.980131Z",
+    "agent_lines": 0,
+    "human_added": 92,
+    "human_modified": 45,
+    "human_removed": 0,
+    "total_committed": 113,
+    "agent_percentage": 0
+  }
+}

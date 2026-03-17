@@ -151,7 +151,7 @@ def scaffold_project(project_dir: Path) -> None:
 
 
 def generate_workflow_script(project_dir: Path, script_path: Path) -> None:
-    """Generate the multi-LLM workflow script."""
+    """Generate the multi-LLM workflow script matching Example 4 patterns."""
     script_path.write_text(
         f"""\
 #!/usr/bin/env -S uv run --script
@@ -169,7 +169,7 @@ from engine import StateGraph, claude_node, codex_node, shell_node, python_node,
 async def main() -> None:
     graph = StateGraph(max_iterations=5)
 
-    # Codex implements the feature
+    # --- Implementation ---
     graph.add_node(
         "implement",
         codex_node(
@@ -182,7 +182,7 @@ async def main() -> None:
         ),
     )
 
-    # Run tests
+    # --- Run tests ---
     graph.add_node(
         "run_tests",
         shell_node(
@@ -192,7 +192,6 @@ async def main() -> None:
         ),
     )
 
-    # Claude fixes if tests fail
     graph.add_node(
         "fix_tests",
         claude_node(
@@ -209,20 +208,54 @@ async def main() -> None:
         output = state.get("test_output", "")
         if "failed" in output.lower() or "error" in output.lower():
             return "fix"
-        return "review"
+        return "smoke_test"
 
-    # Claude reviews
-    graph.add_node("start_reviews", python_node(lambda s: {{}}))
-
+    # --- Smoke test (context pattern: verify before review) ---
     graph.add_node(
-        "code_review",
+        "smoke_test",
         claude_node(
             "You are working in {project_dir}.\\n\\n"
-            "Review src/mathlib/stats.py for bugs, logic errors, and code quality. "
-            "This was implemented by Codex — verify correctness carefully.\\n\\n"
-            "Previous findings:\\n{{code_review_output}}\\n\\n"
-            "Return findings with severity (Critical/Important/Medium/Low).",
-            output_key="code_review_output",
+            "Run a smoke test to verify the implementation.\\n\\n"
+            "1. Read docs/plans/add-median-and-mode.md. Look for a Validation section.\\n"
+            "2. Execute validation instructions (run `uv run pytest tests/ -v`).\\n"
+            "3. ALWAYS kill background processes before finishing.\\n\\n"
+            "End with EXACTLY one line:\\n"
+            "  SMOKE_TEST_PASS\\n"
+            "  SMOKE_TEST_FAIL: <brief summary>",
+            output_key="smoke_test_output",
+            model="sonnet",
+            effort="low",
+            permission_mode="bypassPermissions",
+        ),
+    )
+
+    def smoke_test_router(state: dict[str, str]) -> str:
+        error = state.get("smoke_test_error", "")
+        output = state.get("smoke_test_output", "")
+        if error or "SMOKE_TEST_FAIL" in output:
+            return "fail"
+        return "pass"
+
+    graph.add_node(
+        "smoke_test_fix",
+        claude_node(
+            "You are working in {project_dir}.\\n\\n"
+            "The smoke test failed:\\n\\n{{smoke_test_output}}\\n\\n"
+            "Diagnose the root cause, fix the code, and run quality gates "
+            "(lint, typecheck, format, tests). Commit fixes locally.",
+            output_key="smoke_test_fix_output",
+            model="sonnet",
+            effort="medium",
+            permission_mode="bypassPermissions",
+        ),
+    )
+
+    # --- Simplify ---
+    graph.add_node(
+        "simplify",
+        claude_node(
+            "/simplify",
+            output_key="simplify_output",
             model="sonnet",
             effort="high",
             permission_mode="bypassPermissions",
@@ -230,11 +263,41 @@ async def main() -> None:
     )
 
     graph.add_node(
+        "simplify_commit",
+        claude_node(
+            "If there are any uncommitted changes from the simplify pass, "
+            "commit them with a descriptive message.",
+            output_key="simplify_commit_output",
+            model="sonnet",
+            effort="low",
+            permission_mode="bypassPermissions",
+        ),
+    )
+
+    # --- Reviews (context pattern: review diff, track previous findings) ---
+    graph.add_node(
+        "code_review",
+        claude_node(
+            "You are working in {project_dir}.\\n\\n"
+            "Review the latest changes (use `git diff HEAD~1`) for bugs, logic errors, "
+            "and code quality. This was implemented by Codex — verify correctness.\\n\\n"
+            "Return findings with severity (Critical/Important/Medium/Low).",
+            output_key="code_review_output",
+            model="opus",
+            effort="high",
+            permission_mode="bypassPermissions",
+        ),
+    )
+
+    # Security review uses sonnet/low in test (vs opus/high in Example 4)
+    # to reduce cost and runtime for integration testing.
+    graph.add_node(
         "security_review",
         claude_node(
             "You are working in {project_dir}.\\n\\n"
-            "Review src/mathlib/stats.py for security issues.\\n\\n"
-            "Previous findings:\\n{{security_review_output}}\\n\\n"
+            "Review the latest changes (use `git diff HEAD~1`) for security issues.\\n\\n"
+            "Previous security review findings (check if resolved, then do full review):\\n"
+            "{{previous_security_findings}}\\n\\n"
             "Return findings with severity (Critical/Important/Medium/Low).",
             output_key="security_review_output",
             model="sonnet",
@@ -243,27 +306,44 @@ async def main() -> None:
         ),
     )
 
-    # Decision gate
-    def decide(state: dict[str, str]) -> dict[str, str]:
-        if state.get("fix_reviews_output"):
-            return {{"decision": "clean"}}
-        reviews = state.get("code_review_output", "") + state.get("security_review_output", "")
-        reviews_lower = reviews.lower()
-        has_issues = any(
-            m in reviews_lower
-            for m in ["**critical**", "**important**", "- critical:", "- important:"]
-        )
-        return {{"decision": "issues" if has_issues else "clean"}}
+    # --- Decision gate (context pattern: LLM evaluation, not regex) ---
+    # Test omits wait_for_ci (no GitHub infrastructure), so no CI short-circuit.
+    def _decision_fn(state: dict[str, str]) -> dict[str, str]:
+        \"\"\"Carry previous_security_findings, increment iteration_count.\"\"\"
+        security_text = state.get("security_review_output", "")
+        iteration = int(state.get("iteration_count", "1"))
+        return {{
+            "decision_output": state.get("decision_llm_output", "NO"),
+            "previous_security_findings": security_text,
+            "iteration_count": str(iteration + 1),
+        }}
 
-    graph.add_node("decision", python_node(decide))
+    graph.add_node(
+        "decision_llm",
+        claude_node(
+            "Based on these review findings, are there Critical, Important, or Medium "
+            "severity issues that MUST be fixed?\\n\\n"
+            "Code Review:\\n{{code_review_output}}\\n\\n"
+            "Security Review:\\n{{security_review_output}}\\n\\n"
+            "Answer EXACTLY: YES or NO. Only YES for Critical/Important/Medium. "
+            "Low severity and nitpicks do not count.",
+            output_key="decision_llm_output",
+            model="sonnet",
+            effort="low",
+        ),
+    )
+    graph.add_node("decision", python_node(_decision_fn))
 
+    # --- Fix (context pattern: quality gates after every fix) ---
     graph.add_node(
         "fix_reviews",
         claude_node(
             "You are working in {project_dir}.\\n\\n"
-            "Fix Critical/Important issues:\\n\\n"
+            "Fix Critical/Important/Medium issues:\\n\\n"
             "Code review:\\n{{code_review_output}}\\n\\n"
-            "Security review:\\n{{security_review_output}}",
+            "Security review:\\n{{security_review_output}}\\n\\n"
+            "After fixing, run quality gates (lint, typecheck, format, tests). "
+            "Fix any failures. Commit locally.",
             output_key="fix_reviews_output",
             model="sonnet",
             effort="medium",
@@ -272,9 +352,11 @@ async def main() -> None:
     )
 
     def decision_router(state: dict[str, str]) -> str:
-        return state.get("decision", "clean")
+        if "YES" in state.get("decision_output", "NO").upper():
+            return "issues"
+        return "clean"
 
-    # Commit
+    # --- Commit ---
     graph.add_node(
         "commit",
         shell_node(
@@ -285,16 +367,29 @@ async def main() -> None:
         ),
     )
 
-    # Wiring
+    # --- Edges ---
+    # Phase 1: implement → test → smoke test
     graph.add_edge("start", "implement")
     graph.add_edge("implement", "run_tests")
-    graph.add_conditional_edges("run_tests", test_router, {{"fix": "fix_tests", "review": "start_reviews"}})
+    graph.add_conditional_edges("run_tests", test_router, {{
+        "fix": "fix_tests", "smoke_test": "smoke_test",
+    }})
     graph.add_edge("fix_tests", "run_tests")
-    graph.add_parallel_edges("start_reviews", ["code_review", "security_review"])
-    graph.add_edge("code_review", "decision")
-    graph.add_edge("security_review", "decision")
-    graph.add_conditional_edges("decision", decision_router, {{"issues": "fix_reviews", "clean": "commit"}})
-    graph.add_edge("fix_reviews", "run_tests")
+    graph.add_conditional_edges("smoke_test", smoke_test_router, {{
+        "pass": "simplify", "fail": "smoke_test_fix",
+    }})
+    graph.add_edge("smoke_test_fix", "smoke_test")  # retry
+
+    # Phase 2: simplify → review loop
+    graph.add_edge("simplify", "simplify_commit")
+    graph.add_parallel_edges("simplify_commit", ["code_review", "security_review"])
+    graph.add_edge("code_review", "decision_llm")
+    graph.add_edge("security_review", "decision_llm")
+    graph.add_edge("decision_llm", "decision")
+    graph.add_conditional_edges("decision", decision_router, {{
+        "issues": "fix_reviews", "clean": "commit",
+    }})
+    graph.add_edge("fix_reviews", "simplify")  # loop back to review
     graph.add_edge("commit", END)
 
     if "--diagram" in sys.argv:
@@ -499,6 +594,24 @@ def main() -> int:
         )
 
     check("passed" in stdout.lower(), "Test output indicates tests passed")
+
+    # Default progress logging — engine should emit [workflow] lines when no
+    # callbacks are registered (the generated workflow script doesn't register any).
+    banner("Verify default progress logging")
+    check(
+        "[workflow] Starting:" in stdout,
+        "Default progress log: [workflow] Starting lines present",
+    )
+    check(
+        "[workflow] Finished:" in stdout,
+        "Default progress log: [workflow] Finished lines present",
+    )
+    # Spot-check node names in the logs — verify new pipeline steps
+    for node_name in ["implement", "run_tests", "smoke_test", "simplify", "decision"]:
+        check(
+            f"[workflow] Starting: {node_name}" in stdout,
+            f"Default progress log: '{node_name}' node logged",
+        )
 
     # Verification
     banner("Verify implementation")

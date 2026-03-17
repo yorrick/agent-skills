@@ -213,3 +213,14 @@ Read the output file to retrieve the result: /private/tmp/claude-501/-Users-yorr
 <summary>Background command "Eval run E (clean prompts)" completed (exit code 0)</summary>
 </task-notification>
 Read the output file to retrieve the result: /private/tmp/claude-501/-Users-yorrickjansen-work-claude-code-plugins/c9003741-8183-46dc-94ad-30f1d1a9c250/tasks/bvhpavmbi.output
+
+---
+
+<task-notification>
+<task-id>bc43gx5nd</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-yorrickjansen-work-claude-code-plugins/c9003741-8183-46dc-94ad-30f1d1a9c250/tasks/bc43gx5nd.output</output-file>
+<status>failed</status>
+<summary>Background command "Eval run F (clean prompts)" failed with exit code 1</summary>
+</task-notification>
+Read the output file to retrieve the result: /private/tmp/claude-501/-Users-yorrickjansen-work-claude-code-plugins/c9003741-8183-46dc-94ad-30f1d1a9c250/tasks/bc43gx5nd.output

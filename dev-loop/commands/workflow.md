@@ -140,7 +140,7 @@ For each AI node, ask:
 | Summarize findings, format a report | `gemini_node` | `claude_node` sonnet/low |
 | Quick triage / classify | `gemini_node` | `claude_node` sonnet/low |
 | Multi-file refactor, architectural changes | `claude_node` sonnet/medium | — |
-| Code review, security audit | `claude_node` sonnet/high | — |
+| Code review, security audit | `claude_node` opus/high | — |
 | Complex reasoning, tricky edge cases | `claude_node` opus/high | — |
 | Trivial fix (typo, rename) | `claude_node` sonnet/low | — |
 
@@ -185,15 +185,16 @@ summary_node = (
     )
 )
 
-# Code review — always Claude, needs judgment
+# Code review — review the PR diff, not raw files
 claude_node(
-    "You are working in {work_dir}. Review for bugs, logic errors, and quality issues.",
-    model="sonnet", effort="high", permission_mode="bypassPermissions",
+    "/code-review:code-review {pr_url}",
+    model="opus", effort="high", permission_mode="bypassPermissions",
 )
 
-# Deep security audit — always Claude opus
+# Security review — review PR diff, post findings as PR comment
 claude_node(
-    "You are working in {work_dir}. Review for security issues.",
+    "/security-review\n\nReview the changes in PR {pr_url}.\n\n"
+    "After completing the review, post findings via: gh pr comment <number> --body '<findings>'",
     model="opus", effort="high", permission_mode="bypassPermissions",
 )
 ```
@@ -286,64 +287,204 @@ graph.add_edge("review", "commit")
 graph.add_edge("commit", END)
 ```
 
-### 4. Implement → test → parallel reviews → fix → commit
+### 4. Full pipeline: implement → smoke test → PR → simplify → review loop
 
-The full pattern with code review and security review running in parallel:
+The full pattern matching `dev-loop.py`'s battle-tested pipeline. Applies all six context patterns above.
 
 ```python
+import subprocess, time
+
+# --- Implementation ---
 graph.add_node("implement", claude_node(
-    "You are working in {work_dir}. Read the plan at {plan_path} and implement it.",
-    output_key="impl_output", model="sonnet", effort="medium",
+    "You are working in {work_dir}. Read the plan at {plan_path} and implement it.\n\n"
+    "After completing all tasks:\n"
+    "1. Update documentation (README, docstrings, diagrams) to reflect changes\n"
+    "2. Run the project's quality gates (lint, typecheck, format, tests)\n"
+    "Fix any failures before proceeding.",
+    output_key="impl_output", model="opus", effort="high",
     permission_mode="bypassPermissions",
 ))
-graph.add_node("run_tests", shell_node(
-    "cd {work_dir} && uv run pytest -v 2>&1",
-    output_key="test_output", check=False,
-))
-graph.add_node("fix_tests", claude_node(
-    "You are working in {work_dir}. Fix the failing tests:\n\n{test_output}",
-    output_key="fix_tests_output", model="sonnet", effort="low",
+
+# --- Smoke test (context pattern 6) ---
+graph.add_node("smoke_test", claude_node(
+    "You are working in {work_dir}. Run a smoke test to verify the implementation.\n\n"
+    "1. Read the plan at {plan_path}. Look for a '## Validation' section.\n"
+    "2. If found, execute those validation instructions exactly.\n"
+    "3. If NOT found, fall back to convention-based discovery:\n"
+    "   - Read README.md, pyproject.toml, package.json, Makefile, docker-compose.yml\n"
+    "   - Run a basic sanity check (does it start? does --help work?)\n"
+    "4. ALWAYS kill all background processes before finishing.\n\n"
+    "End with EXACTLY one line:\n"
+    "  SMOKE_TEST_PASS\n"
+    "  SMOKE_TEST_FAIL: <brief summary>",
+    output_key="smoke_test_output", model="opus", effort="high",
     permission_mode="bypassPermissions",
 ))
-graph.add_node("start_reviews", python_node(lambda s: {}))
+
+graph.add_node("smoke_test_fix", claude_node(
+    "You are working in {work_dir}. The smoke test failed:\n\n{smoke_test_output}\n\n"
+    "Diagnose the root cause, fix the code, then run quality gates "
+    "(lint, typecheck, format, tests). Commit fixes locally.",
+    output_key="smoke_test_fix_output", model="opus", effort="high",
+    permission_mode="bypassPermissions",
+))
+
+# No separate retry node — smoke_test_fix loops back to smoke_test.
+# If the smoke test fails a second time, max_iterations will stop the loop.
+
+# --- PR creation ---
+graph.add_node("create_pr", claude_node(
+    "You are working in {work_dir}. Push the current branch and create a PR:\n"
+    "  git push -u origin HEAD\n"
+    "  gh pr create --title '<descriptive title>' --body '<summary of changes>'\n\n"
+    "Return the PR URL.",
+    output_key="pr_url", model="sonnet", effort="low",
+    permission_mode="bypassPermissions",
+))
+
+# --- Simplify ---
+graph.add_node("simplify", claude_node(
+    "/simplify",
+    output_key="simplify_output", model="sonnet", effort="high",
+    permission_mode="bypassPermissions",
+))
+
+graph.add_node("simplify_commit", claude_node(
+    "If there are any uncommitted changes from the simplify pass, "
+    "commit them with a descriptive message and push to the current branch.",
+    output_key="simplify_commit_output", model="sonnet", effort="low",
+    permission_mode="bypassPermissions",
+))
+
+# --- Parallel reviews (context patterns 1, 2, 3) ---
 graph.add_node("code_review", claude_node(
-    "You are working in {work_dir}. Review the code for bugs, logic errors, and quality issues. "
-    "Return findings with severity (Critical/Important/Medium/Low).",
-    output_key="code_review_output", model="sonnet", effort="high",
+    "/code-review:code-review {pr_url}",
+    output_key="code_review_output", model="opus", effort="high",
     permission_mode="bypassPermissions",
 ))
+
 graph.add_node("security_review", claude_node(
-    "You are working in {work_dir}. Review for security issues: injection, data exposure, "
-    "unsafe operations. Return findings with severity.",
-    output_key="security_review_output", model="sonnet", effort="high",
+    "/security-review\n\n"
+    "Review the changes in PR {pr_url}.\n\n"
+    "IMPORTANT: A previous security review found these issues. "
+    "Check if they are resolved AND do a full new review "
+    "(fixes may introduce new issues):\n\n"
+    "{previous_security_findings}\n\n"
+    "After completing the review, post findings as a PR comment:\n"
+    "  gh pr comment <pr_number> --body '<findings>'\n\n"
+    "Format with a '### Security Review' header and severity categories.",
+    output_key="security_review_output", model="opus", effort="high",
     permission_mode="bypassPermissions",
 ))
-graph.add_node("decision", python_node(decide_fn))
-graph.add_node("fix_reviews", claude_node(
-    "You are working in {work_dir}. Fix Critical/Important/Medium issues:\n\n"
-    "Code review:\n{code_review_output}\n\nSecurity review:\n{security_review_output}",
-    output_key="fix_reviews_output", model="sonnet", effort="medium",
+
+# --- Wait for CI ---
+def _wait_for_ci_fn(state: dict[str, str]) -> dict[str, str]:
+    """Poll CI checks until complete. Returns ci_status and ci_failures."""
+    pr_url = state.get("pr_url", "")
+    pr_number = pr_url.rstrip("/").split("/")[-1] if pr_url else ""
+    max_wait = 600  # 10 minutes
+    start = time.monotonic()
+    while time.monotonic() - start < max_wait:
+        result = subprocess.run(
+            ["gh", "pr", "checks", pr_number, "--json", "name,state,conclusion"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            return {"ci_status": "pass", "ci_failures": ""}
+        output = result.stdout
+        if '"pending"' not in output.lower() and '"queued"' not in output.lower():
+            if '"failure"' in output.lower() or '"error"' in output.lower():
+                return {"ci_status": "fail", "ci_failures": output}
+            return {"ci_status": "pass", "ci_failures": ""}
+        time.sleep(30)
+    return {"ci_status": "pass", "ci_failures": ""}  # timeout = assume pass
+
+graph.add_node("wait_for_ci", python_node(_wait_for_ci_fn))
+
+# --- Decision gate (context pattern 4) ---
+def _decision_fn(state: dict[str, str]) -> dict[str, str]:
+    """Evaluate reviews + CI. Carry previous_security_findings, increment iteration.
+
+    This is a python_node wrapper around the LLM decision so we can also
+    carry state (previous_security_findings) and short-circuit on CI failure.
+    Note: the LLM (decision_llm) always runs before this node in the graph.
+    In dev-loop.py, the decision node conditionally skips the LLM call on CI
+    failure — this two-node split is a simplification for the example.
+    """
+    ci_status = state.get("ci_status", "pass")
+    security_text = state.get("security_review_output", "")
+    iteration = int(state.get("iteration_count", "1"))
+
+    if ci_status == "fail":
+        return {
+            "decision_output": "YES",
+            "previous_security_findings": security_text,
+            "iteration_count": str(iteration + 1),
+        }
+
+    return {
+        "decision_output": state.get("decision_llm_output", "NO"),
+        "previous_security_findings": security_text,
+        "iteration_count": str(iteration + 1),
+    }
+
+graph.add_node("decision_llm", claude_node(
+    "Based on these review findings, are there Critical, Important, or Medium "
+    "severity issues that MUST be fixed?\n\n"
+    "Code Review:\n{code_review_output}\n\n"
+    "Security Review:\n{security_review_output}\n\n"
+    "CI failures:\n{ci_failures}\n\n"
+    "Answer EXACTLY: YES or NO. Only YES for Critical/Important/Medium issues "
+    "or CI failures. Low severity and nitpicks do not count.",
+    output_key="decision_llm_output", model="sonnet", effort="low",
+))
+graph.add_node("decision", python_node(_decision_fn))
+
+# --- Fix (context pattern 5) ---
+graph.add_node("fix", claude_node(
+    "Fix all Critical, Important, and Medium severity issues from this review "
+    "of PR {pr_url}.\n\n"
+    "Code Review:\n{code_review_output}\n\n"
+    "Security Review:\n{security_review_output}\n\n"
+    "CI failures:\n{ci_failures}\n\n"
+    "After fixing, run quality gates (lint, typecheck, format, tests). "
+    "Fix any failures. Commit and push.",
+    output_key="fix_output", model="opus", effort="high",
     permission_mode="bypassPermissions",
 ))
-graph.add_node("commit", shell_node(
-    'cd {work_dir} && git add -A && git diff --cached --quiet && echo "nothing to commit" '
-    '|| git commit -m "feat: implement feature"',
-    output_key="commit_output",
-))
 
-def test_router(state):
-    return "fix" if "failed" in state["test_output"].lower() else "review"
+# --- Routers ---
+def smoke_test_router(state: dict[str, str]) -> str:
+    error = state.get("smoke_test_error", "")
+    output = state.get("smoke_test_output", "")
+    if error or "SMOKE_TEST_FAIL" in output:
+        return "fail"
+    return "pass"
 
+def decision_router(state: dict[str, str]) -> str:
+    if "YES" in state.get("decision_output", "NO").upper():
+        return "fix"
+    return "done"
+
+# --- Edges ---
+# Phase 1: implement → smoke test → PR
 graph.add_edge("start", "implement")
-graph.add_edge("implement", "run_tests")
-graph.add_conditional_edges("run_tests", test_router, {"fix": "fix_tests", "review": "start_reviews"})
-graph.add_edge("fix_tests", "run_tests")
-graph.add_parallel_edges("start_reviews", ["code_review", "security_review"])
-graph.add_edge("code_review", "decision")
-graph.add_edge("security_review", "decision")
-graph.add_conditional_edges("decision", lambda s: s.get("decision", "clean"), {"issues": "fix_reviews", "clean": "commit"})
-graph.add_edge("fix_reviews", "run_tests")
-graph.add_edge("commit", END)
+graph.add_edge("implement", "smoke_test")
+graph.add_conditional_edges("smoke_test", smoke_test_router, {
+    "pass": "create_pr", "fail": "smoke_test_fix",
+})
+graph.add_edge("smoke_test_fix", "smoke_test")  # retry by re-entering smoke_test
+
+# Phase 2: simplify → review loop
+graph.add_edge("create_pr", "simplify")
+graph.add_edge("simplify", "simplify_commit")
+graph.add_parallel_edges("simplify_commit", ["code_review", "security_review"])
+graph.add_edge("code_review", "wait_for_ci")
+graph.add_edge("security_review", "wait_for_ci")
+graph.add_edge("wait_for_ci", "decision_llm")
+graph.add_edge("decision_llm", "decision")
+graph.add_conditional_edges("decision", decision_router, {"fix": "fix", "done": END})
+graph.add_edge("fix", "simplify")  # loop back to review
 ```
 
 ## Important rules

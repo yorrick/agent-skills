@@ -1,0 +1,25 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "eeb8b102531a",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "docs/superpowers/specs/2026-03-16-stream-test-logs-design.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/ee/b8b102531a/0/metadata.json",
+      "transcript": "/ee/b8b102531a/0/full.jsonl",
+      "content_hash": "/ee/b8b102531a/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}

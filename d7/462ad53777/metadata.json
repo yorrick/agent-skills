@@ -3,7 +3,7 @@
   "checkpoint_id": "d7462ad53777",
   "strategy": "manual-commit",
   "branch": "main",
-  "checkpoints_count": 0,
+  "checkpoints_count": 1,
   "files_touched": [
     "docs/superpowers/specs/2026-03-16-workflow-prompt-alignment-design.md"
   ],
@@ -13,13 +13,19 @@
       "transcript": "/d7/462ad53777/0/full.jsonl",
       "content_hash": "/d7/462ad53777/0/content_hash.txt",
       "prompt": ""
+    },
+    {
+      "metadata": "/d7/462ad53777/1/metadata.json",
+      "transcript": "/d7/462ad53777/1/full.jsonl",
+      "content_hash": "/d7/462ad53777/1/content_hash.txt",
+      "prompt": "/d7/462ad53777/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 0,
-    "cache_creation_tokens": 0,
-    "cache_read_tokens": 0,
-    "output_tokens": 0,
-    "api_call_count": 0
+    "input_tokens": 77,
+    "cache_creation_tokens": 198859,
+    "cache_read_tokens": 2071946,
+    "output_tokens": 12961,
+    "api_call_count": 45
   }
 }

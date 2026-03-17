@@ -17,7 +17,7 @@ The workflow engine is at: `${CLAUDE_PLUGIN_ROOT}/scripts/engine.py`
 ## What to do
 
 1. **Understand the request.** Read relevant files if needed to understand the codebase context.
-2. **Design the workflow.** Decide which nodes, edges, and routers are needed. Pick the right node type for each step.
+2. **Design the workflow.** Decide which nodes, edges, and routers are needed. Pick the right node type for each step. **Look for parallelization opportunities** — tasks that touch different files can run concurrently via `add_parallel_edges`. See the parallelization rules below.
 3. **Write the script.** Create a Python script at `/tmp/workflow_NNNN.py` (use a random 4-digit suffix). Always include `--diagram` flag handling (see template).
 4. **Show the diagram first.** Run with `uv run /tmp/workflow_NNNN.py --diagram` and show the user the rendered ASCII diagram so they can see the workflow graph before execution. The script template already uses `graph.to_ascii()` for this — do NOT change it to `to_mermaid()`. The ASCII version renders a visual box-and-arrow diagram directly in the terminal.
 5. **Run it.** Execute with `uv run /tmp/workflow_NNNN.py`.
@@ -528,6 +528,49 @@ def build_graph(models: dict[str, bool] | None = None) -> StateGraph:
     return graph
 ```
 
+### 5. Parallel plan tasks with deferred commit
+
+When a plan has independent tasks that touch different files, run them in parallel. Each parallel node does its work but does NOT commit. A shared commit node after the join handles all changes.
+
+```python
+def build_graph(models: dict[str, bool] | None = None) -> StateGraph:
+    if models is None:
+        models = detect_available_models()
+
+    graph = StateGraph(max_iterations=3)
+
+    # Two independent tasks that touch different files
+    graph.add_node("fan_out", python_node(lambda s: {}))
+    graph.add_node("task_a", claude_node(
+        "You are working in {work_dir}. Implement task A: {task_a_description}\n\n"
+        "Do NOT commit — just make the changes and run tests.",
+        output_key="task_a_output",
+        model="sonnet", effort="medium",
+        permission_mode="bypassPermissions",
+    ))
+    graph.add_node("task_b", claude_node(
+        "You are working in {work_dir}. Implement task B: {task_b_description}\n\n"
+        "Do NOT commit — just make the changes and run tests.",
+        output_key="task_b_output",
+        model="sonnet", effort="medium",
+        permission_mode="bypassPermissions",
+    ))
+    # Shared commit after both tasks complete
+    graph.add_node("commit_all", shell_node(
+        'cd {work_dir} && git add -A && git diff --cached --quiet && echo "nothing to commit" '
+        '|| git commit -m "feat: implement task A and task B"',
+        output_key="commit_output",
+    ))
+
+    graph.add_edge("start", "fan_out")
+    graph.add_parallel_edges("fan_out", ["task_a", "task_b"])
+    graph.add_edge("task_a", "commit_all")
+    graph.add_edge("task_b", "commit_all")
+    graph.add_edge("commit_all", END)
+
+    return graph
+```
+
 ## Important rules
 
 - **Use `build_graph()`.** Always put graph construction in a `build_graph(models=None)` function.
@@ -543,3 +586,5 @@ def build_graph(models: dict[str, bool] | None = None) -> StateGraph:
 - **Safe commits.** Use `git diff --cached --quiet && echo "nothing to commit" || git commit -m "..."` to handle cases where there's nothing to commit.
 - **Working directory in prompts.** Always include `You are working in {work_dir}` in Claude node prompts so headless sessions know where to find files.
 - **Parallel reviews need a fan-out node.** Use a passthrough `python_node(lambda s: {})` before `add_parallel_edges` since conditional and parallel edges on the same node conflict.
+- **Parallelize independent work.** When executing a plan with multiple tasks that touch different files, run them concurrently with `add_parallel_edges`. Parallel work nodes must NOT commit — each node does its implementation only (edit files, run tests). Add a shared commit node after the parallel group that stages and commits all changes together. This avoids git race conditions while maximizing throughput. See example 5 below.
+- **Identify parallelizable tasks.** Two tasks can run in parallel when: (a) they modify different files, (b) neither depends on the other's output, and (c) neither needs to read files the other will modify. When in doubt, keep tasks sequential — incorrect parallelization causes subtle bugs.

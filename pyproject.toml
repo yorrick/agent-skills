@@ -29,3 +29,4 @@ ignore = ["UP017"]  # datetime.UTC requires Python 3.11+, we target 3.10
 pythonVersion = "3.12"
 typeCheckingMode = "standard"
 extraPaths = ["dev-loop/scripts"]
+exclude = ["**/workflow_eval/scenarios/**/repo/**"]

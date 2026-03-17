@@ -187,3 +187,7 @@ Read the output file to retrieve the result: /private/tmp/claude-501/-Users-yorr
 <summary>Background command "Eval run C" completed (exit code 0)</summary>
 </task-notification>
 Read the output file to retrieve the result: /private/tmp/claude-501/-Users-yorrickjansen-work-claude-code-plugins/c9003741-8183-46dc-94ad-30f1d1a9c250/tasks/buti3i9di.output
+
+---
+
+I mean when I said like you fix the prompt, you don't fix the scenario instructions, you should fix the skill, okay? In real life, we don't have any control over the scenario contents. But we can definitely make sure that the skill actually looks for the correct things in the claudemd.

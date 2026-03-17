@@ -3,7 +3,7 @@
   "checkpoint_id": "3aabe870192c",
   "strategy": "manual-commit",
   "branch": "main",
-  "checkpoints_count": 0,
+  "checkpoints_count": 2,
   "files_touched": [
     "dev-loop/.claude-plugin/plugin.json",
     "docs/superpowers/specs/2026-03-17-workflow-eval-framework-design.md"
@@ -14,13 +14,19 @@
       "transcript": "/3a/abe870192c/0/full.jsonl",
       "content_hash": "/3a/abe870192c/0/content_hash.txt",
       "prompt": ""
+    },
+    {
+      "metadata": "/3a/abe870192c/1/metadata.json",
+      "transcript": "/3a/abe870192c/1/full.jsonl",
+      "content_hash": "/3a/abe870192c/1/content_hash.txt",
+      "prompt": "/3a/abe870192c/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 0,
-    "cache_creation_tokens": 0,
-    "cache_read_tokens": 0,
-    "output_tokens": 0,
-    "api_call_count": 0
+    "input_tokens": 151,
+    "cache_creation_tokens": 255223,
+    "cache_read_tokens": 10557532,
+    "output_tokens": 43173,
+    "api_call_count": 101
   }
 }

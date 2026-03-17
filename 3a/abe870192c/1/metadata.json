@@ -1,0 +1,33 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "3aabe870192c",
+  "session_id": "9a5ec5e9-2dfe-4caf-9ef9-8cbbd954bf95",
+  "strategy": "manual-commit",
+  "created_at": "2026-03-17T16:55:35.324812Z",
+  "branch": "main",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "docs/superpowers/specs/2026-03-17-workflow-eval-framework-design.md"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "2995d0e30fb6",
+  "token_usage": {
+    "input_tokens": 151,
+    "cache_creation_tokens": 255223,
+    "cache_read_tokens": 10557532,
+    "output_tokens": 43173,
+    "api_call_count": 101
+  },
+  "session_metrics": {
+    "turn_count": 3
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-03-17T16:55:34.115307Z",
+    "agent_lines": 13,
+    "human_added": 1,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 14,
+    "agent_percentage": 92.85714285714286
+  }
+}

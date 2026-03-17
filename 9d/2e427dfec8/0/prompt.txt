@@ -1,0 +1,12 @@
+You are working in /Users/yorrickjansen/work/claude-code-plugins. Execute Task 3 from the plan at /Users/yorrickjansen/work/claude-code-plugins/docs/superpowers/plans/2026-03-17-workflow-eval-framework.md.
+
+Read the plan's Task 3 section carefully, then:
+1. Create dev-loop/tests/workflow_eval/__init__.py (empty)
+2. Create dev-loop/tests/workflow_eval/scenarios/ directory
+3. Create dev-loop/tests/workflow_eval/helpers.py with the GraphInspector class exactly as specified in the plan
+4. Create dev-loop/tests/workflow_eval/test_helpers.py with all the test classes exactly as specified in the plan
+   IMPORTANT: Both test_helpers.py and helpers.py need sys.path.insert for both the scripts dir AND the workflow_eval dir
+5. Run: uv run pytest dev-loop/tests/workflow_eval/test_helpers.py -v to verify all tests pass
+6. Run: uv run ruff check dev-loop/tests/workflow_eval/ && uv run ruff format --check dev-loop/tests/workflow_eval/
+7. Run: uv run pyright
+8. Commit with message: 'feat(eval): add GraphInspector for structural workflow inspection'

@@ -1,0 +1,22 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "8175869657b7",
+  "session_id": "9a5ec5e9-2dfe-4caf-9ef9-8cbbd954bf95",
+  "strategy": "manual-commit",
+  "created_at": "2026-03-17T18:12:08.570483Z",
+  "branch": "feat/workflow-eval-framework",
+  "checkpoints_count": 4,
+  "files_touched": [],
+  "agent": "Claude Code",
+  "turn_id": "c7d3b588d767",
+  "token_usage": {
+    "input_tokens": 288,
+    "cache_creation_tokens": 488514,
+    "cache_read_tokens": 29486189,
+    "output_tokens": 64287,
+    "api_call_count": 205
+  },
+  "session_metrics": {
+    "turn_count": 20
+  }
+}

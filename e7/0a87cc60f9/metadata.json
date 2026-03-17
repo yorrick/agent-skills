@@ -3,7 +3,7 @@
   "checkpoint_id": "e70a87cc60f9",
   "strategy": "manual-commit",
   "branch": "feat/workflow-eval-framework",
-  "checkpoints_count": 0,
+  "checkpoints_count": 3,
   "files_touched": [
     "uv.lock"
   ],
@@ -13,13 +13,19 @@
       "transcript": "/e7/0a87cc60f9/0/full.jsonl",
       "content_hash": "/e7/0a87cc60f9/0/content_hash.txt",
       "prompt": ""
+    },
+    {
+      "metadata": "/e7/0a87cc60f9/1/metadata.json",
+      "transcript": "/e7/0a87cc60f9/1/full.jsonl",
+      "content_hash": "/e7/0a87cc60f9/1/content_hash.txt",
+      "prompt": "/e7/0a87cc60f9/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 0,
-    "cache_creation_tokens": 0,
-    "cache_read_tokens": 0,
-    "output_tokens": 0,
-    "api_call_count": 0
+    "input_tokens": 300,
+    "cache_creation_tokens": 491307,
+    "cache_read_tokens": 31178132,
+    "output_tokens": 65164,
+    "api_call_count": 213
   }
 }

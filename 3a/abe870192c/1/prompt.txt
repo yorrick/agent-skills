@@ -66,3 +66,7 @@ _ ERROR collecting dev-loop/tests/workflow_eval/scenarios/bugfix_bare/repo/tests
 ImportError while importing test module '/Users/yorri
 
 - Iterate and fix.
+
+---
+
+You commit the spec.

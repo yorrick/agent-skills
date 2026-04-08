@@ -4,8 +4,8 @@
 # ///
 """Build review prompts from templates and PR metadata.
 
-Generates per-provider prompts (claude, gemini, codex) from their
-respective templates, plus a shared security prompt.
+Generates per-provider review and security prompts (claude, gemini, codex)
+from their respective templates.
 
 Usage:
     build_prompts.py <pr-number> [--repo OWNER/REPO] [--out-dir DIR]
@@ -14,7 +14,9 @@ Outputs:
     <out-dir>/pr-review-prompt-claude-<PR>.md
     <out-dir>/pr-review-prompt-gemini-<PR>.md
     <out-dir>/pr-review-prompt-codex-<PR>.md
-    <out-dir>/pr-review-security-prompt-<PR>.md
+    <out-dir>/pr-review-security-claude-<PR>.md
+    <out-dir>/pr-review-security-gemini-<PR>.md
+    <out-dir>/pr-review-security-codex-<PR>.md
 """
 
 from __future__ import annotations
@@ -87,22 +89,18 @@ def main() -> None:
         "REPO": repo,
     }
 
-    # Per-provider review prompts
+    # Per-provider review and security prompts
     prompts = {}
-    for provider in ("claude", "gemini", "codex"):
-        template_path = refs_dir / f"review-prompt-{provider}.md"
-        if template_path.exists():
-            template = template_path.read_text()
-            filled = fill_template(template, variables)
-            out_path = out_dir / f"pr-review-prompt-{provider}-{args.pr_number}.md"
-            out_path.write_text(filled)
-            prompts[f"review_prompt_{provider}"] = str(out_path)
-
-    # Shared security prompt (same for all providers)
-    security_template = (refs_dir / "security-prompt.md").read_text()
-    security_prompt = fill_template(security_template, variables)
-    security_path = out_dir / f"pr-review-security-prompt-{args.pr_number}.md"
-    security_path.write_text(security_prompt)
+    for prompt_type in ("review-prompt", "security-prompt"):
+        for provider in ("claude", "gemini", "codex"):
+            template_path = refs_dir / f"{prompt_type}-{provider}.md"
+            if template_path.exists():
+                template = template_path.read_text()
+                filled = fill_template(template, variables)
+                key = prompt_type.replace("-", "_")
+                out_path = out_dir / f"pr-{prompt_type}-{provider}-{args.pr_number}.md"
+                out_path.write_text(filled)
+                prompts[f"{key}_{provider}"] = str(out_path)
 
     # Output metadata as JSON for the skill to consume
     output = {
@@ -111,7 +109,6 @@ def main() -> None:
         "pr_url": pr["url"],
         "repo": repo,
         "commit_sha": pr["headRefOid"],
-        "security_prompt": str(security_path),
         **prompts,
     }
     print(json.dumps(output))

@@ -38,16 +38,16 @@ This outputs JSON with paths to per-provider prompts:
   "review_prompt_claude": "/tmp/pr-review-prompt-claude-365.md",
   "review_prompt_gemini": "/tmp/pr-review-prompt-gemini-365.md",
   "review_prompt_codex": "/tmp/pr-review-prompt-codex-365.md",
-  "security_prompt": "/tmp/pr-review-security-prompt-365.md"
+  "security_prompt_claude": "/tmp/pr-security-prompt-claude-365.md",
+  "security_prompt_gemini": "/tmp/pr-security-prompt-gemini-365.md",
+  "security_prompt_codex": "/tmp/pr-security-prompt-codex-365.md"
 }
 ```
 
-Each provider gets a tailored review prompt:
-- **Claude**: Multi-agent workflow (5 parallel Sonnet agents + Haiku confidence scoring)
-- **Gemini**: Principal Engineer persona with systematic analysis instructions
-- **Codex**: Focused single-pass review optimized for Codex's sandbox environment
-
-The security prompt is shared across all providers (same format).
+Each provider gets tailored review AND security prompts:
+- **Claude**: Multi-agent code review (5 parallel Sonnet agents + Haiku scoring) + `/security-review` built-in command with structured output
+- **Gemini**: Principal Engineer persona with systematic analysis + Senior Security Engineer persona
+- **Codex**: Focused single-pass reviews optimized for Codex's sandbox environment
 
 Save all these values — you'll need them throughout.
 
@@ -93,7 +93,7 @@ claude -p "$(cat <review_prompt_claude>)" <CLAUDE_FLAGS> > /tmp/pr-review-claude
 
 ### Claude Code — Security Review
 ```bash
-claude -p "$(cat <security_prompt>)" <CLAUDE_FLAGS> > /tmp/pr-review-claude-security-<PR>.md 2>/dev/null
+claude -p "$(cat <security_prompt_claude>)" <CLAUDE_FLAGS> > /tmp/pr-review-claude-security-<PR>.md 2>/dev/null
 ```
 
 Where `<CLAUDE_FLAGS>` comes from the active profile (e.g., `--model sonnet --effort high`).
@@ -108,7 +108,7 @@ cat <review_prompt_gemini> | gemini -p - <GEMINI_FLAGS> --yolo > /tmp/pr-review-
 
 ### Gemini CLI — Security Review
 ```bash
-cat <security_prompt> | gemini -p - <GEMINI_FLAGS> --yolo > /tmp/pr-review-gemini-security-<PR>.md 2>/dev/null
+cat <security_prompt_gemini> | gemini -p - <GEMINI_FLAGS> --yolo > /tmp/pr-review-gemini-security-<PR>.md 2>/dev/null
 ```
 
 Where `<GEMINI_FLAGS>` comes from the active profile (e.g., `-m gemini-2.5-flash`).
@@ -123,7 +123,7 @@ codex exec <CODEX_FLAGS> --sandbox danger-full-access --skip-git-repo-check \
 ### Codex CLI — Security Review
 ```bash
 codex exec <CODEX_FLAGS> --sandbox danger-full-access --skip-git-repo-check \
-  "$(cat <security_prompt>)" > /tmp/pr-review-codex-security-<PR>.md 2>/dev/null
+  "$(cat <security_prompt_codex>)" > /tmp/pr-review-codex-security-<PR>.md 2>/dev/null
 ```
 
 Where `<CODEX_FLAGS>` comes from the active profile (e.g., `-m o4-mini`).

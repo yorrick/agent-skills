@@ -138,7 +138,7 @@ As each background command completes, report progress:
 - Gemini may exit non-zero even with usable output — always check the output file before discarding
 - Gemini requires `--yolo` for headless execution — without it, it prompts for tool approval and exits with code 1
 - Gemini quota errors (HTTP 429 / `TerminalQuotaError`) mean the user's free tier is exhausted — skip Gemini and note in the summary
-- Codex may hang on very large prompts — if output is empty after timeout, it likely failed silently
+- Codex can be slow on large PRs (fetching diff + analysis) — if output is empty after timeout, it likely failed silently or timed out mid-analysis
 
 ## Step 3: Synthesize Consensus
 

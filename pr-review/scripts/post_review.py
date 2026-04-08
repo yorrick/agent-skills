@@ -77,7 +77,7 @@ def build_comment_body(finding: dict) -> str:
         parts.append(f"\n**Suggestion:** {finding['suggestion']}")
     providers = ", ".join(finding.get("providers", ["unknown"]))
     confidence = finding.get("confidence", "?")
-    parts.append(f"\n---\n*Found by: {providers} | Confidence: {confidence}*")
+    parts.append(f"\n---\n*Found by: {providers} | Confidence: {confidence} | Human-vetted*")
     return "\n".join(parts)
 
 

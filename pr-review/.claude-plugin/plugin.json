@@ -1,7 +1,7 @@
 {
   "name": "pr-review",
   "description": "Multi-provider interactive PR code review. Runs Claude Code, Gemini CLI, and Codex CLI in parallel, merges findings, then lets you vet each issue before posting to GitHub.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "author": {
     "name": "Yorrick Jansen"
   },

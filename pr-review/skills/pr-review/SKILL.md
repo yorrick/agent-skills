@@ -15,7 +15,8 @@ The key principle: **nothing gets posted to the PR until you've reviewed and app
 2. **Review** — run Claude, Gemini, and Codex in parallel (none of them touch the PR)
 3. **Synthesize** — read all raw reviewer outputs, cluster by root issue, build consensus (LLM)
 4. **Vet** — walk through each finding interactively, discuss, approve or reject (LLM + user)
-5. **Post** — submit only approved findings as a GitHub review (deterministic script)
+5. **Post** — submit approved findings as inline file-level comments (deterministic script)
+6. **Verdict** — draft a PR-level review (approve/request changes/comment), let user edit, then post
 
 Scripts in `scripts/` handle deterministic work (prompt building, GitHub posting). The LLM handles semantic work (reading raw outputs, clustering duplicates, synthesizing consensus, interactive discussion).
 
@@ -240,7 +241,9 @@ After presenting the first 3 findings individually, also offer:
 
 These only apply to LOW severity — CRITICAL, HIGH, and MEDIUM always require individual review.
 
-## Step 5: Post Approved Comments to PR
+## Step 5: Post Approved Findings as Inline File Comments
+
+**All findings MUST be posted as inline line-level comments on the specific files, NOT as a single body-level PR comment.** The post script handles mapping findings to diff lines automatically — if a finding's exact line isn't in the diff, it attaches to the nearest changed line with a note.
 
 Write the approved findings to a JSON file (one entry per finding with file, line, severity, category, confidence, description, suggestion, providers), then run the post script:
 
@@ -250,9 +253,20 @@ uv run "${CLAUDE_PLUGIN_ROOT}/scripts/post_review.py" \
   --repo <repo> --pr <PR> --commit-sha <commit_sha>
 ```
 
-This creates a single atomic GitHub review with individual line-level comments. The review body includes a summary of all approved findings.
-
 For clustered findings (same root issue, multiple files), post a comment on the primary file/line and mention the related locations in the comment body.
+
+### If posting fails with 422
+
+A common cause is a stale pending review. Check for and delete it:
+```bash
+# Find pending reviews
+gh api repos/<repo>/pulls/<PR>/reviews --jq '.[] | select(.state == "PENDING") | .id'
+
+# Delete the pending review
+gh api repos/<repo>/pulls/<PR>/reviews/<REVIEW_ID> --method DELETE
+```
+
+Then retry posting.
 
 ### If no findings approved
 
@@ -261,7 +275,31 @@ If the user rejected everything, confirm:
 All findings were rejected. No comments will be posted to the PR.
 ```
 
-## Step 6: Cleanup and Summary
+## Step 6: Draft PR-Level Review Verdict
+
+After posting inline comments, draft a **PR-level review comment** with a verdict. This is the top-level review summary that accompanies the inline comments.
+
+1. **Draft the review body** — Summarize the review: how many findings, what the most critical issues are, and your overall assessment. Keep it concise (3-5 sentences).
+
+2. **Propose a verdict** via AskUserQuestion:
+   - **Approve** — No blocking issues, safe to merge (possibly with minor suggestions)
+   - **Request Changes** — Has blocking issues that must be fixed before merge
+   - **Comment** — Neutral, just sharing observations without a verdict
+
+   Present the draft review body text alongside the verdict options so the user can see what will be posted.
+
+3. **Let the user edit** — The user may want to modify the draft text. If they accept, post as-is. If they want changes, ask what to modify via AskUserQuestion, apply edits, and confirm the final text.
+
+4. **Post the verdict** — Submit the PR-level review with the chosen event type (`APPROVE`, `REQUEST_CHANGES`, or `COMMENT`):
+   ```bash
+   gh api repos/<repo>/pulls/<PR>/reviews \
+     --method POST \
+     --input - <<< '{"commit_id": "<sha>", "body": "<review body>", "event": "<APPROVE|REQUEST_CHANGES|COMMENT>"}'
+   ```
+
+**Important:** This step posts ONLY the PR-level verdict. The inline file comments were already posted in Step 5. Do NOT include inline comments again here.
+
+## Step 7: Cleanup and Summary
 
 Delete temp files:
 ```bash
@@ -288,7 +326,9 @@ Show final summary:
  By severity:
    CRITICAL: <N>  HIGH: <N>  MEDIUM: <N>  LOW: <N>
 
- Review posted: <PR URL>
+ Verdict: <APPROVE|REQUEST_CHANGES|COMMENT>
+ Inline comments: <PR URL>
+ Review verdict:  <PR URL>
 ```
 
 ## Error Handling

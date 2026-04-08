@@ -108,26 +108,37 @@ Where `<GEMINI_FLAGS>` comes from the active profile (e.g., `-m gemini-2.5-flash
 Codex runs in a sandbox that blocks network access by default. Use `--sandbox danger-full-access` so it can call `gh` to fetch the PR.
 ```bash
 codex exec <CODEX_FLAGS> --sandbox danger-full-access --skip-git-repo-check \
-  "$(cat <review_prompt>)" > /tmp/pr-review-codex-<PR>.md 2>/dev/null
+  "$(cat <review_prompt>)" > /tmp/pr-review-codex-code-<PR>.md 2>/dev/null
+```
+
+### Codex CLI — Security Review
+```bash
+codex exec <CODEX_FLAGS> --sandbox danger-full-access --skip-git-repo-check \
+  "$(cat <security_prompt>)" > /tmp/pr-review-codex-security-<PR>.md 2>/dev/null
 ```
 
 Where `<CODEX_FLAGS>` comes from the active profile (e.g., `-m o4-mini`).
 
+**Important:** For all background Bash commands, use `timeout: 600000` (10 minutes). Gemini and Codex can take significantly longer than Claude — especially Gemini which spawns sub-agents internally. Allow up to 30 minutes for the full review by setting `timeout: 1800000` on the Bash calls for Gemini and Codex.
+
 As each background command completes, report progress:
 ```
  Profile: <profile>
- Reviewing with Claude (code)...     done
- Reviewing with Claude (security)... done
- Reviewing with Gemini (code)...     done
- Reviewing with Gemini (security)... done
- Reviewing with Codex CLI...         done
+ Reviewing with Claude (code)...        done
+ Reviewing with Claude (security)...    done
+ Reviewing with Gemini (code)...        done
+ Reviewing with Gemini (security)...    done
+ Reviewing with Codex CLI (code)...     done
+ Reviewing with Codex CLI (security)... done
 ```
 
 ### Handling failures
 
-- If a reviewer fails or times out (>5 minutes), log it and continue with the others
+- If a reviewer fails or times out, log it and continue with the others
 - Gemini may exit non-zero even with usable output — always check the output file before discarding
 - Gemini requires `--yolo` for headless execution — without it, it prompts for tool approval and exits with code 1
+- Gemini quota errors (HTTP 429 / `TerminalQuotaError`) mean the user's free tier is exhausted — skip Gemini and note in the summary
+- Codex may hang on very large prompts — if output is empty after timeout, it likely failed silently
 
 ## Step 3: Synthesize Consensus
 
@@ -138,7 +149,8 @@ Read all the reviewer output files from step 2 using the Read tool:
 - `/tmp/pr-review-claude-security-<PR>.md`
 - `/tmp/pr-review-gemini-code-<PR>.md`
 - `/tmp/pr-review-gemini-security-<PR>.md`
-- `/tmp/pr-review-codex-<PR>.md`
+- `/tmp/pr-review-codex-code-<PR>.md`
+- `/tmp/pr-review-codex-security-<PR>.md`
 
 Skip any files that don't exist (reviewer failed or was unavailable).
 

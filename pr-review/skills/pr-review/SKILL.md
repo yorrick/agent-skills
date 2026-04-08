@@ -279,18 +279,20 @@ All findings were rejected. No comments will be posted to the PR.
 
 After posting inline comments, draft a **PR-level review comment** with a verdict. This is the top-level review summary that accompanies the inline comments.
 
-1. **Draft the review body** — Summarize the review: how many findings, what the most critical issues are, and your overall assessment. Keep it concise (3-5 sentences).
+1. **Draft the review body** — Summarize the review: how many findings, what the most critical issues are, and your overall assessment. Keep it concise (3-5 sentences). Present the full draft text to the user.
 
-2. **Propose a verdict** via AskUserQuestion:
-   - **Approve** — No blocking issues, safe to merge (possibly with minor suggestions)
+2. **Ask the user to edit the draft** via AskUserQuestion — This is a SEPARATE step BEFORE asking for the verdict. Present the draft and ask:
+   - **Looks good** — Accept the draft as-is
+   - **Edit** — User wants to modify the text (ask what to change, apply edits, show the updated draft, and repeat until they confirm)
+
+   Do NOT combine this step with the verdict question. The user MUST have a chance to edit the text first.
+
+3. **Ask for the verdict** via AskUserQuestion — Only AFTER the user has confirmed the final text:
    - **Request Changes** — Has blocking issues that must be fixed before merge
+   - **Approve** — No blocking issues, safe to merge (possibly with minor suggestions)
    - **Comment** — Neutral, just sharing observations without a verdict
 
-   Present the draft review body text alongside the verdict options so the user can see what will be posted.
-
-3. **Let the user edit** — The user may want to modify the draft text. If they accept, post as-is. If they want changes, ask what to modify via AskUserQuestion, apply edits, and confirm the final text.
-
-4. **Post the verdict** — Submit the PR-level review with the chosen event type (`APPROVE`, `REQUEST_CHANGES`, or `COMMENT`):
+4. **Post the verdict** — Submit the PR-level review with the confirmed text and chosen event type (`APPROVE`, `REQUEST_CHANGES`, or `COMMENT`):
    ```bash
    gh api repos/<repo>/pulls/<PR>/reviews \
      --method POST \

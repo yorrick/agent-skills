@@ -44,7 +44,20 @@ Save all these values — you'll need them throughout.
 
 ## Step 2: Run All Reviewers in Parallel
 
-Check which CLIs are available:
+### Select review profile
+
+Read the profile definitions from `${CLAUDE_PLUGIN_ROOT}/skills/pr-review/references/profiles.md`.
+
+Determine which profile to use:
+- If the user specified a profile (e.g., "review PR #365 with quality profile"), use that.
+- Otherwise, default to **balanced**.
+
+Extract the per-provider CLI flags for the selected profile. For example, with "balanced":
+- Claude flags: `--model sonnet --effort high`
+- Gemini flags: `-m gemini-2.5-flash`
+- Codex flags: `-m o4-mini`
+
+### Check available CLIs
 
 ```bash
 command -v claude >/dev/null 2>&1  # Claude Code
@@ -58,6 +71,7 @@ Display the header before launching:
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  PR REVIEW — #<number>: <title>
+ Profile: <profile>
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
@@ -65,34 +79,43 @@ Run all available reviewers as **parallel background Bash commands** using `run_
 
 ### Claude Code — Code Review
 ```bash
-claude -p "$(cat <review_prompt>)" > /tmp/pr-review-claude-code-<PR>.md 2>/dev/null
+claude -p "$(cat <review_prompt>)" <CLAUDE_FLAGS> > /tmp/pr-review-claude-code-<PR>.md 2>/dev/null
 ```
 
 ### Claude Code — Security Review
 ```bash
-claude -p "$(cat <security_prompt>)" > /tmp/pr-review-claude-security-<PR>.md 2>/dev/null
+claude -p "$(cat <security_prompt>)" <CLAUDE_FLAGS> > /tmp/pr-review-claude-security-<PR>.md 2>/dev/null
 ```
+
+Where `<CLAUDE_FLAGS>` comes from the active profile (e.g., `--model sonnet --effort high`).
 
 ### Gemini CLI — Code Review
 Gemini takes longer than Claude/Codex because it uses tools internally (reads files, spawns sub-agents). Its output includes a thinking trace before the structured findings — the parse script handles this.
+
+**Important:** Gemini requires `--yolo` for headless execution. Without it, Gemini prompts for tool approval and exits with code 1. Pipe the prompt via stdin for reliability with large prompts.
 ```bash
-gemini -p "$(cat <review_prompt>)" > /tmp/pr-review-gemini-code-<PR>.md 2>/dev/null
+cat <review_prompt> | gemini -p - <GEMINI_FLAGS> --yolo > /tmp/pr-review-gemini-code-<PR>.md 2>/dev/null
 ```
 
 ### Gemini CLI — Security Review
 ```bash
-gemini -p "$(cat <security_prompt>)" > /tmp/pr-review-gemini-security-<PR>.md 2>/dev/null
+cat <security_prompt> | gemini -p - <GEMINI_FLAGS> --yolo > /tmp/pr-review-gemini-security-<PR>.md 2>/dev/null
 ```
+
+Where `<GEMINI_FLAGS>` comes from the active profile (e.g., `-m gemini-2.5-flash`).
 
 ### Codex CLI — Code Review
 Codex runs in a sandbox that blocks network access by default. Use `--sandbox danger-full-access` so it can call `gh` to fetch the PR.
 ```bash
-codex exec --sandbox danger-full-access --skip-git-repo-check \
+codex exec <CODEX_FLAGS> --sandbox danger-full-access --skip-git-repo-check \
   "$(cat <review_prompt>)" > /tmp/pr-review-codex-<PR>.md 2>/dev/null
 ```
 
+Where `<CODEX_FLAGS>` comes from the active profile (e.g., `-m o4-mini`).
+
 As each background command completes, report progress:
 ```
+ Profile: <profile>
  Reviewing with Claude (code)...     done
  Reviewing with Claude (security)... done
  Reviewing with Gemini (code)...     done
@@ -104,6 +127,7 @@ As each background command completes, report progress:
 
 - If a reviewer fails or times out (>5 minutes), log it and continue with the others
 - Gemini may exit non-zero even with usable output — always check the output file before discarding
+- Gemini requires `--yolo` for headless execution — without it, it prompts for tool approval and exits with code 1
 
 ## Step 3: Synthesize Consensus
 

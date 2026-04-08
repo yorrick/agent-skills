@@ -4,12 +4,17 @@
 # ///
 """Build review prompts from templates and PR metadata.
 
+Generates per-provider prompts (claude, gemini, codex) from their
+respective templates, plus a shared security prompt.
+
 Usage:
     build_prompts.py <pr-number> [--repo OWNER/REPO] [--out-dir DIR]
 
 Outputs:
-    <out-dir>/review-prompt.md
-    <out-dir>/security-prompt.md
+    <out-dir>/pr-review-prompt-claude-<PR>.md
+    <out-dir>/pr-review-prompt-gemini-<PR>.md
+    <out-dir>/pr-review-prompt-codex-<PR>.md
+    <out-dir>/pr-review-security-prompt-<PR>.md
 """
 
 from __future__ import annotations
@@ -63,6 +68,7 @@ def main() -> None:
 
     # Resolve paths
     skill_dir = Path(__file__).resolve().parent.parent / "skills" / "pr-review"
+    refs_dir = skill_dir / "references"
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -81,14 +87,19 @@ def main() -> None:
         "REPO": repo,
     }
 
-    # Build review prompt
-    review_template = (skill_dir / "references" / "review-prompt.md").read_text()
-    review_prompt = fill_template(review_template, variables)
-    review_path = out_dir / f"pr-review-prompt-{args.pr_number}.md"
-    review_path.write_text(review_prompt)
+    # Per-provider review prompts
+    prompts = {}
+    for provider in ("claude", "gemini", "codex"):
+        template_path = refs_dir / f"review-prompt-{provider}.md"
+        if template_path.exists():
+            template = template_path.read_text()
+            filled = fill_template(template, variables)
+            out_path = out_dir / f"pr-review-prompt-{provider}-{args.pr_number}.md"
+            out_path.write_text(filled)
+            prompts[f"review_prompt_{provider}"] = str(out_path)
 
-    # Build security prompt
-    security_template = (skill_dir / "references" / "security-prompt.md").read_text()
+    # Shared security prompt (same for all providers)
+    security_template = (refs_dir / "security-prompt.md").read_text()
     security_prompt = fill_template(security_template, variables)
     security_path = out_dir / f"pr-review-security-prompt-{args.pr_number}.md"
     security_path.write_text(security_prompt)
@@ -100,8 +111,8 @@ def main() -> None:
         "pr_url": pr["url"],
         "repo": repo,
         "commit_sha": pr["headRefOid"],
-        "review_prompt": str(review_path),
         "security_prompt": str(security_path),
+        **prompts,
     }
     print(json.dumps(output))
 

@@ -27,7 +27,7 @@ Run the prompt builder script to fetch PR metadata and create prompt files:
 uv run "${CLAUDE_PLUGIN_ROOT}/scripts/build_prompts.py" <PR_NUMBER> --out-dir /tmp
 ```
 
-This outputs JSON with paths to the generated prompts:
+This outputs JSON with paths to per-provider prompts:
 ```json
 {
   "pr_number": 365,
@@ -35,10 +35,19 @@ This outputs JSON with paths to the generated prompts:
   "pr_url": "https://github.com/owner/repo/pull/365",
   "repo": "owner/repo",
   "commit_sha": "abc123...",
-  "review_prompt": "/tmp/pr-review-prompt-365.md",
+  "review_prompt_claude": "/tmp/pr-review-prompt-claude-365.md",
+  "review_prompt_gemini": "/tmp/pr-review-prompt-gemini-365.md",
+  "review_prompt_codex": "/tmp/pr-review-prompt-codex-365.md",
   "security_prompt": "/tmp/pr-review-security-prompt-365.md"
 }
 ```
+
+Each provider gets a tailored review prompt:
+- **Claude**: Multi-agent workflow (5 parallel Sonnet agents + Haiku confidence scoring)
+- **Gemini**: Principal Engineer persona with systematic analysis instructions
+- **Codex**: Focused single-pass review optimized for Codex's sandbox environment
+
+The security prompt is shared across all providers (same format).
 
 Save all these values — you'll need them throughout.
 
@@ -79,7 +88,7 @@ Run all available reviewers as **parallel background Bash commands** using `run_
 
 ### Claude Code — Code Review
 ```bash
-claude -p "$(cat <review_prompt>)" <CLAUDE_FLAGS> > /tmp/pr-review-claude-code-<PR>.md 2>/dev/null
+claude -p "$(cat <review_prompt_claude>)" <CLAUDE_FLAGS> > /tmp/pr-review-claude-code-<PR>.md 2>/dev/null
 ```
 
 ### Claude Code — Security Review
@@ -94,7 +103,7 @@ Gemini takes longer than Claude/Codex because it uses tools internally (reads fi
 
 **Important:** Gemini requires `--yolo` for headless execution. Without it, Gemini prompts for tool approval and exits with code 1. Pipe the prompt via stdin for reliability with large prompts.
 ```bash
-cat <review_prompt> | gemini -p - <GEMINI_FLAGS> --yolo > /tmp/pr-review-gemini-code-<PR>.md 2>/dev/null
+cat <review_prompt_gemini> | gemini -p - <GEMINI_FLAGS> --yolo > /tmp/pr-review-gemini-code-<PR>.md 2>/dev/null
 ```
 
 ### Gemini CLI — Security Review
@@ -108,7 +117,7 @@ Where `<GEMINI_FLAGS>` comes from the active profile (e.g., `-m gemini-2.5-flash
 Codex runs in a sandbox that blocks network access by default. Use `--sandbox danger-full-access` so it can call `gh` to fetch the PR.
 ```bash
 codex exec <CODEX_FLAGS> --sandbox danger-full-access --skip-git-repo-check \
-  "$(cat <review_prompt>)" > /tmp/pr-review-codex-code-<PR>.md 2>/dev/null
+  "$(cat <review_prompt_codex>)" > /tmp/pr-review-codex-code-<PR>.md 2>/dev/null
 ```
 
 ### Codex CLI — Security Review

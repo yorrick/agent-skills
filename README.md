@@ -44,6 +44,22 @@ Automatically reflects on skills used during sessions and proposes improvements.
 claude plugin install self-improve-skill@yorrick
 ```
 
+### pr-review
+
+Multi-provider interactive PR code review using Claude Code, Gemini CLI, and Codex CLI.
+
+```
+claude plugin install pr-review@yorrick
+```
+
+### agent-session-monitor
+
+Meta-agent skill for monitoring and steering Claude Code, Codex, and other terminal coding agents through tmux panes. The skill content is portable Agent Skills format; local Claude/Codex discovery should symlink to `agent-session-monitor/skills/agent-session-monitor`.
+
+```
+claude plugin install agent-session-monitor@yorrick
+```
+
 ## Local Development
 
 For testing or development, load a plugin directly:
@@ -51,4 +67,5 @@ For testing or development, load a plugin directly:
 ```bash
 claude --plugin-dir ./dev-loop
 claude --plugin-dir ./self-improve-skill
+claude --plugin-dir ./agent-session-monitor
 ```

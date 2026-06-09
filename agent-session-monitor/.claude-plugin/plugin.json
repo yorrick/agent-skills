@@ -1,0 +1,11 @@
+{
+  "name": "agent-session-monitor",
+  "description": "Monitor and steer Claude Code, Codex, and other terminal coding agents through tmux panes.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Yorrick Jansen"
+  },
+  "repository": "https://github.com/yorrick/claude-code-plugins",
+  "license": "MIT",
+  "keywords": ["tmux", "agent", "codex", "claude-code", "monitoring", "automation"]
+}

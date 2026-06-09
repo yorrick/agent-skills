@@ -85,9 +85,10 @@ Classify the pane:
 - `ASKING_IDLE`: waiting for a decision or guidance.
 - `CONTEXT_REQUESTED_IDLE`: agent says to clear, compact, resume, or start a
   fresh context.
+- `THROTTLED_IDLE`: provider throttling or quota limit while idle.
 - `PLAN_DONE_IDLE` / `REVIEW_DONE_IDLE`: workflow-specific boundary.
-- `ERROR`: crash, rejected command, rate limit, unknown command, or visible
-  failure.
+- `ERROR`: crash, rejected command, unknown command, or other visible
+  non-throttle failure.
 - `GONE`: tmux target disappeared.
 
 ## Monitor Loop
@@ -130,6 +131,53 @@ tmux send-keys -t <target> Enter
 ```
 
 If the pane rejects the command, stop. Do not retry with a guessed alternative.
+
+## Claude To Codex Handoff
+
+Use this only when the user explicitly approves switching a throttled Claude
+Code pane to Codex, or when the current workflow explicitly authorizes that
+handoff.
+
+Trigger signals include:
+
+- `THROTTLED_IDLE` from `scripts/watch-tmux-agents.sh`.
+- Claude text such as "Server is temporarily limiting requests",
+  "This request would exceed your account's rate limit", or
+  `AIProvider::Errors::RateLimited`.
+
+Before switching:
+
+1. Capture the pane and identify the Claude session ID if visible.
+2. Find the Claude transcript path when available.
+3. Build a handoff prompt that includes:
+   - the Claude session ID,
+   - transcript path,
+   - repo path,
+   - reason Claude stopped,
+   - whether GSD was in use,
+   - the user's current task in plain language.
+4. Confirm the target pane is idle.
+
+Then run:
+
+```bash
+scripts/claude-to-codex-handoff.sh --target <target> --prompt-file <handoff-prompt-file>
+```
+
+The helper sends `exit`, waits for the pane to return to a shell, then starts
+Codex in the same working directory with:
+
+```bash
+codex --sandbox danger-full-access --ask-for-approval on-request
+```
+
+That is "no sandbox, not YOLO": filesystem/network sandboxing is disabled, but
+Codex still asks for approval when its policy requires it. If the user wants the
+full bypass mode, they must explicitly ask for that variant.
+
+If `exit` does not return to a shell, the helper stops. Do not try `/exit`,
+Ctrl-C, or another alternate exit unless the user approves that specific next
+attempt.
 
 ## Context Commands
 

@@ -60,6 +60,10 @@ Codex:
 - `/clear` clears the terminal and starts a fresh chat in the same CLI session.
 - `/compact` summarizes the visible conversation to free context tokens.
 - `/status` shows context usage and rate-limit/session details.
+- For Claude-to-Codex handoff, the default tested command mode is
+  `codex --sandbox danger-full-access --ask-for-approval on-request`.
+  This disables sandboxing without using the full
+  `--dangerously-bypass-approvals-and-sandbox` mode.
 
 ## Host Tool Mapping
 

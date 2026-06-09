@@ -117,13 +117,18 @@ contains() {
 classify_pane() {
   local pane="$1"
 
-  if contains "$pane" 'fatal error|panic:|traceback \(most recent|command not found|unknown command|API Error|rate limit|connection (refused|reset)|out of context|auto-compact crashed'; then
-    printf 'ERROR|visible error, rejected command, crash, or rate limit'
+  if contains "$pane" 'esc to interrupt|Compacting|Cerebrating|Effecting|Thinking|Working|running|tokens\)|· [0-9]+\.?[0-9]*[ms] ·|↑ [0-9]+ tokens'; then
+    printf 'WORKING|busy or not safely interruptible'
     return
   fi
 
-  if contains "$pane" 'esc to interrupt|Compacting|Cerebrating|Effecting|Thinking|Working|running|tokens\)|· [0-9]+\.?[0-9]*[ms] ·|↑ [0-9]+ tokens'; then
-    printf 'WORKING|busy or not safely interruptible'
+  if contains "$pane" 'API Error: Server is temporarily limiting requests|This request would exceed your account.s rate limit|AIProvider::Errors::RateLimited|rate limited by AI provider|provider.*rate limit|HTTP 429|[^0-9]429[^0-9]'; then
+    printf 'THROTTLED_IDLE|provider throttling or quota limit; eligible for approved handoff'
+    return
+  fi
+
+  if contains "$pane" 'fatal error|panic:|traceback \(most recent|command not found|unknown command|connection (refused|reset)|out of context|auto-compact crashed'; then
+    printf 'ERROR|visible error, rejected command, crash, or non-throttle failure'
     return
   fi
 

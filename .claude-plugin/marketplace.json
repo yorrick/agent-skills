@@ -38,7 +38,7 @@
       "name": "agent-session-monitor",
       "source": "./agent-session-monitor",
       "description": "Monitor and steer Claude Code, Codex, and other terminal coding agents through tmux panes.",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "author": {
         "name": "Yorrick Jansen"
       }

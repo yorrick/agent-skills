@@ -42,6 +42,15 @@
       "author": {
         "name": "Yorrick Jansen"
       }
+    },
+    {
+      "name": "local-llm",
+      "source": "./local-llm",
+      "description": "Delegate simple tasks from Claude Code to local LLMs served by LM Studio — via the pi agent (/pi-local) or a bounded read-only agent loop (/ask-local).",
+      "version": "0.1.0",
+      "author": {
+        "name": "Yorrick Jansen"
+      }
     }
   ]
 }

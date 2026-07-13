@@ -135,6 +135,11 @@ def query(prompt, model, think, max_tokens, system, base_url, stream):
         print(f"[qwen: {p_tok:,} prompt + {c_tok:,} completion tok]")
 
 
+def die(msg, code=1) -> NoReturn:
+    print(f"Error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
 def die_conn(base_url, e) -> NoReturn:
     print(f"Error: cannot reach LM Studio at {base_url}", file=sys.stderr)
     print(
@@ -172,13 +177,15 @@ def main():
         return
 
     if not sys.stdin.isatty():
-        # Read stdin only when it's the sole prompt source, or when data is
-        # already available — a non-tty stdin left open by a subprocess must
-        # not block when the prompt was given as an argument.
+        # Read stdin unconditionally when it's the sole prompt source. When a
+        # prompt argument was also given, wait up to 1s for the first piped
+        # byte, then read to EOF — so a real (possibly slow) producer still
+        # gets prepended, while a non-tty stdin left open by a subprocess
+        # can only delay us by the grace window instead of blocking forever.
         stdin_content = ""
         if not args.prompt:
             stdin_content = sys.stdin.read().strip()
-        elif select.select([sys.stdin], [], [], 0)[0]:
+        elif select.select([sys.stdin], [], [], 1.0)[0]:
             stdin_content = sys.stdin.read().strip()
         if stdin_content:
             args.prompt = f"{stdin_content}\n\n{args.prompt}" if args.prompt else stdin_content
@@ -191,12 +198,8 @@ def main():
     except urllib.error.URLError as e:
         die_conn(args.url, e)
     if args.model not in available:
-        print(f"Error: model '{args.model}' is not loaded in LM Studio at {args.url}.", file=sys.stderr)
-        if available:
-            print("  Available models: " + ", ".join(available), file=sys.stderr)
-        else:
-            print("  No models are currently loaded.", file=sys.stderr)
-        sys.exit(2)
+        detail = "  Available models: " + ", ".join(available) if available else "  No models are currently loaded."
+        die(f"model '{args.model}' is not loaded in LM Studio at {args.url}.\n{detail}", code=2)
 
     try:
         query(args.prompt, args.model, args.think, args.max_tokens, args.system, args.url, args.stream)

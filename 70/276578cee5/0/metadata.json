@@ -1,0 +1,37 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "70276578cee5",
+  "session_id": "54d51b0e-de40-4995-8f85-ebb683aa8730",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-13T20:58:38.225436Z",
+  "branch": "add-local-llm-plugin",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "local-llm/README.md",
+    "local-llm/commands/ask-local.md",
+    "local-llm/commands/pi-local.md",
+    "local-llm/scripts/agent_lm.py",
+    "local-llm/scripts/query_lm.py"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "cdf297a75251",
+  "token_usage": {
+    "input_tokens": 20,
+    "cache_creation_tokens": 52650,
+    "cache_read_tokens": 614655,
+    "output_tokens": 1832,
+    "api_call_count": 10
+  },
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-07-13T20:58:38.165378Z",
+    "agent_lines": 0,
+    "human_added": 2260,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 2260,
+    "agent_percentage": 0
+  }
+}

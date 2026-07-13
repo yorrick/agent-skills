@@ -10,7 +10,13 @@ Routers/proxies that repoint Claude Code's model endpoint corrupt tool calls and
 
 ### `/pi-local` — full local agent via [pi](https://github.com/badlogic/pi-mono)
 
-The primary command. Claude composes a per-task system-prompt briefing and delegates to `pi -p` pointed at LM Studio. Scout mode by default (`--exclude-tools edit,write`); pass `--write` to let the local model modify files (Claude shows `git diff --stat` afterward). pi discovers `AGENTS.md`/`CLAUDE.md` in the target repo itself.
+The primary command. Claude composes a per-task system-prompt briefing dynamically and delegates to `pi -p` pointed at LM Studio, controlling exactly which pi tools the local model gets via an explicit allowlist:
+
+- default (scout mode): `--tools read,bash` — explore and report; pi's edit/write tools are off (bash could still write in principle — the briefing instructs report-only; use `--tools read` for mechanically read-only)
+- `--write`: expands to `--tools read,bash,edit,write` (Claude shows `git diff --stat` afterward)
+- `--tools <list>`: your own allowlist, e.g. `--tools read` for a no-bash pure reader
+
+pi discovers `AGENTS.md`/`CLAUDE.md` in the target repo itself, so project conventions ride along for free.
 
 Requires: `pi` CLI with an `lmstudio` provider in `~/.pi/agent/models.json`, e.g.:
 
@@ -41,7 +47,11 @@ Usage:
 
 A dependency-free fallback (stdlib-only Python, no pi required): a hard-budgeted explore-and-answer loop with `read_file`/`list_dir`/`grep` tools, per-file truncation, binary refusal, and token accounting. Use when you want guaranteed read-only behavior with mechanical caps.
 
-Forked from [alisorcorp/ask-local](https://github.com/alisorcorp/ask-local) (MIT). Local modifications: `--context` flag (Claude composes the system-prompt briefing per delegation) and default model set to `qwen3-coder-30b-a3b-instruct-mlx`.
+Forked from [alisorcorp/ask-local](https://github.com/alisorcorp/ask-local) (MIT). Local modifications: `--context` flag (Claude composes the system-prompt briefing per delegation), default model set to `qwen3-coder-30b-a3b-instruct-mlx`, grep symlink containment, per-read budget enforcement, and truncation clamping.
+
+### `scripts/query_lm.py` — one-shot utility
+
+Not wired to a command: a minimal prompt-in/answer-out helper (no agent loop, no file tools) for quick direct queries or shell pipelines: `uv run --script scripts/query_lm.py "your prompt"` (also accepts piped stdin).
 
 ## Model strategy
 

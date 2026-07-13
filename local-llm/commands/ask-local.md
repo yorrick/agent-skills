@@ -1,7 +1,7 @@
 ---
 description: Delegate a task to the local LM Studio model (bounded read-only agent loop — reads/greps project files itself, keeps content out of Claude's context). Flags pass through to agent_lm.py.
 argument-hint: [--dir DIR] [--model MODEL] [--context TEXT] [--think] [--max-turns N] [--read-budget N] [--max-read-chars N] [--max-file-bytes N] [--no-stream] [--quiet] <task>
-allowed-tools: Bash(uv run:*)
+allowed-tools: Bash(uv run --script ${CLAUDE_PLUGIN_ROOT}/scripts/agent_lm.py:*)
 ---
 
 The user wants to delegate a task to the local LM Studio model. The task description (and any flags) is: $ARGUMENTS

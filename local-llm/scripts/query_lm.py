@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.12"
 # dependencies = []
@@ -31,6 +31,7 @@ Notes:
 
 import argparse
 import json
+import select
 import sys
 import urllib.error
 import urllib.request
@@ -171,12 +172,17 @@ def main():
         return
 
     if not sys.stdin.isatty():
-        stdin_content = sys.stdin.read().strip()
-        if args.prompt:
-            args.prompt = f"{stdin_content}\n\n{args.prompt}"
-        else:
-            args.prompt = stdin_content
-    elif not args.prompt:
+        # Read stdin only when it's the sole prompt source, or when data is
+        # already available — a non-tty stdin left open by a subprocess must
+        # not block when the prompt was given as an argument.
+        stdin_content = ""
+        if not args.prompt:
+            stdin_content = sys.stdin.read().strip()
+        elif select.select([sys.stdin], [], [], 0)[0]:
+            stdin_content = sys.stdin.read().strip()
+        if stdin_content:
+            args.prompt = f"{stdin_content}\n\n{args.prompt}" if args.prompt else stdin_content
+    if not args.prompt:
         parser.error("PROMPT is required (or pipe content via stdin)")
 
     # Preflight

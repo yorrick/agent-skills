@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.12"
 # dependencies = []
@@ -269,10 +269,11 @@ def execute_tool(name, args, work_dir, max_read_chars, max_file_bytes):
             content = p.read_text(errors="replace")
             if len(content) > max_read_chars:
                 head = max_read_chars * 6 // 10
-                tail = max_read_chars - head - 40
-                content = (
-                    content[:head] + f"\n\n...[truncated — file is {len(content):,} chars]...\n\n" + content[-tail:]
-                )
+                # Clamp: for tiny --max-read-chars, a negative tail slice would
+                # silently return most of the file instead of truncating.
+                tail = max(max_read_chars - head - 40, 0)
+                marker = f"\n\n...[truncated — file is {len(content):,} chars]...\n\n"
+                content = content[:head] + marker + (content[-tail:] if tail else "")
             return content
 
         if name == "list_dir":
@@ -322,15 +323,20 @@ def execute_tool(name, args, work_dir, max_read_chars, max_file_bytes):
                         continue
                     fpath = Path(dirpath) / fname
                     try:
-                        if fpath.stat().st_size > max_file_bytes:
+                        # A symlinked file can point outside the working directory;
+                        # enforce the same containment guarantee as read_file.
+                        resolved = fpath.resolve()
+                        if not _within(resolved, work_dir):
                             continue
-                        if fpath.suffix.lower() in BINARY_EXTS:
+                        if resolved.stat().st_size > max_file_bytes:
                             continue
-                        with open(fpath, "rb") as f:
+                        if resolved.suffix.lower() in BINARY_EXTS:
+                            continue
+                        with open(resolved, "rb") as f:
                             sample = f.read(512)
                         if b"\0" in sample:
                             continue
-                        with open(fpath, errors="replace") as f:
+                        with open(resolved, errors="replace") as f:
                             for lineno, line in enumerate(f, 1):
                                 if regex.search(line):
                                     try:
@@ -542,10 +548,9 @@ def run_agent(
     for turn in range(max_turns):
         log(f"[turn {turn + 1}]")
 
-        # Stream content only when tools are off (i.e., final-answer turn).
-        # On tool-call turns, streaming content chunks would be noise before
-        # the tool_calls arrive.
-        should_stream = stream and budget_exhausted
+        # Stream content deltas live on every turn: tool-call turns rarely
+        # carry content, and the final answer streams as it generates.
+        should_stream = stream
 
         def _print_chunk(s):
             sys.stdout.write(s)
@@ -595,6 +600,12 @@ def run_agent(
                 return f"[reasoning only]\n{reasoning}", stats_line()
             return "[No response]", stats_line()
 
+        # Tool-call turn: if content chunks were streamed, separate them from
+        # the upcoming progress logs.
+        if should_stream and msg.get("content"):
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+
         # Execute tool calls
         for tc in tool_calls:
             fn = tc.get("function") or {}
@@ -626,7 +637,19 @@ def run_agent(
                     cache_hit = True
 
             if not cache_hit:
-                result = execute_tool(name, args, work_dir, max_read_chars, max_file_bytes)
+                # Enforce the budget per read, not per turn: a batch of reads
+                # in one turn must not overshoot the documented hard cap.
+                if name == "read_file" and reads_made >= read_budget:
+                    result = (
+                        f"Error: read budget of {read_budget} file reads is exhausted — this read "
+                        "was refused. Produce your final answer using what you have already read."
+                    )
+                else:
+                    result = execute_tool(name, args, work_dir, max_read_chars, max_file_bytes)
+                    if name == "read_file":
+                        reads_made += 1
+                        if cache_key:
+                            reads_cache[cache_key] = {"content": result, "turn": turn + 1}
 
             messages.append(
                 {
@@ -635,11 +658,6 @@ def run_agent(
                     "content": result,
                 }
             )
-
-            if name == "read_file" and not cache_hit:
-                reads_made += 1
-                if cache_key:
-                    reads_cache[cache_key] = {"content": result, "turn": turn + 1}
 
         if reads_made >= read_budget and not budget_exhausted:
             budget_exhausted = True
@@ -723,28 +741,22 @@ def main():
     try:
         available = list_available_models(args.url)
     except urllib.error.URLError as e:
-        print(f"Error: cannot reach LM Studio at {args.url}", file=sys.stderr)
-        print(
+        die(
+            f"cannot reach LM Studio at {args.url}\n"
             "  Is LM Studio running with the Local Server enabled on this port?\n"
-            "  (In LM Studio: Developer tab → Start Server, port 1234 by default.)",
-            file=sys.stderr,
+            "  (In LM Studio: Developer tab → Start Server, port 1234 by default.)\n"
+            f"  Details: {e.reason if hasattr(e, 'reason') else e}",
+            code=2,
         )
-        print(f"  Details: {e.reason if hasattr(e, 'reason') else e}", file=sys.stderr)
-        sys.exit(2)
     if args.model not in available:
-        print(
-            f"Error: model '{args.model}' is not loaded in LM Studio at {args.url}.",
-            file=sys.stderr,
-        )
         if available:
-            print("  Available models: " + ", ".join(available), file=sys.stderr)
-            print(
-                "  Either load the requested model in LM Studio, or pass --model with one of the above.",
-                file=sys.stderr,
+            detail = (
+                "  Available models: " + ", ".join(available) + "\n"
+                "  Either load the requested model in LM Studio, or pass --model with one of the above."
             )
         else:
-            print("  No models are currently loaded. Load one in LM Studio first.", file=sys.stderr)
-        sys.exit(2)
+            detail = "  No models are currently loaded. Load one in LM Studio first."
+        die(f"model '{args.model}' is not loaded in LM Studio at {args.url}.\n{detail}", code=2)
 
     try:
         content, stats = run_agent(

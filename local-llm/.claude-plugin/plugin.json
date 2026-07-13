@@ -1,6 +1,6 @@
 {
   "name": "local-llm",
-  "description": "Delegate simple tasks from Claude Code to local LLMs served by LM Studio — via the pi agent (/pi-local) or a bounded read-only agent loop (/ask-local).",
+  "description": "Delegate simple tasks from Claude Code to local LLMs served by LM Studio via the pi agent (/pi-local) — dynamic per-task briefings and explicit tool allowlists.",
   "version": "0.1.0",
   "author": {
     "name": "Yorrick Jansen"

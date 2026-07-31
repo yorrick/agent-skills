@@ -95,6 +95,24 @@ Meta-agent skill for monitoring and steering Claude Code, Codex, and other termi
 claude plugin install agent-session-monitor@yorrick
 ```
 
+### supabase-security
+
+Access-control rules for Supabase projects exposed directly to a browser via PostgREST:
+the three enforcement layers (`GRANT`, RLS, triggers) and **the order they run in**, the
+traps that cause privilege escalation, and how anon keys, JWTs and `service_role` differ.
+
+Ships a read-only audit script that **bundles [Splinter](https://github.com/supabase/splinter)**
+— Supabase's own SQL linter, the engine behind the dashboard's Security Advisor —
+vendored unmodified, and adds four rules it does not have (policies with no `FOR`/`TO`,
+missing `RESTRICTIVE` tenant isolation, the delete-and-reinsert column bypass, and
+`TRUNCATE`, which no policy applies to). See
+[`supabase-security/README.md`](supabase-security/README.md) for the credit and licence
+position.
+
+```
+claude plugin install supabase-security@yorrick
+```
+
 ## Local Development
 
 For testing or development, load a plugin directly:

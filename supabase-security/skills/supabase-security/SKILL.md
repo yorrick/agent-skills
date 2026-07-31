@@ -1,12 +1,18 @@
 ---
 name: supabase-security
-description: "Access control for Supabase projects where a browser talks straight to PostgREST with no API middle layer. Load this skill BEFORE writing or reviewing anything that decides who can read or write data: RLS policies, GRANT/REVOKE statements, SECURITY DEFINER functions, RPCs, views, triggers used as authorization, migrations that touch permissions, custom JWT claims, or code that handles an anon/publishable key or a service_role/secret key. Also load it when diagnosing 'permission denied for table', a 403 or empty result that should have returned rows, when a user can see or change data belonging to another tenant, or when asked to audit a Supabase project for privilege escalation. Triggers on: RLS, row level security, Supabase policy, anon key, service_role, privilege escalation, multi-tenant isolation, column level security, PostgREST."
+description: "Access control for Supabase projects where a browser talks straight to PostgREST with no API middle layer. Load this skill BEFORE writing or reviewing anything that decides who can read or write data: RLS policies, GRANT/REVOKE statements, SECURITY DEFINER functions, RPCs, views, triggers used as authorization, migrations that touch permissions, custom JWT claims, or code that handles an anon/publishable key or a service_role/secret key. Also load it when diagnosing 'permission denied for table', a 403 or empty result that should have returned rows, when a user can see or change data belonging to another tenant, or when asked to audit a Supabase project for privilege escalation. Bundles Supabase's own Splinter linter and adds four checks it lacks. Triggers on: RLS, row level security, Supabase policy, anon key, service_role, privilege escalation, multi-tenant isolation, column level security, PostgREST, Splinter, Security Advisor."
 license: MIT
 ---
 
 # Supabase Access Control
 
 With no API between the browser and the database, **Postgres is the entire security perimeter**. There is nowhere else to put a check a determined client cannot route around. Every rule here follows from that.
+
+> **Built on Supabase's own linter.** The audit script bundles
+> [Splinter](https://github.com/supabase/splinter) — the SQL linter behind the
+> dashboard's Security Advisor and the `get_advisors` MCP tool — and adds four checks it
+> does not have. Splinter is Supabase's work, vendored unmodified at
+> `vendor/splinter.sql`; see [Credits](#credits).
 
 ## The one-paragraph model
 
@@ -270,9 +276,40 @@ With no `--schema`, it audits whatever PostgREST actually exposes (`pgrst.db_sch
 
 **Neither replaces a negative test suite.** Lints check configuration; only tests check reality. Assert 401/403/empty on every table, view and RPC using (a) the publishable key alone and (b) a *second tenant's* JWT.
 
+## Credits
+
+**[Splinter](https://github.com/supabase/splinter) is Supabase's, not ours.** It is a
+pure-SQL linter — ~29 rules, one `.sql` file each, compiled into a single
+self-contained query that upstream publishes at its repo root explicitly for
+project linting. It powers the dashboard's Security Advisor and the `get_advisors`
+MCP tool.
+
+It is vendored here **unmodified** at `vendor/splinter.sql`, pinned to the commit
+recorded in `vendor/SPLINTER_VERSION`. Vendoring rather than fetching keeps the audit
+offline-capable and reproducible; fetching at runtime would make findings depend on
+whatever upstream happened to be that morning.
+
+What this skill adds around it:
+
+| | |
+|---|---|
+| Four rules Splinter lacks | `R1` (policies with no `FOR`/`TO`), `R2` (no `RESTRICTIVE` policy), `R4` (delete-and-reinsert), `R11` (`TRUNCATE`) |
+| `pgrst.db_schemas` is set first | without it, several of Splinter's API-exposure lints silently fall back to `public` only — upstream's README warns about this |
+| One read-only transaction | server-enforced, not merely asserted |
+| Filtering and formatting | `EXTERNAL` + `SECURITY` findings only, `--json` for CI, `--no-splinter` to skip |
+
+You can run Splinter without any of this — `psql -f vendor/splinter.sql "$DATABASE_URL"`
+works on its own. Nothing here replaces or forks it.
+
+**Licence note:** Splinter has no LICENSE file. It is a public Supabase repository
+distributed for exactly this use, but there is no explicit grant. It is kept unmodified
+and attributed in its own directory so it can be removed cleanly. Confirm the position
+with Supabase before publishing this skill more widely. See `vendor/README.md`.
+
 ## References
 
 - `references/trigger-guard-pattern.md` — full column-authorization trigger, with tests
 - `references/threat-checklist.md` — pre-merge review checklist
+- [Splinter](https://github.com/supabase/splinter) — Supabase's linter, bundled here · [its rule docs](https://supabase.com/docs/guides/database/database-advisors)
 - [Postgres RLS](https://www.postgresql.org/docs/current/ddl-rowsecurity.html) · [CREATE POLICY](https://www.postgresql.org/docs/current/sql-createpolicy.html) · [Privileges](https://www.postgresql.org/docs/current/ddl-priv.html)
-- [Supabase: Hardening the Data API](https://supabase.com/docs/guides/database/hardening-data-api) · [Database Advisors](https://supabase.com/docs/guides/database/database-advisors) · [Column Level Security](https://supabase.com/docs/guides/database/postgres/column-level-security)
+- [Supabase: Hardening the Data API](https://supabase.com/docs/guides/database/hardening-data-api) · [Column Level Security](https://supabase.com/docs/guides/database/postgres/column-level-security)

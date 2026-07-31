@@ -8,7 +8,8 @@ grant, function, view, or trigger. Each line maps to a rule in `SKILL.md`.
 - [ ] Every `CREATE POLICY` names a command: `FOR SELECT` / `FOR INSERT` / `FOR UPDATE` / `FOR DELETE`. **No bare policies.** (R1)
 - [ ] Every policy names its roles: `TO authenticated` / `TO anon`. (R1)
 - [ ] `WITH CHECK` stated explicitly on `ALL` and `UPDATE` policies. (R3)
-- [ ] Tenant isolation is **RESTRICTIVE**, not permissive. (R2)
+- [ ] Tenant isolation is **RESTRICTIVE** — *and* a permissive policy exists to grant access at all, or the table is default-deny. (R2)
+- [ ] Any restrictive policy exempts staff/admins if they need cross-tenant access, since it constrains them too. (R2)
 - [ ] No policy reads `user_metadata` for authorization. (R8)
 - [ ] Auth calls wrapped: `(select auth.uid())`, not bare `auth.uid()`.
 - [ ] The table has RLS **enabled**, not merely policies defined. (R10)
@@ -17,7 +18,8 @@ grant, function, view, or trigger. Each line maps to a rule in `SKILL.md`.
 ## Grants
 
 - [ ] `REVOKE` precedes any column `GRANT` — privileges are additive, and a table grant implies every column.
-- [ ] Column `UPDATE` grants are paired with `REVOKE INSERT, DELETE`, or the boundary is fake. (R4)
+- [ ] Column `UPDATE` grants are paired with a revoke of `INSERT` **or** `DELETE` — holding both defeats the boundary. (R4)
+- [ ] `TRUNCATE` is not granted to `anon`/`authenticated`. No policy applies to it. (R11)
 - [ ] `anon` explicitly revoked where it should not write.
 - [ ] Any admin path does **not** depend on re-granting a column to `authenticated` — that grants it to every user. (R2, "Admins are not a database role")
 

@@ -20,12 +20,26 @@ The key principle: **nothing gets posted to the PR until you've reviewed and app
 
 Scripts in `scripts/` handle deterministic work (prompt building, GitHub posting). The LLM handles semantic work (reading raw outputs, clustering duplicates, synthesizing consensus, interactive discussion).
 
+## Step 0: Locate the plugin
+
+`CLAUDE_PLUGIN_ROOT` is set by Claude Code only — **Codex sets no plugin-root variable
+at all**, so it would expand to an empty string. Resolve the root once, then reuse it:
+
+```bash
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
+[ -f "$PLUGIN_ROOT/scripts/build_prompts.py" ] || PLUGIN_ROOT=$(
+  find ~/.claude/plugins ~/.codex/plugins ~/.agents -path "*pr-review*" \
+       -name build_prompts.py 2>/dev/null | head -1 | xargs -r dirname | xargs -r dirname
+)
+echo "$PLUGIN_ROOT"
+```
+
 ## Step 1: Build Prompts
 
 Run the prompt builder script to fetch PR metadata and create prompt files:
 
 ```bash
-uv run "${CLAUDE_PLUGIN_ROOT}/scripts/build_prompts.py" <PR_NUMBER> --out-dir /tmp
+uv run "$PLUGIN_ROOT/scripts/build_prompts.py" <PR_NUMBER> --out-dir /tmp
 ```
 
 This outputs JSON with paths to per-provider prompts:
@@ -56,7 +70,8 @@ Save all these values — you'll need them throughout.
 
 ### Select review profile
 
-Read the profile definitions from `${CLAUDE_PLUGIN_ROOT}/skills/pr-review/references/profiles.md`.
+Read the profile definitions from `$PLUGIN_ROOT/skills/pr-review/references/profiles.md`
+(resolve `$PLUGIN_ROOT` as in Step 0).
 
 Determine which profile to use:
 - If the user specified a profile (e.g., "review PR #365 with quality profile"), use that.
@@ -248,7 +263,7 @@ These only apply to LOW severity — CRITICAL, HIGH, and MEDIUM always require i
 Write the approved findings to a JSON file (one entry per finding with file, line, severity, category, confidence, description, suggestion, providers), then run the post script:
 
 ```bash
-uv run "${CLAUDE_PLUGIN_ROOT}/scripts/post_review.py" \
+uv run "$PLUGIN_ROOT/scripts/post_review.py" \
   /tmp/pr-review-approved-<PR>.json \
   --repo <repo> --pr <PR> --commit-sha <commit_sha>
 ```

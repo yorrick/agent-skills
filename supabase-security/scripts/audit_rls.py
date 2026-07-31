@@ -53,26 +53,40 @@ QUERIES: list[tuple[str, str, str, str]] = [
         "ERROR",
         "R10-rls-disabled",
         """
-        SELECT c.relnamespace::regnamespace || '.' || c.relname,
-               'RLS is NOT enabled - readable and writable by anyone with the publishable key'
+        SELECT n.nspname || '.' || c.relname,
+               'RLS is NOT enabled - every privilege the API roles hold is unrestricted ('
+                 || coalesce((SELECT string_agg(DISTINCT r.rolname || ':' || pr.priv, ', ')
+                                FROM unnest(%(api_roles)s::text[]) AS r(rolname)
+                                CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE')) AS pr(priv)
+                               WHERE has_table_privilege(r.rolname, c.oid, pr.priv)),
+                             'no API-role grants - lower risk') || ')'
           FROM pg_class c
-         WHERE c.relkind = 'r'
-           AND c.relnamespace::regnamespace::text = ANY(%(schemas)s)
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE c.relkind IN ('r', 'p')
+           AND n.nspname = ANY(%(schemas)s)
            AND NOT c.relrowsecurity
         """,
+        # Reason: name the actual grants rather than asserting "anyone can read
+        # and write". A table with no API-role grants is far lower risk, and
+        # over-asserting exploitability is how a linter earns a reputation for
+        # crying wolf and stops being run. relkind 'p' covers partitioned roots.
         "Tables exposed to the API with row-level security switched off.",
     ),
     (
-        "ERROR",
-        "R1-policy-no-for",
+        "WARN",
+        "R1-policy-for-all",
         """
         SELECT p.schemaname || '.' || p.tablename || ' :: ' || p.policyname,
-               'policy has no FOR clause - it governs SELECT, INSERT, UPDATE and DELETE'
+               'policy covers ALL commands - if FOR was omitted this is also your '
+                 || 'INSERT/UPDATE/DELETE rule; confirm it is intentional'
           FROM pg_policies p
          WHERE p.schemaname = ANY(%(schemas)s)
            AND p.cmd = 'ALL'
         """,
-        "A policy named like a read rule is silently also the write rule.",
+        # Reason: Postgres does not record whether ALL came from an omitted FOR
+        # or an explicit `FOR ALL`, so this cannot prove a mistake -- it asks for
+        # confirmation instead. Downgraded from ERROR for the same reason.
+        "A policy named like a read rule may silently be the write rule too.",
     ),
     (
         "WARN",
@@ -82,8 +96,13 @@ QUERIES: list[tuple[str, str, str, str]] = [
                'policy applies TO PUBLIC (every role) - name anon/authenticated explicitly'
           FROM pg_policies p
          WHERE p.schemaname = ANY(%(schemas)s)
-           AND p.roles = '{0}'
+           AND p.roles = ARRAY['public']::name[]
         """,
+        # Reason: the RAW catalogue (pg_policy.polroles) stores PUBLIC as {0},
+        # but the pg_policies VIEW resolves role OIDs to names, so PUBLIC reads
+        # as {public}. Matching '{0}' here silently matched nothing -- a check
+        # that never fires is indistinguishable from a clean database, which is
+        # why the original bug survived testing.
         "Omitted TO defaults to PUBLIC; naming the role is also a large perf win.",
     ),
     (
@@ -124,24 +143,29 @@ QUERIES: list[tuple[str, str, str, str]] = [
         "R4-delete-reinsert",
         """
         SELECT t.table_schema || '.' || t.table_name || ' (' || t.grantee || ')',
-               'column-level UPDATE granted, but INSERT/DELETE also granted - '
+               'column-level UPDATE granted, but the role holds BOTH INSERT and DELETE - '
                'the column revoke can be bypassed by deleting and re-inserting the row'
           FROM (SELECT DISTINCT table_schema, table_name, grantee
                   FROM information_schema.column_privileges
                  WHERE privilege_type = 'UPDATE'
                    AND grantee = ANY(%(api_roles)s)
                    AND table_schema = ANY(%(schemas)s)) t
-         WHERE EXISTS (SELECT 1 FROM information_schema.table_privileges tp
-                        WHERE tp.table_schema = t.table_schema
-                          AND tp.table_name = t.table_name
-                          AND tp.grantee = t.grantee
-                          AND tp.privilege_type IN ('INSERT', 'DELETE'))
-           AND NOT EXISTS (SELECT 1 FROM information_schema.table_privileges tp
-                            WHERE tp.table_schema = t.table_schema
-                              AND tp.table_name = t.table_name
-                              AND tp.grantee = t.grantee
-                              AND tp.privilege_type = 'UPDATE')
+         WHERE has_table_privilege(t.grantee,
+                                   format('%%I.%%I', t.table_schema, t.table_name), 'INSERT')
+           AND has_table_privilege(t.grantee,
+                                   format('%%I.%%I', t.table_schema, t.table_name), 'DELETE')
+           AND NOT has_table_privilege(t.grantee,
+                                       format('%%I.%%I', t.table_schema, t.table_name), 'UPDATE')
         """,
+        # Reason: the bypass needs BOTH -- DELETE alone destroys the row but
+        # cannot recreate it with attacker-chosen values, so it is data loss,
+        # not privilege escalation. An earlier version used IN ('INSERT','DELETE')
+        # and flagged DELETE-only tables as escalations.
+        #
+        # has_table_privilege (rather than information_schema) is deliberate: it
+        # resolves privileges inherited via role membership and PUBLIC, which the
+        # information_schema views do not show. format('%%I.%%I', ...) quotes
+        # mixed-case and reserved schema/table names correctly.
         "The highest-value check here - undocumented by Supabase and Postgres alike.",
     ),
     (
@@ -216,6 +240,24 @@ QUERIES: list[tuple[str, str, str, str]] = [
         "raw_user_meta_data is user-writable through the auth API. Use app_metadata.",
     ),
     (
+        "ERROR",
+        "R11-truncate-granted",
+        """
+        SELECT n.nspname || '.' || c.relname || ' (' || r.rolname || ')',
+               'TRUNCATE granted - NO RLS policy applies to it; this role can wipe '
+                 || 'every tenant''s rows regardless of isolation'
+          FROM pg_class c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+          CROSS JOIN unnest(%(api_roles)s::text[]) AS r(rolname)
+         WHERE c.relkind IN ('r', 'p')
+           AND n.nspname = ANY(%(schemas)s)
+           AND has_table_privilege(r.rolname, c.oid, 'TRUNCATE')
+        """,
+        # Reason: RLS governs rows; TRUNCATE is a whole-table operation and no
+        # policy is consulted. Perfect tenant isolation does not survive it.
+        "The gap RLS cannot cover at all.",
+    ),
+    (
         "WARN",
         "R10-anon-writes",
         """
@@ -249,7 +291,14 @@ def run_audit(db_url: str, schemas: list[str]) -> list[Finding]:
                     # stop SQL being assembled from runtime strings.
                     cur.execute(cast("LiteralString", sql), params)
                 except psycopg.Error as exc:
-                    findings.append(Finding("INFO", rule, "<check failed>", f"{type(exc).__name__}: {exc}".strip()))
+                    findings.append(
+                        Finding(
+                            "INFO",
+                            rule,
+                            "<check failed>",
+                            f"{type(exc).__name__}: {exc}".strip(),
+                        )
+                    )
                     conn.rollback()
                     continue
                 for obj, detail in cur.fetchall():

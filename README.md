@@ -24,16 +24,50 @@ Restart the CLI afterwards — both report that changes need one.
 
 ### Updating
 
-Neither harness updates an installed plugin on its own.
+Both harnesses auto-update — differently, and Codex's behaviour is undocumented.
+
+| | Claude Code | Codex |
+|---|---|---|
+| Auto-update | **Opt-in per marketplace**, off by default for third-party | **Always on**, no opt-out found |
+| Fires | ~10 min after session start | At app-server startup |
+| Updates the installed plugin? | No — marketplace metadata only | **Yes** — force-reinstalls |
+| Takes effect | After `/reload-plugins` or restart | Immediately; caches invalidated live |
+
+Enable it on Claude Code with `/plugin` → Marketplaces → `yorrick` → Enable auto-update.
+
+To update by hand:
 
 ```
 # Claude Code — two steps; refreshing the marketplace alone does not upgrade
 claude plugin marketplace update yorrick
 claude plugin update <plugin-name>@yorrick
 
-# Codex — one step
+# Codex — one step, despite the help text saying "snapshots"
 codex plugin marketplace upgrade
 ```
+
+Verify against the cache rather than `plugin list`, which only reflects config:
+
+```
+ls ~/.claude/plugins/cache/yorrick/<plugin-name>/
+ls ~/.codex/plugins/cache/yorrick/<plugin-name>/
+```
+
+**Codex auto-update is a supply-chain path.** Anything pushed to `main` here reaches
+every installed machine at next Codex startup, with no review step and no notification.
+Protect this branch accordingly.
+
+### Removing
+
+```
+claude plugin uninstall <plugin-name>@yorrick
+codex plugin remove <plugin-name>@yorrick
+```
+
+Removing the *marketplace* is a bigger hammer — in Claude Code it also uninstalls every
+plugin that came from it. On Codex, removing a plugin while leaving the marketplace
+registered may see it reinstalled by the startup auto-upgrade; check the cache path above
+after a restart.
 
 ### Renamed from `claude-code-plugins`
 
@@ -49,7 +83,6 @@ plugins.
 claude plugin marketplace add yorrick/claude-code-plugins
 ```
 </details>
-```
 
 ## Plugins
 

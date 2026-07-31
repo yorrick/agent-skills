@@ -104,7 +104,19 @@ codex plugin marketplace add yorrick/agent-skills
 codex plugin add <name>@yorrick
 ```
 
-Neither harness auto-updates an installed plugin. Claude Code needs two steps
-(`plugin marketplace update yorrick`, then `plugin update <name>@yorrick`); Codex does
-both with `codex plugin marketplace upgrade`. Restart afterwards — Codex may serve a
+Both harnesses auto-update, differently. Claude Code's is **opt-in per marketplace** (off
+by default for third-party), fetches ~10 min after session start, and updates marketplace
+metadata only — the installed plugin still needs `plugin update`. Codex's is **always on
+and undocumented**: a `plugins-marketplace-auto-upgrade` thread runs at app-server startup
+and force-reinstalls every git marketplace's plugins, gated only on `plugins_enabled`.
+
+Manually: Claude Code needs two steps (`plugin marketplace update yorrick`, then
+`plugin update <name>@yorrick`); Codex does both with `codex plugin marketplace upgrade`,
+despite its help text saying only "snapshots". Restart afterwards — Codex may serve a
 stale skill on a *resumed* thread ([codex#16607](https://github.com/openai/codex/issues/16607)).
+
+Check `ls ~/.codex/plugins/cache/yorrick/<name>/` rather than `plugin list`: the cache is
+what the model loads, `list` only reflects config.
+
+Because Codex reinstalls from `main` unprompted, a push here lands on every installed
+machine with no review step. Treat this branch as a release channel.

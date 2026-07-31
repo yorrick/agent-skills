@@ -3,42 +3,36 @@
 # requires-python = ">=3.11"
 # dependencies = ["psycopg[binary]>=3.1", "typer>=0.12"]
 # ///
-"""Audit a Supabase/Postgres database for access-control defects Splinter misses.
+"""Audit a Supabase/Postgres database for access-control defects.
 
 READ-ONLY. Every query reads catalogue tables; nothing is written, and the
 connection is opened in a read-only transaction as a belt-and-braces guard.
 
-## This is a SUPPLEMENT, not a replacement
+Runs TWO rule sets in one pass:
 
-Supabase ships its own linter -- Splinter (https://github.com/supabase/splinter),
-surfaced as the Security Advisor in the dashboard and via the MCP `get_advisors`
-tool. It is maintained against the platform and is authoritative. RUN IT FIRST.
+1. SPLINTER -- Supabase's own linter (vendor/splinter.sql), the engine behind the
+   dashboard's Security Advisor and the `get_advisors` MCP tool. Authoritative,
+   maintained against the platform, ~29 rules. Running it here means one command
+   gives complete coverage instead of relying on someone remembering a second
+   tool, which is exactly what does not happen.
 
-An earlier version of this script duplicated seven of Splinter's rules. Those
-have been REMOVED, because a hand-rolled duplicate is worse than no check: it is
-not maintained, and when it is subtly wrong it grants false assurance. Two of
-them genuinely were wrong -- `USING (true)` detection missed `1=1` and any
-whitespace variant, and the SECURITY DEFINER check was a straight
-reimplementation of Splinter 0028/0029.
+2. FOUR RULES SPLINTER DOES NOT HAVE:
 
-What remains is only what Splinter does NOT cover:
+       R4   delete-and-reinsert defeating a column-level UPDATE revoke
+       R11  TRUNCATE, which no RLS policy applies to
+       R1   policies covering ALL commands, or applying TO PUBLIC
+       R2   RLS tables with no RESTRICTIVE policy pinning tenancy
 
-    R4   delete-and-reinsert defeating a column-level UPDATE revoke
-    R11  TRUNCATE, which no RLS policy applies to
-    R1   policies that cover ALL commands, or apply TO PUBLIC
-    R2   RLS tables with no RESTRICTIVE policy pinning tenancy
-
-Splinter already covers, and this script deliberately does not:
-
-    0013 rls_disabled_in_public          0024 rls_policy_always_true
-    0010 security_definer_view           0011 function_search_path_mutable
-    0015 rls_references_user_metadata    0016 materialized_view_in_api
-    0028/0029 *_security_definer_function_executable
+An earlier version reimplemented seven Splinter rules by hand. Those were
+removed: an unmaintained duplicate that is subtly wrong is worse than no check,
+and two of them were -- the `USING (true)` check missed `1=1` and every
+whitespace variant.
 
 Usage:
     uv run audit_rls.py --db-url "$DATABASE_URL"
     uv run audit_rls.py --db-url "$DATABASE_URL" --json
     uv run audit_rls.py --db-url "$DATABASE_URL" --schema public --schema api
+    uv run audit_rls.py --db-url "$DATABASE_URL" --no-splinter   # own rules only
 
 Exit codes: 0 = no findings, 1 = findings, 2 = usage/connection error.
 """
@@ -47,6 +41,7 @@ from __future__ import annotations
 
 import json as jsonlib
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, LiteralString, cast
 
 import psycopg
@@ -212,7 +207,81 @@ def resolve_schemas(conn: psycopg.Connection, override: list[str] | None) -> lis
     return list(row[0]) if row and row[0] else ["public"]
 
 
-def run_audit(db_url: str, override: list[str] | None) -> tuple[list[Finding], list[str]]:
+SPLINTER_SQL = Path(__file__).resolve().parent.parent / "vendor" / "splinter.sql"
+
+
+def run_splinter(conn: psycopg.Connection, schemas: list[str]) -> list[Finding]:
+    """Run Supabase's own linter, vendored in vendor/splinter.sql.
+
+    Splinter is the engine behind the dashboard's Security Advisor. Running it
+    here means one command gives complete coverage instead of the user having to
+    remember a second tool -- and remembering it is exactly what does not happen.
+
+    Safe in a read-only transaction: the file is a single SELECT plus a DO block
+    that only reads storage.buckets and sets a transaction-local GUC. Verified.
+    """
+    if not SPLINTER_SQL.is_file():
+        return [
+            Finding(
+                "INFO",
+                "splinter",
+                "<not available>",
+                f"vendor/splinter.sql not found at {SPLINTER_SQL}; skipping Supabase's own lints",
+            )
+        ]
+
+    findings: list[Finding] = []
+    with conn.cursor() as cur:
+        try:
+            # Reason: Splinter's API-exposure lints read pgrst.db_schemas, which
+            # PostgREST sets at runtime and a plain psql connection does not have.
+            # Without this they silently fall back to `public` only -- upstream
+            # calls this out explicitly in its README.
+            cur.execute(
+                cast("LiteralString", "SELECT set_config('pgrst.db_schemas', %(s)s, true)"),
+                {"s": ", ".join(schemas)},
+            )
+            # Reason: splinter.sql is a preamble (SET, then a DO block that stashes
+            # public storage buckets in a GUC) followed by the actual SELECT. psycopg
+            # returns the results of the LAST statement in a multi-statement execute,
+            # but fetchall() then reads from the first -- which is a SET and produces
+            # no rows, raising "the last operation didn't produce records". Split on
+            # the DO terminator so the query runs as its own statement.
+            script = SPLINTER_SQL.read_text()
+            marker = "end $$;"
+            if marker in script:
+                preamble, query = script.split(marker, 1)
+                cur.execute(cast("LiteralString", preamble + marker))
+            else:
+                query = script
+            cur.execute(cast("LiteralString", query))
+            rows = cur.fetchall()
+        except psycopg.Error as exc:
+            conn.rollback()
+            return [Finding("INFO", "splinter", "<check failed>", f"{type(exc).__name__}: {exc}".strip())]
+
+    # Columns: name, title, level, facing, categories, description, detail,
+    #          remediation, metadata, cache_key
+    for row in rows:
+        name, level, facing, categories = row[0], row[2], row[3], row[4]
+        detail, metadata = row[6], row[8]
+        # Reason: INTERNAL lints are for Supabase's own operators, and PERFORMANCE
+        # ones are out of scope for a security audit. Keep the signal tight.
+        if facing != "EXTERNAL" or "SECURITY" not in (categories or []):
+            continue
+        # Reason: surface the object in its own column so splinter rows line up
+        # with ours; metadata carries schema/name for most lints.
+        obj = ""
+        if isinstance(metadata, dict) and metadata.get("name"):
+            obj = f"{metadata.get('schema', '?')}.{metadata['name']}"
+        # Reason: upstream wraps identifiers in backticks that arrive escaped.
+        findings.append(Finding(level, f"splinter:{name}", obj, detail.replace("\\`", "`")))
+    return findings
+
+
+def run_audit(
+    db_url: str, override: list[str] | None, *, with_splinter: bool = True
+) -> tuple[list[Finding], list[str]]:
     """Execute every check. Read-only; a failing check is reported, not fatal."""
     findings: list[Finding] = []
 
@@ -222,6 +291,9 @@ def run_audit(db_url: str, override: list[str] | None) -> tuple[list[Finding], l
         conn.read_only = True
         schemas = resolve_schemas(conn, override)
         params: dict[str, Any] = {"schemas": schemas, "api_roles": list(API_ROLES)}
+
+        if with_splinter:
+            findings.extend(run_splinter(conn, schemas))
 
         for severity, rule, sql, _rationale in QUERIES:
             with conn.cursor() as cur:
@@ -245,10 +317,11 @@ def main(
         None, "--schema", help="Schema to audit (repeatable). Default: whatever PostgREST exposes."
     ),
     json_output: bool = typer.Option(False, "--json", help="JSON output"),
+    splinter: bool = typer.Option(True, "--splinter/--no-splinter", help="Also run Supabase's own linter (vendored)"),
 ) -> None:
     """Audit a Supabase database for access-control defects Supabase's own linter misses."""
     try:
-        findings, schemas = run_audit(db_url, list(schema) if schema else None)
+        findings, schemas = run_audit(db_url, list(schema) if schema else None, with_splinter=splinter)
     except psycopg.Error as exc:
         # Reason: never echo the exception body - a connection string with a
         # password can appear in psycopg error text.
@@ -271,9 +344,8 @@ def main(
             typer.echo("\n" + "  ".join(f"{k}={v}" for k, v in sorted(counts.items())))
 
         typer.echo(
-            "\nThis covers ONLY what Supabase's own linter does not. Also run the "
-            "Security Advisor (dashboard, or `get_advisors` via MCP) -- it is "
-            "maintained against the platform and is authoritative for everything else."
+            "\nRules prefixed `splinter:` come from Supabase's own linter "
+            "(vendor/splinter.sql); the rest are checks it does not have."
         )
         typer.echo(
             "Neither replaces negative tests: assert denial with the publishable "

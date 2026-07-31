@@ -226,17 +226,17 @@ Process rules, learned the expensive way — each of these caused a production o
 
 ## Verifying
 
-### 1. Run Supabase's own advisors first
+### 1. Run the auditor — it includes Supabase's own linter
 
-Supabase ships [Splinter](https://github.com/supabase/splinter) as the dashboard's
-**Security Advisor**, also callable as `get_advisors` via MCP. It is maintained against
-the platform and is authoritative. It covers RLS-disabled tables, `USING (true)`,
+The script runs **two rule sets in one pass**:
+
+**Splinter**, Supabase's own linter (vendored at `vendor/splinter.sql`) — the engine
+behind the dashboard's Security Advisor and the `get_advisors` MCP tool. Authoritative,
+maintained against the platform, ~29 rules. It covers RLS-disabled tables, `USING (true)`,
 definer views, mutable `search_path`, `user_metadata` in policies, exposed materialized
-views, and browser-callable definer functions.
+views, browser-callable definer functions, and sensitive-looking column names.
 
-### 2. Then the auditor in this skill
-
-It checks **only what Splinter does not** — four things:
+**Plus four rules Splinter does not have:**
 
 | | |
 |---|---|
@@ -245,9 +245,10 @@ It checks **only what Splinter does not** — four things:
 | `R1` | policies covering ALL commands, or applying `TO PUBLIC` |
 | `R2` | RLS tables with no `RESTRICTIVE` policy pinning tenancy |
 
-Earlier versions duplicated seven Splinter rules. Those were removed: an unmaintained
-duplicate that is subtly wrong is worse than no check, and two of them were — the
-`USING (true)` check missed `1=1` and every whitespace variant.
+Findings from Splinter are prefixed `splinter:`. Pass `--no-splinter` to run only the
+four. Earlier versions reimplemented seven Splinter rules by hand; those were removed —
+an unmaintained duplicate that is subtly wrong is worse than no check, and two of them
+were (the `USING (true)` check missed `1=1` and every whitespace variant).
 
 Resolve the script's path first — a bare relative path resolves against the user's
 working directory, not the plugin, and Codex sets no plugin-root variable at all:

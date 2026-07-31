@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      # Reason: without this, the marketplace drifts from the plugin manifests
+      # silently. It already had: the hand-maintained marketplace advertised
+      # dev-loop@0.14.0 while the plugin was 0.29.0, and self-improve-skill@1.0.0
+      # while it was 2.0.0. Users were told the wrong version for months.
+      - name: Manifests are current
+        run: uv run scripts/sync_manifests.py --check
+
+      - name: Skill frontmatter is valid
+        run: uv run scripts/validate_skills.py
+
+      - name: Format
+        run: uv run ruff format --check .
+
+      # Reason: `ruff check .` currently fails on two PRE-EXISTING errors that
+      # predate this workflow (E741 in pr-review/scripts/post_review.py, E402 in
+      # self-improve-skill/scripts/session_start_hook.py). Gating on scripts/
+      # only means CI is green and meaningful today; widen to `.` in the change
+      # that fixes those two, rather than merging a red pipeline now.
+      - name: Lint
+        run: uv run ruff check scripts/

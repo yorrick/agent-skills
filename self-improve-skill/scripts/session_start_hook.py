@@ -20,7 +20,7 @@ from pathlib import Path
 # Since both scripts are in the same directory, we can import directly
 SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(SCRIPT_DIR))
-from session_end_hook import LOG_DIR, count_tool_uses, init_log_file, log, reflect_on_transcript
+from session_end_hook import init_log_file, log, reflect_on_transcript
 
 
 def find_previous_transcript(current_transcript: Path) -> Path | None:

@@ -1,0 +1,10 @@
+# The ONLY hand-edited metadata for this plugin.
+# Both harnesses' manifests are generated from it:
+#   uv run scripts/sync_manifests.py
+
+[plugin]
+name = "dev-loop"
+version = "0.29.0"
+keywords = ["development", "automation", "code-review", "workflow", "loop", "orchestration"]
+license = "MIT"
+description = """Automated development loop and ad-hoc workflow generation for orchestrating AI coding agents"""

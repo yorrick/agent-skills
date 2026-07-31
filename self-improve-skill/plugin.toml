@@ -1,0 +1,9 @@
+# The ONLY hand-edited metadata for this plugin.
+# Both harnesses' manifests are generated from it:
+#   uv run scripts/sync_manifests.py
+
+[plugin]
+name = "self-improve-skill"
+version = "2.0.0"
+license = "MIT"
+description = """Analyzes session transcripts and improves project documentation (CLAUDE.md, README, memory) based on learnings"""

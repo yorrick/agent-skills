@@ -4,16 +4,51 @@ A collection of Claude Code plugins by Yorrick Jansen.
 
 ## Installation
 
-Add this repository as a marketplace:
+Every plugin here works with **both Claude Code and Codex**.
+
+**Claude Code**
+
+```
+claude plugin marketplace add yorrick/agent-skills
+claude plugin install <plugin-name>@yorrick
+```
+
+**Codex**
+
+```
+codex plugin marketplace add yorrick/agent-skills
+codex plugin add <plugin-name>@yorrick
+```
+
+Restart the CLI afterwards — both report that changes need one.
+
+### Updating
+
+Neither harness updates an installed plugin on its own.
+
+```
+# Claude Code — two steps; refreshing the marketplace alone does not upgrade
+claude plugin marketplace update yorrick
+claude plugin update <plugin-name>@yorrick
+
+# Codex — one step
+codex plugin marketplace upgrade
+```
+
+### Renamed from `claude-code-plugins`
+
+This repo was `yorrick/claude-code-plugins`. Existing registrations keep working
+through GitHub's redirect — refresh with the update commands above. **Do not remove and
+re-add the Claude marketplace**: removing its last registration also uninstalls its
+plugins.
+
+<details>
+<summary>Legacy install (still works)</summary>
 
 ```
 claude plugin marketplace add yorrick/claude-code-plugins
 ```
-
-Then install any plugin:
-
-```
-claude plugin install <plugin-name>@yorrick
+</details>
 ```
 
 ## Plugins
@@ -58,6 +93,24 @@ Meta-agent skill for monitoring and steering Claude Code, Codex, and other termi
 
 ```
 claude plugin install agent-session-monitor@yorrick
+```
+
+### supabase-security
+
+Access-control rules for Supabase projects exposed directly to a browser via PostgREST:
+the three enforcement layers (`GRANT`, RLS, triggers) and **the order they run in**, the
+traps that cause privilege escalation, and how anon keys, JWTs and `service_role` differ.
+
+Ships a read-only audit script that **bundles [Splinter](https://github.com/supabase/splinter)**
+— Supabase's own SQL linter, the engine behind the dashboard's Security Advisor —
+vendored unmodified, and adds four rules it does not have (policies with no `FOR`/`TO`,
+missing `RESTRICTIVE` tenant isolation, the delete-and-reinsert column bypass, and
+`TRUNCATE`, which no policy applies to). See
+[`supabase-security/README.md`](supabase-security/README.md) for the credit and licence
+position.
+
+```
+claude plugin install supabase-security@yorrick
 ```
 
 ## Local Development

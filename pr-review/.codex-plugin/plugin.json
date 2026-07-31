@@ -6,5 +6,6 @@
     "name": "Yorrick Jansen"
   },
   "repository": "https://github.com/yorrick/agent-skills",
-  "license": "MIT"
+  "license": "MIT",
+  "skills": "./skills/"
 }

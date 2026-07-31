@@ -30,9 +30,7 @@ from pathlib import Path
 
 def run_gh(args: list[str]) -> str:
     """Run a gh CLI command and return stdout."""
-    result = subprocess.run(
-        ["gh", *args], capture_output=True, text=True, timeout=30
-    )
+    result = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=30)
     if result.returncode != 0:
         print(f"gh {' '.join(args)} failed: {result.stderr}", file=sys.stderr)
         sys.exit(1)
@@ -41,8 +39,7 @@ def run_gh(args: list[str]) -> str:
 
 def get_pr_metadata(pr_number: str, repo: str | None = None) -> dict:
     """Fetch PR metadata via gh CLI."""
-    args = ["pr", "view", pr_number, "--json",
-            "number,title,headRefName,baseRefName,headRefOid,url,body"]
+    args = ["pr", "view", pr_number, "--json", "number,title,headRefName,baseRefName,headRefOid,url,body"]
     if repo:
         args.extend(["--repo", repo])
     return json.loads(run_gh(args))

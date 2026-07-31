@@ -3,14 +3,37 @@
 # requires-python = ">=3.11"
 # dependencies = ["psycopg[binary]>=3.1", "typer>=0.12"]
 # ///
-"""Audit a Supabase/Postgres database for the access-control defects in this skill.
+"""Audit a Supabase/Postgres database for access-control defects Splinter misses.
 
 READ-ONLY. Every query reads catalogue tables; nothing is written, and the
 connection is opened in a read-only transaction as a belt-and-braces guard.
 
-This complements Supabase's own advisors (Splinter) rather than replacing them:
-it checks things the advisors do not, notably the delete-and-reinsert bypass and
-policies that omit FOR/TO.
+## This is a SUPPLEMENT, not a replacement
+
+Supabase ships its own linter -- Splinter (https://github.com/supabase/splinter),
+surfaced as the Security Advisor in the dashboard and via the MCP `get_advisors`
+tool. It is maintained against the platform and is authoritative. RUN IT FIRST.
+
+An earlier version of this script duplicated seven of Splinter's rules. Those
+have been REMOVED, because a hand-rolled duplicate is worse than no check: it is
+not maintained, and when it is subtly wrong it grants false assurance. Two of
+them genuinely were wrong -- `USING (true)` detection missed `1=1` and any
+whitespace variant, and the SECURITY DEFINER check was a straight
+reimplementation of Splinter 0028/0029.
+
+What remains is only what Splinter does NOT cover:
+
+    R4   delete-and-reinsert defeating a column-level UPDATE revoke
+    R11  TRUNCATE, which no RLS policy applies to
+    R1   policies that cover ALL commands, or apply TO PUBLIC
+    R2   RLS tables with no RESTRICTIVE policy pinning tenancy
+
+Splinter already covers, and this script deliberately does not:
+
+    0013 rls_disabled_in_public          0024 rls_policy_always_true
+    0010 security_definer_view           0011 function_search_path_mutable
+    0015 rls_references_user_metadata    0016 materialized_view_in_api
+    0028/0029 *_security_definer_function_executable
 
 Usage:
     uv run audit_rls.py --db-url "$DATABASE_URL"
@@ -35,6 +58,17 @@ app = typer.Typer(add_completion=False)
 # reachable by anyone holding the (public) publishable key.
 API_ROLES = ("anon", "authenticated")
 
+# Reason: copied from Splinter. Supabase's own schemas carry permissive internal
+# grants by design; flagging them is pure noise and trains people to ignore the
+# tool. Kept verbatim so it stays diffable against the upstream list.
+SYSTEM_SCHEMAS = (
+    "_timescaledb_cache, _timescaledb_catalog, _timescaledb_config, "
+    "_timescaledb_internal, auth, cron, extensions, graphql, graphql_public, "
+    "information_schema, net, pgmq, pgroonga, pgsodium, pgsodium_masks, pgtle, "
+    "pgbouncer, pg_catalog, realtime, repack, storage, supabase_functions, "
+    "supabase_migrations, tiger, topology, vault"
+)
+
 
 @dataclass
 class Finding:
@@ -49,95 +83,6 @@ class Finding:
 # Each query returns rows of (object, detail). Kept as SQL rather than ORM code
 # so a reviewer can read exactly what is being asserted.
 QUERIES: list[tuple[str, str, str, str]] = [
-    (
-        "ERROR",
-        "R10-rls-disabled",
-        """
-        SELECT n.nspname || '.' || c.relname,
-               'RLS is NOT enabled - every privilege the API roles hold is unrestricted ('
-                 || coalesce((SELECT string_agg(DISTINCT r.rolname || ':' || pr.priv, ', ')
-                                FROM unnest(%(api_roles)s::text[]) AS r(rolname)
-                                CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE')) AS pr(priv)
-                               WHERE has_table_privilege(r.rolname, c.oid, pr.priv)),
-                             'no API-role grants - lower risk') || ')'
-          FROM pg_class c
-          JOIN pg_namespace n ON n.oid = c.relnamespace
-         WHERE c.relkind IN ('r', 'p')
-           AND n.nspname = ANY(%(schemas)s)
-           AND NOT c.relrowsecurity
-        """,
-        # Reason: name the actual grants rather than asserting "anyone can read
-        # and write". A table with no API-role grants is far lower risk, and
-        # over-asserting exploitability is how a linter earns a reputation for
-        # crying wolf and stops being run. relkind 'p' covers partitioned roots.
-        "Tables exposed to the API with row-level security switched off.",
-    ),
-    (
-        "WARN",
-        "R1-policy-for-all",
-        """
-        SELECT p.schemaname || '.' || p.tablename || ' :: ' || p.policyname,
-               'policy covers ALL commands - if FOR was omitted this is also your '
-                 || 'INSERT/UPDATE/DELETE rule; confirm it is intentional'
-          FROM pg_policies p
-         WHERE p.schemaname = ANY(%(schemas)s)
-           AND p.cmd = 'ALL'
-        """,
-        # Reason: Postgres does not record whether ALL came from an omitted FOR
-        # or an explicit `FOR ALL`, so this cannot prove a mistake -- it asks for
-        # confirmation instead. Downgraded from ERROR for the same reason.
-        "A policy named like a read rule may silently be the write rule too.",
-    ),
-    (
-        "WARN",
-        "R1-policy-no-to",
-        """
-        SELECT p.schemaname || '.' || p.tablename || ' :: ' || p.policyname,
-               'policy applies TO PUBLIC (every role) - name anon/authenticated explicitly'
-          FROM pg_policies p
-         WHERE p.schemaname = ANY(%(schemas)s)
-           AND p.roles = ARRAY['public']::name[]
-        """,
-        # Reason: the RAW catalogue (pg_policy.polroles) stores PUBLIC as {0},
-        # but the pg_policies VIEW resolves role OIDs to names, so PUBLIC reads
-        # as {public}. Matching '{0}' here silently matched nothing -- a check
-        # that never fires is indistinguishable from a clean database, which is
-        # why the original bug survived testing.
-        "Omitted TO defaults to PUBLIC; naming the role is also a large perf win.",
-    ),
-    (
-        "WARN",
-        "R2-permissive-true",
-        """
-        SELECT p.schemaname || '.' || p.tablename || ' :: ' || p.policyname,
-               'permissive policy with USING (true) - grants unrestricted access'
-          FROM pg_policies p
-         WHERE p.schemaname = ANY(%(schemas)s)
-           AND p.permissive = 'PERMISSIVE'
-           AND btrim(coalesce(p.qual, '')) = 'true'
-        """,
-        "USING (true) ORs past every other permissive policy on the table.",
-    ),
-    (
-        "WARN",
-        "R2-no-restrictive",
-        """
-        SELECT c.relnamespace::regnamespace || '.' || c.relname,
-               'RLS enabled but no RESTRICTIVE policy - tenant isolation can be ORed past'
-          FROM pg_class c
-         WHERE c.relkind = 'r'
-           AND c.relnamespace::regnamespace::text = ANY(%(schemas)s)
-           AND c.relrowsecurity
-           AND EXISTS (SELECT 1 FROM pg_policies p
-                        WHERE p.schemaname = c.relnamespace::regnamespace::text
-                          AND p.tablename = c.relname)
-           AND NOT EXISTS (SELECT 1 FROM pg_policies p
-                            WHERE p.schemaname = c.relnamespace::regnamespace::text
-                              AND p.tablename = c.relname
-                              AND p.permissive = 'RESTRICTIVE')
-        """,
-        "Advisory: multi-tenant invariants belong in a RESTRICTIVE policy.",
-    ),
     (
         "ERROR",
         "R4-delete-reinsert",
@@ -159,85 +104,12 @@ QUERIES: list[tuple[str, str, str, str]] = [
         """,
         # Reason: the bypass needs BOTH -- DELETE alone destroys the row but
         # cannot recreate it with attacker-chosen values, so it is data loss,
-        # not privilege escalation. An earlier version used IN ('INSERT','DELETE')
-        # and flagged DELETE-only tables as escalations.
+        # not privilege escalation.
         #
         # has_table_privilege (rather than information_schema) is deliberate: it
         # resolves privileges inherited via role membership and PUBLIC, which the
-        # information_schema views do not show. format('%%I.%%I', ...) quotes
-        # mixed-case and reserved schema/table names correctly.
-        "The highest-value check here - undocumented by Supabase and Postgres alike.",
-    ),
-    (
-        "WARN",
-        "R5-function-executable",
-        """
-        SELECT p.pronamespace::regnamespace || '.' || p.proname
-                 || CASE WHEN p.prosecdef THEN ' [SECURITY DEFINER]' ELSE '' END,
-               'EXECUTE granted to ' || r.rolname
-                 || ' - reachable as POST /rest/v1/rpc/' || p.proname
-          FROM pg_proc p
-          CROSS JOIN unnest(%(api_roles)s::text[]) AS r(rolname)
-         WHERE p.pronamespace::regnamespace::text = ANY(%(schemas)s)
-           AND has_function_privilege(r.rolname, p.oid, 'EXECUTE')
-           AND p.prosecdef
-        """,
-        "SECURITY DEFINER functions callable from a browser. RLS does not apply to functions.",
-    ),
-    (
-        "WARN",
-        "R6-mutable-search-path",
-        """
-        SELECT p.pronamespace::regnamespace || '.' || p.proname,
-               'SECURITY DEFINER without a pinned search_path'
-          FROM pg_proc p
-         WHERE p.pronamespace::regnamespace::text = ANY(%(schemas)s)
-           AND p.prosecdef
-           AND (p.proconfig IS NULL
-                OR NOT EXISTS (SELECT 1 FROM unnest(p.proconfig) cfg
-                                WHERE cfg LIKE 'search_path=%%'))
-        """,
-        "An unpinned search_path in a definer function is an escalation primitive.",
-    ),
-    (
-        "ERROR",
-        "R7-view-not-invoker",
-        """
-        SELECT c.relnamespace::regnamespace || '.' || c.relname,
-               'view without security_invoker - runs as owner and bypasses the caller''s RLS'
-          FROM pg_class c
-         WHERE c.relkind = 'v'
-           AND c.relnamespace::regnamespace::text = ANY(%(schemas)s)
-           AND (c.reloptions IS NULL
-                OR NOT ('security_invoker=on' = ANY(c.reloptions)
-                        OR 'security_invoker=true' = ANY(c.reloptions)))
-        """,
-        "PG15+ feature, opt-in. Supabase lints this at ERROR level too.",
-    ),
-    (
-        "WARN",
-        "R7-matview-exposed",
-        """
-        SELECT c.relnamespace::regnamespace || '.' || c.relname,
-               'materialized view in an exposed schema - cannot enforce RLS at all'
-          FROM pg_class c
-         WHERE c.relkind = 'm'
-           AND c.relnamespace::regnamespace::text = ANY(%(schemas)s)
-        """,
-        "Materialized views have no RLS. Keep them out of exposed schemas.",
-    ),
-    (
-        "ERROR",
-        "R8-user-metadata",
-        """
-        SELECT p.schemaname || '.' || p.tablename || ' :: ' || p.policyname,
-               'policy references user_metadata, which end users can rewrite themselves'
-          FROM pg_policies p
-         WHERE p.schemaname = ANY(%(schemas)s)
-           AND (coalesce(p.qual, '') || ' ' || coalesce(p.with_check, ''))
-               LIKE '%%user_metadata%%'
-        """,
-        "raw_user_meta_data is user-writable through the auth API. Use app_metadata.",
+        # information_schema views do not show.
+        "Undocumented by Supabase and Postgres alike. The reason this script exists.",
     ),
     (
         "ERROR",
@@ -259,62 +131,124 @@ QUERIES: list[tuple[str, str, str, str]] = [
     ),
     (
         "WARN",
-        "R10-anon-writes",
+        "R1-policy-for-all",
         """
-        SELECT tp.table_schema || '.' || tp.table_name,
-               'anon holds ' || tp.privilege_type || ' - logged-out users can write'
-          FROM information_schema.table_privileges tp
-         WHERE tp.grantee = 'anon'
-           AND tp.privilege_type IN ('INSERT', 'UPDATE', 'DELETE')
-           AND tp.table_schema = ANY(%(schemas)s)
+        SELECT p.schemaname || '.' || p.tablename || ' :: ' || p.policyname,
+               'policy covers ALL commands - if FOR was omitted this is also your '
+                 || 'INSERT/UPDATE/DELETE rule; confirm it is intentional'
+          FROM pg_policies p
+         WHERE p.schemaname = ANY(%(schemas)s)
+           AND p.cmd = 'ALL'
         """,
-        "Logged-out write access is almost never intended.",
+        # Reason: Postgres does not record whether ALL came from an omitted FOR
+        # or an explicit `FOR ALL`, so this cannot prove a mistake -- it asks for
+        # confirmation. A policy named "Users can VIEW..." that is silently also
+        # the write rule caused three separate escalations in one codebase.
+        "Splinter has no equivalent; this is the highest-yield policy check.",
+    ),
+    (
+        "WARN",
+        "R1-policy-no-to",
+        """
+        SELECT p.schemaname || '.' || p.tablename || ' :: ' || p.policyname,
+               'policy applies TO PUBLIC (every role) - name anon/authenticated explicitly'
+          FROM pg_policies p
+         WHERE p.schemaname = ANY(%(schemas)s)
+           AND p.roles = ARRAY['public']::name[]
+        """,
+        # Reason: the RAW catalogue (pg_policy.polroles) stores PUBLIC as {0},
+        # but the pg_policies VIEW resolves role OIDs to names, so PUBLIC reads
+        # as {public}. Matching '{0}' here silently matched nothing -- a check
+        # that never fires is indistinguishable from a clean database, which is
+        # why that bug survived testing. Reading Splinter's SQL first would have
+        # caught it.
+        "Omitted TO defaults to PUBLIC; naming the role is also a large perf win.",
+    ),
+    (
+        "WARN",
+        "R2-no-restrictive",
+        """
+        SELECT n.nspname || '.' || c.relname,
+               'RLS enabled but no RESTRICTIVE policy - a permissive policy added later '
+                 || 'can OR straight past tenant isolation'
+          FROM pg_class c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE c.relkind IN ('r', 'p')
+           AND n.nspname = ANY(%(schemas)s)
+           AND c.relrowsecurity
+           AND EXISTS (SELECT 1 FROM pg_policies p
+                        WHERE p.schemaname = n.nspname AND p.tablename = c.relname)
+           AND NOT EXISTS (SELECT 1 FROM pg_policies p
+                            WHERE p.schemaname = n.nspname AND p.tablename = c.relname
+                              AND p.permissive = 'RESTRICTIVE')
+        """,
+        # Reason: advisory. Not every table is multi-tenant, so this is a prompt
+        # to think rather than a defect. Lookup and reference tables will show up
+        # here legitimately.
+        "Advisory: multi-tenant invariants belong in a RESTRICTIVE policy.",
     ),
 ]
 
+# Reason: resolve the schemas PostgREST actually exposes, the way Splinter does,
+# instead of assuming 'public'. A project serving an `api` schema would otherwise
+# be audited on the wrong objects entirely -- and report a clean bill of health.
+EXPOSED_SCHEMAS_SQL = """
+    SELECT array(
+        SELECT trim(unnest(string_to_array(
+            coalesce(current_setting('pgrst.db_schemas', true), 'public'), ',')))
+        EXCEPT
+        SELECT trim(unnest(string_to_array(%(system_schemas)s, ',')))
+    )
+"""
 
-def run_audit(db_url: str, schemas: list[str]) -> list[Finding]:
+
+def resolve_schemas(conn: psycopg.Connection, override: list[str] | None) -> list[str]:
+    """Which schemas to audit: the caller's list, else whatever PostgREST exposes."""
+    if override:
+        return override
+    with conn.cursor() as cur:
+        cur.execute(cast("LiteralString", EXPOSED_SCHEMAS_SQL), {"system_schemas": SYSTEM_SCHEMAS})
+        row = cur.fetchone()
+    return list(row[0]) if row and row[0] else ["public"]
+
+
+def run_audit(db_url: str, override: list[str] | None) -> tuple[list[Finding], list[str]]:
     """Execute every check. Read-only; a failing check is reported, not fatal."""
     findings: list[Finding] = []
-    params: dict[str, Any] = {"schemas": schemas, "api_roles": list(API_ROLES)}
 
     # Reason: read_only=True makes the "this never writes" claim enforced by the
     # server, not merely by inspection of the SQL above.
     with psycopg.connect(db_url) as conn:
         conn.read_only = True
+        schemas = resolve_schemas(conn, override)
+        params: dict[str, Any] = {"schemas": schemas, "api_roles": list(API_ROLES)}
+
         for severity, rule, sql, _rationale in QUERIES:
             with conn.cursor() as cur:
                 try:
-                    # Reason: cast is safe and meaningful here -- every entry in
-                    # QUERIES is a literal defined above, never built from input.
-                    # psycopg's LiteralString parameter type exists precisely to
-                    # stop SQL being assembled from runtime strings.
+                    # Reason: cast is safe here -- every entry in QUERIES is a
+                    # literal defined above, never built from input.
                     cur.execute(cast("LiteralString", sql), params)
                 except psycopg.Error as exc:
-                    findings.append(
-                        Finding(
-                            "INFO",
-                            rule,
-                            "<check failed>",
-                            f"{type(exc).__name__}: {exc}".strip(),
-                        )
-                    )
+                    findings.append(Finding("INFO", rule, "<check failed>", f"{type(exc).__name__}: {exc}".strip()))
                     conn.rollback()
                     continue
                 for obj, detail in cur.fetchall():
                     findings.append(Finding(severity, rule, obj, detail))
-    return findings
+    return findings, schemas
 
 
 @app.command()
 def main(
     db_url: str = typer.Option(..., "--db-url", help="Postgres connection string", envvar="DATABASE_URL"),
-    schema: list[str] = typer.Option(["public"], "--schema", help="Schema to audit (repeatable)"),
+    schema: list[str] = typer.Option(
+        None, "--schema", help="Schema to audit (repeatable). Default: whatever PostgREST exposes."
+    ),
     json_output: bool = typer.Option(False, "--json", help="JSON output"),
 ) -> None:
-    """Audit a Supabase database for access-control defects."""
+    """Audit a Supabase database for access-control defects Supabase's own linter misses."""
     try:
-        findings = run_audit(db_url, list(schema))
+        findings, schemas = run_audit(db_url, list(schema) if schema else None)
     except psycopg.Error as exc:
         # Reason: never echo the exception body - a connection string with a
         # password can appear in psycopg error text.
@@ -322,10 +256,11 @@ def main(
         raise typer.Exit(2) from None
 
     if json_output:
-        typer.echo(jsonlib.dumps([asdict(f) for f in findings], indent=2))
+        typer.echo(jsonlib.dumps({"schemas": schemas, "findings": [asdict(f) for f in findings]}, indent=2))
     else:
+        typer.echo(f"Auditing schema(s): {', '.join(schemas)}\n")
         if not findings:
-            typer.echo(f"No findings in schema(s): {', '.join(schema)}")
+            typer.echo("No findings.")
         else:
             order = {"ERROR": 0, "WARN": 1, "INFO": 2}
             for f in sorted(findings, key=lambda x: (order.get(x.severity, 9), x.rule, x.object)):
@@ -334,10 +269,16 @@ def main(
             for f in findings:
                 counts[f.severity] = counts.get(f.severity, 0) + 1
             typer.echo("\n" + "  ".join(f"{k}={v}" for k, v in sorted(counts.items())))
-            typer.echo(
-                "\nThis is not a substitute for negative tests: assert denial with the "
-                "publishable key alone and with a second tenant's JWT."
-            )
+
+        typer.echo(
+            "\nThis covers ONLY what Supabase's own linter does not. Also run the "
+            "Security Advisor (dashboard, or `get_advisors` via MCP) -- it is "
+            "maintained against the platform and is authoritative for everything else."
+        )
+        typer.echo(
+            "Neither replaces negative tests: assert denial with the publishable "
+            "key alone and with a second tenant's JWT."
+        )
 
     raise typer.Exit(1 if findings else 0)
 

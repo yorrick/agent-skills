@@ -226,11 +226,31 @@ Process rules, learned the expensive way — each of these caused a production o
 
 ## Verifying
 
-Run the auditor in this skill:
+### 1. Run Supabase's own advisors first
 
-The script ships with this skill. Resolve its path first — a bare relative path
-resolves against the user's working directory, not the plugin, and Codex sets no
-plugin-root variable at all:
+Supabase ships [Splinter](https://github.com/supabase/splinter) as the dashboard's
+**Security Advisor**, also callable as `get_advisors` via MCP. It is maintained against
+the platform and is authoritative. It covers RLS-disabled tables, `USING (true)`,
+definer views, mutable `search_path`, `user_metadata` in policies, exposed materialized
+views, and browser-callable definer functions.
+
+### 2. Then the auditor in this skill
+
+It checks **only what Splinter does not** — four things:
+
+| | |
+|---|---|
+| `R4` | delete-and-reinsert defeating a column-level `UPDATE` revoke |
+| `R11` | `TRUNCATE`, which no policy applies to |
+| `R1` | policies covering ALL commands, or applying `TO PUBLIC` |
+| `R2` | RLS tables with no `RESTRICTIVE` policy pinning tenancy |
+
+Earlier versions duplicated seven Splinter rules. Those were removed: an unmaintained
+duplicate that is subtly wrong is worse than no check, and two of them were — the
+`USING (true)` check missed `1=1` and every whitespace variant.
+
+Resolve the script's path first — a bare relative path resolves against the user's
+working directory, not the plugin, and Codex sets no plugin-root variable at all:
 
 ```bash
 AUDIT="${CLAUDE_PLUGIN_ROOT:-}/scripts/audit_rls.py"
@@ -245,9 +265,7 @@ uv run "$AUDIT" --db-url "$DATABASE_URL" --json
 uv run "$AUDIT" --db-url "$DATABASE_URL" --schema public --schema api
 ```
 
-It flags policies missing `FOR`/`TO`, `USING (true)`, tables with RLS disabled, functions executable by `anon`/`authenticated`, views without `security_invoker`, definer functions with a mutable `search_path`, and tables where a column-`UPDATE` revoke is undermined by an INSERT/DELETE grant.
-
-Also run Supabase's own advisors (`get_advisors` via MCP, or the dashboard Security Advisor) — it is a different rule set, not a substitute.
+With no `--schema`, it audits whatever PostgREST actually exposes (`pgrst.db_schemas`), not just `public` — a project serving an `api` schema would otherwise be audited on the wrong objects and report a clean bill of health.
 
 **Neither replaces a negative test suite.** Lints check configuration; only tests check reality. Assert 401/403/empty on every table, view and RPC using (a) the publishable key alone and (b) a *second tenant's* JWT.
 

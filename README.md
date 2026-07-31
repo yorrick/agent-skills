@@ -4,16 +4,51 @@ A collection of Claude Code plugins by Yorrick Jansen.
 
 ## Installation
 
-Add this repository as a marketplace:
+Every plugin here works with **both Claude Code and Codex**.
+
+**Claude Code**
+
+```
+claude plugin marketplace add yorrick/agent-skills
+claude plugin install <plugin-name>@yorrick
+```
+
+**Codex**
+
+```
+codex plugin marketplace add yorrick/agent-skills
+codex plugin add <plugin-name>@yorrick
+```
+
+Restart the CLI afterwards — both report that changes need one.
+
+### Updating
+
+Neither harness updates an installed plugin on its own.
+
+```
+# Claude Code — two steps; refreshing the marketplace alone does not upgrade
+claude plugin marketplace update yorrick
+claude plugin update <plugin-name>@yorrick
+
+# Codex — one step
+codex plugin marketplace upgrade
+```
+
+### Renamed from `claude-code-plugins`
+
+This repo was `yorrick/claude-code-plugins`. Existing registrations keep working
+through GitHub's redirect — refresh with the update commands above. **Do not remove and
+re-add the Claude marketplace**: removing its last registration also uninstalls its
+plugins.
+
+<details>
+<summary>Legacy install (still works)</summary>
 
 ```
 claude plugin marketplace add yorrick/claude-code-plugins
 ```
-
-Then install any plugin:
-
-```
-claude plugin install <plugin-name>@yorrick
+</details>
 ```
 
 ## Plugins

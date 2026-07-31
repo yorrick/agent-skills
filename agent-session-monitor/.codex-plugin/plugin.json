@@ -14,5 +14,6 @@
     "claude-code",
     "monitoring",
     "automation"
-  ]
+  ],
+  "skills": "./skills/"
 }

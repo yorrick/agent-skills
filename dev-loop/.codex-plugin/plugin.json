@@ -14,5 +14,6 @@
     "workflow",
     "loop",
     "orchestration"
-  ]
+  ],
+  "commands": "./commands/"
 }

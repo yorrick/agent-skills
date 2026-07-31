@@ -5,11 +5,13 @@ requires-python = ">=3.12"
 
 [dependency-groups]
 dev = [
+    "psycopg[binary]>=3.1",
     "pyright>=1.1",
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "pytest-xdist>=3.5",
     "ruff>=0.9",
+    "typer>=0.12",
 ]
 
 [tool.pytest.ini_options]

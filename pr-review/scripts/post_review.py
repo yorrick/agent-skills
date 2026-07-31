@@ -32,9 +32,7 @@ def get_diff_lines(pr_number: str, repo: str | None = None) -> dict[str, set[int
     if repo:
         args.extend(["--repo", repo])
 
-    result = subprocess.run(
-        ["gh", *args], capture_output=True, text=True, timeout=30
-    )
+    result = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=30)
     if result.returncode != 0:
         print(f"Warning: could not fetch diff: {result.stderr}", file=sys.stderr)
         return {}
@@ -104,23 +102,27 @@ def post_review(
         # Check if this line is in the diff
         file_diff = diff_lines.get(file_path, set())
         if file_diff and line in file_diff:
-            inline_comments.append({
-                "path": file_path,
-                "line": line,
-                "side": "RIGHT",
-                "body": build_comment_body(f),
-            })
+            inline_comments.append(
+                {
+                    "path": file_path,
+                    "line": line,
+                    "side": "RIGHT",
+                    "body": build_comment_body(f),
+                }
+            )
         elif file_diff:
             # File is in diff but this specific line isn't — find nearest diff line
             nearest = min(file_diff, key=lambda l: abs(l - line))
             comment_body = build_comment_body(f)
             comment_body = f"*(Note: original finding was on line {line})*\n\n{comment_body}"
-            inline_comments.append({
-                "path": file_path,
-                "line": nearest,
-                "side": "RIGHT",
-                "body": comment_body,
-            })
+            inline_comments.append(
+                {
+                    "path": file_path,
+                    "line": nearest,
+                    "side": "RIGHT",
+                    "body": comment_body,
+                }
+            )
         else:
             # File not in diff at all — include in review body
             body_only_findings.append(f)
@@ -139,9 +141,7 @@ def post_review(
     for f in findings:
         providers = ", ".join(f.get("providers", []))
         desc = f["description"][:100]
-        summary_lines.append(
-            f"- **[{f['severity']}]** `{f['file']}:{f['line']}` — {desc}... ({providers})"
-        )
+        summary_lines.append(f"- **[{f['severity']}]** `{f['file']}:{f['line']}` — {desc}... ({providers})")
 
     # Add body-only findings (files not in diff) to the review body
     if body_only_findings:
@@ -166,10 +166,13 @@ def post_review(
     payload_json = json.dumps(payload)
     result = subprocess.run(
         [
-            "gh", "api",
+            "gh",
+            "api",
             f"repos/{repo}/pulls/{pr_number}/reviews",
-            "--method", "POST",
-            "--input", "-",
+            "--method",
+            "POST",
+            "--input",
+            "-",
         ],
         input=payload_json,
         capture_output=True,

@@ -1,0 +1,10 @@
+# The ONLY hand-edited metadata for this plugin.
+# Both harnesses' manifests are generated from it:
+#   uv run scripts/sync_manifests.py
+
+[plugin]
+name = "agent-session-monitor"
+version = "0.1.1"
+keywords = ["tmux", "agent", "codex", "claude-code", "monitoring", "automation"]
+license = "MIT"
+description = """Monitor and steer Claude Code, Codex, and other terminal coding agents through tmux panes."""

@@ -1,0 +1,47 @@
+In the Codex desktop-style runtimes (OpenAI’s app-like environment), there is an explicit configuration flag such as check_for_update_on_startup that controls whether the app checks for plugin or app updates when it launches. If you disable that flag, Codex will no longer automatically check on startup, and new versions show up as an “Update” action instead of being silently applied.
+
+https://github.com/openai/codex/issues/18543
+
+i think our docs are wrong, validate codex behaviour and fix docs
+
+---
+
+<task-notification>
+<task-id>ac6280907cb96590b</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-yorrickjansen-work-agent-skills/10a43a68-8c5d-4ef7-bc14-a500bae43f30/tasks/ac6280907cb96590b.output</output-file>
+<status>completed</status>
+<summary>Agent "Research Codex update behavior" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>All questions verified. Summary below.
+
+## 1. Issue #18543 — verified via WebFetch
+
+Title: **"App still checks for updates even with check_for_update_on_startup set to false"**, filed by nooblyf, 2026-04-19. Key quote: *"Even with `check_for_update_on_startup` set to `false` in my `config.toml` the app still checks for updates and i see the 'Update' button in the title bar."* Status: **closed as not planned**. Important scoping: this issue is about the **desktop app's self-update check** (app updates, not plugins). Plugin marketplace auto-upgrade is not mentioned in it.
+
+## 2. Source verification (openai/codex main, via `gh api` code search + raw file reads)
+
+- **The `plugins-marketplace-auto-upgrade` thread exists.** `codex-rs/core-plugins/src/manager.rs`, in `maybe_start_plugin_startup_tasks_for_config` (~line 2099–2160): inside `if config.plugins_enabled { ... }` it spawns `std::thread::Builder::new().name("plugins-marketplace-auto-upgrade".to_string())` which calls `upgrade_configured_marketplaces_for_config(&amp;config, None)` — i.e. all configured git marketplaces. **Gating: only `plugins_enabled` plus an in-flight dedup guard. No dedicated on/off config flag.**
+- `plugins_enabled` = `Feature::Plugins`, key `"plugins"`, `Stage::Stable`, `default_enabled: true` (`codex-rs/features/src/lib.rs` ~line 1181). So the only lever is `[features] plugins = false` (or `--disable plugins`), which kills plugins entirely.
+- **"Force-reinstall" is slightly overstated — it is revision-checked.** `codex-rs/core-plugins/src/marketplace_upgrade.rs` (`upgrade_configured_git_marketplace`, ~line 202): each startup runs `git_remote_revision` (ls-remote, 30s timeout); if `last_revision` matches the remote and installed metadata matches, it returns `Ok(None)` (no-op). Otherwise it clones to a staging dir, validates, atomically swaps the marketplace root, updates `config.toml` (`last_revision`/`last_updated`), and the manager then refreshes the installed-plugin cache. Net effect: any push to the marketplace branch lands automatically on next startup, unprompted, with no throttle interval.
+- **Who triggers it:** `codex-rs/app-server/src/message_processor.rs` (~line 453) when `PluginStartupTasks::Start`. `Start` is the default (`app-server/src/lib.rs` ~line 450); `Skip` exists only behind `#[cfg(debug_assertions)]` for tests (`app-server/src/main.rs` ~line 94). Crucially, the TUI (`codex` interactive) and `codex exec` now run an **in-process app-server** (`codex-rs/tui/src/lib.rs` uses `InProcessAppServerClient`; `codex-rs/app-server/src/in_process.rs` line 476 hardcodes `PluginStartupTasks::Start`). So **both the CLI and the desktop app run the auto-upgrade at startup** — behavior does not materially differ between them.
+- **`check_for_update_on_startup` is real but unrelated to plugins.** `codex-rs/config/src/config_toml.rs` ~line 470: *"When `true`, checks for Codex updates on startup and surfaces update prompts. Set to `false` only if your Codex updates are centrally managed. Defaults to `true`."* It gates the CLI self-update prompt (`codex-rs/tui/src/updates.rs` line 28) — never referenced in the plugin/marketplace upgrade path. Per #18543 the desktop app ignores it even for app updates.
+
+## 3. Local machine — verified
+
+- `codex --version` → **codex-cli 0.146.0** (homebrew cask at `/opt/homebrew/Caskroom/codex/0.146.0/bin/codex`).
+- `strings` on the CLI binary: 1 hit for `plugins-marketplace-auto-upgrade`, 18 for `check_for_update_on_startup`. Desktop binary `/Applications/Codex.app/Contents/Resources/codex`: 1 hit for the thread name. Both ship the code.
+- `~/.codex/config.toml`: no `check_for_update_on_startup` key; `[marketplaces.yorrick]` is `source_type = "git"` with `last_revision = 40bff0a...` and `last_updated = 2026-07-31T20:00:37Z` — matching this repo's current HEAD, consistent with silent auto-upgrade having run.
+- `codex plugin --help` / `codex plugin marketplace --help`: manual path is `codex plugin marketplace upgrade` ("Refresh configured Git marketplace snapshots"); no flag anywhere to disable the startup auto-upgrade.
+- Official config docs (learn.chatgpt.com/docs/config-file/config-advanced) document neither the auto-upgrade nor `check_for_update_on_startup`. The behavior is undocumented.
+
+## 4. Bottom line
+
+- (a) **Yes** — at every app-server startup (desktop app, IDE, and the CLI TUI/exec via in-process app-server), Codex silently checks each configured git marketplace's remote revision and, if it moved, reinstalls the marketplace snapshot and refreshes the plugin cache. No prompt, no throttle.
+- (b) **No dedicated off switch.** Only `features.plugins = false` (default true, disables plugins wholesale) or removing the git marketplace. `check_for_update_on_startup` does NOT affect it.
+- (c) `check_for_update_on_startup` (default `true`) governs only Codex self-update prompts in the CLI; #18543 shows the desktop app ignores it even there (closed as not planned).
+- (d) CLI vs desktop: same plugin auto-upgrade behavior (shared app-server code path). The one difference is self-updates: the CLI honors `check_for_update_on_startup` for its prompt; the desktop app's updater does not.
+
+Not verified: exact desktop-app updater internals (closed-source Electron shell; inferred from #18543 and the shipped `codex` binary inside the app bundle). Everything else above was checked against source or the live machine. The one correction to the claim in this repo's CLAUDE.md: the auto-upgrade is not app-server-only in practice (the TUI embeds the app-server) and it skips reinstall when the remote revision is unchanged.</result>
+<usage><subagent_tokens>75114</subagent_tokens><tool_uses>34</tool_uses><duration_ms>240588</duration_ms></usage>
+</task-notification>

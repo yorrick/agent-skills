@@ -28,9 +28,9 @@ Both harnesses auto-update — differently, and Codex's behaviour is undocumente
 
 | | Claude Code | Codex |
 |---|---|---|
-| Auto-update | **Opt-in per marketplace**, off by default for third-party | **Always on** while plugins are enabled; no dedicated opt-out |
-| Fires | ~10 min after session start | At app-server startup (TUI, `codex exec`, desktop app) |
-| Updates the installed plugin? | No — marketplace metadata only | **Yes** — reinstalls whenever the remote revision moved |
+| Auto-update | **Per-marketplace toggle** — off by default for third-party, on for Anthropic's own | **Always on** while plugins are enabled; no dedicated opt-out |
+| Fires | Once per session, at a random point within 10 min of start | At app-server startup (TUI, `codex exec`, desktop app) |
+| Updates the installed plugin? | **Yes**, where enabled — version pins respected | **Yes** — reinstalls whenever the remote revision moved |
 | Takes effect | After `/reload-plugins` or restart | Immediately; caches invalidated live |
 
 Enable it on Claude Code with `/plugin` → Marketplaces → `yorrick` → Enable auto-update.

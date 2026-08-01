@@ -28,12 +28,17 @@ Both harnesses auto-update — differently, and Codex's behaviour is undocumente
 
 | | Claude Code | Codex |
 |---|---|---|
-| Auto-update | **Opt-in per marketplace**, off by default for third-party | **Always on**, no opt-out found |
-| Fires | ~10 min after session start | At app-server startup |
-| Updates the installed plugin? | No — marketplace metadata only | **Yes** — force-reinstalls |
+| Auto-update | **Per-marketplace toggle** — off by default for third-party, on for Anthropic's own | **Always on** while plugins are enabled; no dedicated opt-out |
+| Fires | Once per session, at a random point within 10 min of start | At app-server startup (TUI, `codex exec`, desktop app) |
+| Updates the installed plugin? | **Yes**, where enabled — version pins respected | **Yes** — reinstalls whenever the remote revision moved |
 | Takes effect | After `/reload-plugins` or restart | Immediately; caches invalidated live |
 
 Enable it on Claude Code with `/plugin` → Marketplaces → `yorrick` → Enable auto-update.
+
+Codex's `check_for_update_on_startup` config flag does **not** disable this — it only
+governs Codex's own self-update prompt (which the desktop app ignores anyway:
+[codex#18543](https://github.com/openai/codex/issues/18543), closed as not planned).
+The plugin auto-upgrade has no off switch short of `[features] plugins = false`.
 
 To update by hand:
 

@@ -105,10 +105,16 @@ codex plugin add <name>@yorrick
 ```
 
 Both harnesses auto-update, differently. Claude Code's is **opt-in per marketplace** (off
-by default for third-party), fetches ~10 min after session start, and updates marketplace
-metadata only — the installed plugin still needs `plugin update`. Codex's is **always on
+by default for third-party; Anthropic's own marketplaces default on), fires once per
+session at a random point within 10 min of startup, and updates both the marketplace
+metadata and the installed plugins on disk (version pins respected) — the running session
+keeps its loaded versions until `/reload-plugins` or restart. Codex's is **always on
 and undocumented**: a `plugins-marketplace-auto-upgrade` thread runs at app-server startup
-and force-reinstalls every git marketplace's plugins, gated only on `plugins_enabled`.
+(the TUI and `codex exec` embed the app-server, so those fire it too), checks each git
+marketplace's remote revision, and reinstalls the snapshot whenever it moved — gated only
+on `plugins_enabled`. `check_for_update_on_startup` does **not** affect it; that flag only
+governs Codex's own self-update prompt (and the desktop app ignores it even there,
+[codex#18543](https://github.com/openai/codex/issues/18543), closed as not planned).
 
 Manually: Claude Code needs two steps (`plugin marketplace update yorrick`, then
 `plugin update <name>@yorrick`); Codex does both with `codex plugin marketplace upgrade`,

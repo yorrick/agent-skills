@@ -1,0 +1,45 @@
+<task-notification>
+<task-id>a415fb0b6a274da89</task-id>
+<tool-use-id>toolu_01K3HtTohddf7MVMnfP1ELZn</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-yorrickjansen-work-agent-skills/10a43a68-8c5d-4ef7-bc14-a500bae43f30/tasks/a415fb0b6a274da89.output</output-file>
+<status>completed</status>
+<summary>Agent "Verify Claude Code auto-update timing" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>All verification complete. Findings below.
+
+## Verdict
+
+The repo doc (`/Users/yorrickjansen/work/agent-skills/CLAUDE.md` / `AGENTS.md`) is **partly wrong on both claims** as of Claude Code 2.1.220.
+
+### (a) Timing — "~10 min after session start" is inaccurate
+
+There is no fixed 10-minute timer. The built-in pass fires **once per session, at a random point within the first 10 minutes** (uniform jitter, average ~5 min). Verified in the binary `/Users/yorrickjansen/.local/share/claude/versions/2.1.220` (native Bun executable; extracted via `strings` to scratchpad):
+
+- Constant: `var rsS=600000` (10 min in ms)
+- Usage: `let n=Math.floor(Math.random()*rsS);await Er(n,void 0,{unref:!0})` — a random sleep of 0–600,000 ms before any fetch, inside the autoupdate pass function (`QAf`, logs as `"Plugin autoupdate: ..."`, telemetry event `tengu_plugin_autoupdate_pass`)
+
+Official docs confirm the same wording (https://code.claude.com/docs/en/discover-plugins, "Configure auto-updates"): *"Claude Code checks for marketplace and plugin updates after your session starts, with a random delay of up to ten minutes."*
+
+### (b) When it fires
+
+- **Once per process/session**: `QAf()` is called from a once-guarded startup init function (`$rl`, guard flag `Frl`) triggered by a React effect at session start. No `setInterval` wraps it — the adjacent interval in `$rl` belongs to the CLI self-updater, not plugins.
+- Skipped entirely if the general auto-updater is disabled (`DISABLE_AUTOUPDATER`) unless `FORCE_AUTOUPDATE_PLUGINS` is set: `function Hht(){return $Ee()&amp;&amp;!Z.FORCE_AUTOUPDATE_PLUGINS}` → logs `"Plugin autoupdate: skipped (auto-updater disabled)"`.
+- Separate from this pass, marketplaces are also refreshed **on demand** before `plugin install`/`plugin update` and via a "refresh-on-miss" path — those use a `skipIfRecent` guard of **30 seconds** (`s&lt;30000 → "Skipping refresh … refreshed Ns ago"`). Not the auto-update timer.
+
+### (c) "Metadata only" — refuted
+
+The pass does both: it refreshes marketplace catalogs **and updates installed plugins**. Binary evidence: after the marketplace refresh loop it logs `"Plugin autoupdate: checking installed plugins"`, then updates plugins from auto-update-enabled marketplaces (telemetry fields `plugins_updated`, `plugin_update_failed`, `plugins_blocked_by_pin` — version pins block updates), auto-resolves missing plugin dependencies, and pushes an updated/blocked notification to the UI. Docs confirm: *"refreshes the marketplace data and updates installed plugins to their latest versions on disk"*. The correct caveat is that the **running session keeps the versions loaded at launch** — you get a notification to run `/reload-plugins`, or new versions load next launch. So "the installed plugin still needs `plugin update`" is wrong; it needs a **reload/restart**, not a manual `plugin update`.
+
+### (d) Opt-in claim — confirmed
+
+`function zqe(e,t,r)`: policy setting wins; else per-marketplace `autoUpdate` setting; else default is true **only** for a hardcoded set of Anthropic first-party marketplaces (`Z5n`: `claude-plugins-official`, `claude-code-plugins`, `anthropic-agent-skills`, `life-sciences`, etc., minus two exclusions). Third-party marketplaces like `yorrick` default **off** — the `/plugin` "Enable auto-update" toggle is required. Docs confirm: official marketplaces on by default, third-party/local off by default.
+
+### (e) Not verified
+
+- Whether an **older** Claude Code version was metadata-only (which would explain the repo doc's claim). The changelog (https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md) has no entry describing the auto-update mechanism's introduction or timing, so historical behavior is unverifiable from available sources.
+- The exact trigger condition of the startup effect (`pT===1` in minified code — appears to be first-render/first-turn, but the semantics of `pT` are inference, not verified).
+- I did not observe a live pass end-to-end (would require waiting up to 10 min in a fresh session); conclusions rest on binary code + official docs, which agree with each other.
+
+**Suggested doc correction**: "fetches once per session at a random point within ~10 min of startup, and — for marketplaces with auto-update enabled — updates both the marketplace metadata and the installed plugins on disk (version pins respected); the running session keeps its loaded versions until `/reload-plugins` or restart."</result>
+<usage><subagent_tokens>72223</subagent_tokens><tool_uses>22</tool_uses><duration_ms>180686</duration_ms></usage>
+</task-notification>

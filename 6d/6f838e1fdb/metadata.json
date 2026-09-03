@@ -1,0 +1,31 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "6d6f838e1fdb",
+  "strategy": "manual-commit",
+  "branch": "feat/task-status-plugin",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".agents/plugins/marketplace.json",
+    ".claude-plugin/marketplace.json",
+    ".github/workflows/ci.yml",
+    ".gitignore",
+    "AGENTS.md",
+    "README.md",
+    "pyproject.toml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/6d/6f838e1fdb/0/metadata.json",
+      "transcript": "/6d/6f838e1fdb/0/full.jsonl",
+      "content_hash": "/6d/6f838e1fdb/0/content_hash.txt",
+      "prompt": "/6d/6f838e1fdb/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 4,
+    "cache_creation_tokens": 1136,
+    "cache_read_tokens": 256942,
+    "output_tokens": 348,
+    "api_call_count": 2
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "6d6f838e1fdb",
+  "session_id": "9468c63b-d8a5-4da4-9760-c52dfd8726cd",
+  "strategy": "manual-commit",
+  "created_at": "2026-09-03T00:41:27.870254Z",
+  "branch": "feat/task-status-plugin",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".agents/plugins/marketplace.json",
+    ".claude-plugin/marketplace.json",
+    ".github/workflows/ci.yml",
+    "AGENTS.md",
+    "README.md",
+    "pyproject.toml"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "d58602af6956",
+  "token_usage": {
+    "input_tokens": 2,
+    "cache_creation_tokens": 39588,
+    "cache_read_tokens": 10348,
+    "output_tokens": 1409,
+    "api_call_count": 1
+  },
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-09-03T00:41:27.840017Z",
+    "agent_lines": 0,
+    "human_added": 827,
+    "human_modified": 9,
+    "human_removed": 0,
+    "total_committed": 829,
+    "agent_percentage": 0
+  }
+}

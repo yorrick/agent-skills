@@ -1,0 +1,6 @@
+interface:
+  display_name: "Task Status"
+  short_description: "Show a compact visual summary of the current task"
+  default_prompt: "Use $task-status to summarize the current task."
+policy:
+  allow_implicit_invocation: false

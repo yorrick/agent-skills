@@ -133,6 +133,22 @@ Meta-agent skill for monitoring and steering Claude Code, Codex, and other termi
 claude plugin install agent-session-monitor@yorrick
 ```
 
+### task-status
+
+Shows a compact, terminal-safe visual summary of the current task: what is done,
+what is happening now, what comes next, what was deferred, and what is blocked.
+When conversation evidence establishes a real branch or join, it also adds a
+compact ASCII dependency diagram. It is strictly read-only and uses only the
+current conversation as evidence.
+
+Invoke it with `/task-status:task-status` in Claude Code or `$task-status` in
+Codex.
+
+```fish
+claude plugin install task-status@yorrick
+codex plugin add task-status@yorrick
+```
+
 ### supabase-security
 
 Access-control rules for Supabase projects exposed directly to a browser via PostgREST:
@@ -159,4 +175,5 @@ For testing or development, load a plugin directly:
 claude --plugin-dir ./dev-loop
 claude --plugin-dir ./self-improve-skill
 claude --plugin-dir ./agent-session-monitor
+claude --plugin-dir ./task-status
 ```

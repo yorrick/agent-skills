@@ -27,10 +27,15 @@ jobs:
       - name: Format
         run: uv run ruff format --check .
 
-      # Reason: `ruff check .` currently fails on two PRE-EXISTING errors that
-      # predate this workflow (E741 in pr-review/scripts/post_review.py, E402 in
-      # self-improve-skill/scripts/session_start_hook.py). Gating on scripts/
-      # only means CI is green and meaningful today; widen to `.` in the change
-      # that fixes those two, rather than merging a red pipeline now.
+      # Reason: plugin scripts contain two pre-existing lint errors: E741 in
+      # pr-review/scripts/post_review.py and E402 in
+      # self-improve-skill/scripts/session_start_hook.py. Gate the repository
+      # automation and contract tests until those are repaired.
       - name: Lint
-        run: uv run ruff check scripts/
+        run: uv run ruff check scripts/ tests/
+
+      - name: Contract tests
+        run: uv run pytest tests/
+
+      - name: Type check
+        run: uv run pyright

@@ -1,0 +1,10 @@
+# The ONLY hand-edited metadata for this plugin.
+# Both harnesses' manifests are generated from it:
+#   uv run scripts/sync_manifests.py
+
+[plugin]
+name = "task-status"
+version = "0.1.0"
+license = "MIT"
+description = "A compact, terminal-safe visual summary of the current task: completed work, current focus, next steps, deferred items, and blockers."
+keywords = ["status", "summary", "progress", "handoff"]

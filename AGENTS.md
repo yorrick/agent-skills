@@ -30,7 +30,8 @@ matching what OpenAI's own manifests do rather than relying on fallback behaviou
 ├── plugin.toml                   ← the ONLY file you hand-edit
 ├── skills/<name>/
 │   ├── SKILL.md                  ← shared
-│   └── references/               ← shared
+│   ├── references/               ← optional, shared
+│   └── agents/openai.yaml        ← optional Codex interface and policy
 ├── commands/                     ← optional, shared
 ├── hooks/                        ← optional, shared
 ├── .claude-plugin/plugin.json    ← generated
@@ -51,7 +52,8 @@ a legacy path) and `.agents/plugins/marketplace.json` (Codex canonical). Both ge
 
 - **Manifests**: `uv run scripts/sync_manifests.py --check` must pass.
 - **Skills**: `uv run scripts/validate_skills.py` must pass.
-- **Linting**: `uv run ruff check .` must pass with no errors.
+- **Contract tests**: `uv run pytest tests/` must pass when `tests/` exists.
+- **Linting**: `uv run ruff check scripts/ tests/` must pass with no errors.
 - **Formatting**: `uv run ruff format --check .` must pass.
 - **Type checking**: `uv run pyright` must pass.
 - All must pass before claiming any change is complete.

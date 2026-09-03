@@ -1,0 +1,16 @@
+{
+  "name": "task-status",
+  "description": "A compact, terminal-safe visual summary of the current task: completed work, current focus, next steps, deferred items, and blockers.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Yorrick Jansen"
+  },
+  "repository": "https://github.com/yorrick/agent-skills",
+  "license": "MIT",
+  "keywords": [
+    "status",
+    "summary",
+    "progress",
+    "handoff"
+  ]
+}

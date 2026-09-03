@@ -8,7 +8,9 @@
 Add a cross-harness `task-status` plugin with one shared Agent Skill. The skill
 condenses the current conversation into a terminal-safe visual status board
 showing completed work, current work, next work, deferred leftovers, and a
-blocker only when one genuinely requires user or external action.
+blocker only when one genuinely requires user or external action. When the
+conversation establishes a non-linear dependency, it adds a compact ASCII
+`FLOW` diagram after the board.
 
 ## Goals
 
@@ -25,7 +27,8 @@ blocker only when one genuinely requires user or external action.
 - No project, Git, issue tracker, or external-system inspection.
 - No file changes, shell commands, tool calls, planning updates, or task
   continuation.
-- No Mermaid, HTML, tables, ANSI colors, box drawing, or multi-column alignment.
+- No Mermaid, HTML, tables, ANSI colors, or box drawing. Multi-column alignment
+  is limited to the optional ASCII `FLOW` diagram.
 - No attempt to replace normal progress updates or project planning.
 
 ## Architecture
@@ -103,6 +106,21 @@ the same outcome cannot appear in more than one of those lanes. A numeric
 progress estimate is intentionally omitted because conversational task units
 are subjective and repeated smoke tests produced misleading arithmetic.
 
+An optional `FLOW` section follows the board only when evidence establishes a
+branch or join through at least two explicit incoming or outgoing edges. An
+edge must come from a direct user statement, an evidence-backed plan, or a
+Blocked item that names its dependency. Lane order and routine workflow order
+do not establish edges. Each diagram node maps to one board item, uses the same
+lane status, and may shorten the label while retaining its key verb and noun.
+The diagram adds no work absent from the board.
+
+Only `FLOW` uses a `text` code fence and multi-column alignment. Its grammar is
+printable 7-bit ASCII with at most eight nodes, one node per line, 24-character
+labels excluding tags and join connectors, 64-character lines, and fixed
+branch and join connectors. `FLOW` is the first line inside the fence, never a
+separate heading. The board remains unfenced so pull-request links stay
+clickable; URLs and named or numbered pull requests never appear inside `FLOW`.
+
 ## Content Rules
 
 - Lead with the active goal in plain language.
@@ -121,8 +139,8 @@ are subjective and repeated smoke tests produced misleading arithmetic.
 - Show `Blocked` only when progress genuinely requires user or external action.
 - If only compacted or resumed-session context is available, add
   `Basis: summarized conversation` beneath the goal.
-- Do not add explanations before or after the board. Put material uncertainty
-  under `Next`.
+- Do not add explanations before or after the visual status summary. Put
+  material uncertainty under `Next`.
 
 ## Documentation and Validation
 
@@ -131,10 +149,13 @@ are subjective and repeated smoke tests produced misleading arithmetic.
 - Generate manifests with `uv run scripts/sync_manifests.py`.
 - Add `tests/test_task_status_skill.py` and a CI pytest step. The test asserts
   that `SKILL.md` exists, its frontmatter has the portable name and description,
-  all five lane markers and the read-only instruction are present, and Mermaid
-  fences, table pipes, ANSI escapes, HTML, and block elements U+2580 through
-  U+259F plus box-drawing characters U+2500 through U+257F are absent. It also
-  asserts that `agents/openai.yaml` exists, anchors
+  all five lane markers and the read-only instruction are present. It validates
+  the canonical `FLOW` example's ASCII grammar, node and line limits, allowed
+  status tags, join alignment, and absence of URLs or pull-request references.
+  It rejects Mermaid fences, Markdown table separators outside `FLOW`, ANSI
+  escapes, HTML, and block elements U+2580 through U+259F plus box-drawing
+  characters U+2500 through U+257F. It also asserts that
+  `agents/openai.yaml` exists, anchors
   `allow_implicit_invocation: false` beneath `policy:`, and anchors a
   `$task-status` default prompt beneath `interface:`.
 - Run manifest synchronization/checking, skill validation, the contract test,

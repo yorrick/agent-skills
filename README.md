@@ -137,7 +137,9 @@ claude plugin install agent-session-monitor@yorrick
 
 Shows a compact, terminal-safe visual summary of the current task: what is done,
 what is happening now, what comes next, what was deferred, and what is blocked.
-It is strictly read-only and uses only the current conversation as evidence.
+When conversation evidence establishes a real branch or join, it also adds a
+compact ASCII dependency diagram. It is strictly read-only and uses only the
+current conversation as evidence.
 
 Invoke it with `/task-status:task-status` in Claude Code or `$task-status` in
 Codex.

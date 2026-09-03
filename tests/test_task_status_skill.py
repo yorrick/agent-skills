@@ -49,6 +49,12 @@ def test_skill_contract() -> None:
     assert "Put self-resolvable work under Next." in body
     assert "not the act of generating this board" in body
     assert "Remove the Basis line unless only compacted or resumed conversation" in body
+    assert "Emit the final board as plain Markdown, never inside a code fence." in body
+    assert "Whenever naming or numbering a pull request in the final board" in body
+    assert "use a clickable Markdown link with its evidence-backed URL" in body
+    assert "Do not guess or construct a URL." in body
+    assert "describe the outcome generically" in body
+    assert "add `Obtain the missing review link` under Next" in body
     assert "Progress:" not in body
     assert "Output only the board, with no explanation before or after it." in body
 

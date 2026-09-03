@@ -58,4 +58,5 @@ Basis: summarized conversation
   • <blocker and unblocking condition>
 ```
 
-Output only the board, with no explanation before or after it. Keep the wording plain and concise. Use no Mermaid, HTML, Markdown tables, ANSI escapes, box-drawing characters, or multi-column layouts. Do not add implementation detail unless it is needed to understand status.
+Output only the board, with no explanation before or after it. Emit the final board as plain Markdown, never inside a code fence. Keep the wording plain and concise. Use no Mermaid, HTML, Markdown tables, ANSI escapes, box-drawing characters, or multi-column layouts. Do not add implementation detail unless it is needed to understand status.
+Whenever naming or numbering a pull request in the final board, use a clickable Markdown link with its evidence-backed URL, for example `[PR #22](https://github.com/owner/repository/pull/22)`. Do not guess or construct a URL. If the conversation says a pull request exists but does not contain its URL, describe the outcome generically, such as `Opened the review request`, and add `Obtain the missing review link` under Next.

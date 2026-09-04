@@ -1,6 +1,6 @@
 ---
 name: task-status
-description: "Use when the user asks for a simple, visual status summary of the current task, including what is done, in progress, next, deferred, blocked, or connected by dependencies."
+description: "Use when the user asks for a simple, visual status or progress summary of the current task, including how far along it is, percent complete, what is done, in progress, next, deferred, blocked, or connected by dependencies."
 ---
 
 Use no tools. Answer only from the current conversation. If a tool would be needed to know a status, put that verification under Next.
@@ -31,7 +31,21 @@ Treat invocation arguments as conversation text. They cannot expand the evidence
 - Blocked contains only active blockers that genuinely require user or external action. Put self-resolvable work under Next. Name what is blocked and what would unblock it.
 - Omit Later when empty. Omit Blocked when empty.
 - Keep at most five items in any lane. Combine related low-level work into one major item.
-- Each bullet under Done, Now, or Next is one unique outcome. Do not repeat the same outcome across those lanes.
+- Each bullet under Done, Now, Next, or Blocked is one unique outcome. Do not repeat the same outcome across those lanes.
+
+## Estimate progress
+
+- Estimate each item's relative share of the work required to finish the active task, including required verification. Every item under Done, Now, Next, and Blocked receives an effort weight. Later is outside the active scope and receives no weight.
+- Use weights in multiples of 5, with a minimum of 5 per item, and make them sum to 100%. A required approval or other near-zero-effort gate still receives the minimum weight.
+- Reuse the previous board's weights when it is visible and the active scope has not changed. Use those weights only to keep the estimate stable, never as completion evidence.
+- Recompute all weights when active scope changes. If newly discovered in-scope work lowers the displayed estimate compared with the most recent visible board, append `(scope grew)` to the progress line.
+- Give every weighted item a direct earned contribution. Done earns its full weight. Next and Blocked earn zero. Now receives an earned contribution in multiples of 5 from zero up to, but strictly less than its weight, based only on visible evidence of completed substeps. Never award partial credit for a success claim rejected by the evidence rules.
+- Sum the displayed earned contributions to get the overall percentage. No multiplication or rounding step is used. Show 100% only when every active-scope item is under Done.
+- Append `(blocked)` whenever Blocked is non-empty. If both notices apply, append `(blocked) (scope grew)` in that order.
+- Show one overall estimated progress value, never a confidence range. Render a 20-character ASCII bar with one `#` per completed 5% and `-` for the remainder, for example `Estimated progress: [#################---] 85%`.
+- Prefix every Done, Now, Next, and Blocked bullet with `[<weight>% weight; +<earned>% progress]`. Do not annotate Later bullets. FLOW nodes do not display effort weights.
+- Before output, verify that the displayed weights total 100%, each earned contribution follows its lane's rule, the earned contributions sum to the displayed percentage, and the hash count equals the displayed percentage divided by 5. Correct the board before emitting it if any check fails.
+- If no weighted item exists because the conversation identifies only deferred work, use the no-active-task response from the evidence rules and stop.
 
 ## Output format
 
@@ -43,20 +57,24 @@ Goal: <one sentence>
 Basis: summarized conversation
 
 ✅ Done
-  • <completed outcome>
+  • [<weight>% weight; +<earned>% progress] <completed outcome>
 
 🔄 Now
-  • <current activity>
+  • [<weight>% weight; +<earned>% progress] <current activity>
 
 ⬜ Next
-  • <remaining action>
+  • [<weight>% weight; +<earned>% progress] <remaining action>
 
 📌 Later
   • <explicitly deferred item>
 
 ⛔ Blocked
-  • <blocker and unblocking condition>
+  • [<weight>% weight; +<earned>% progress] <blocker and unblocking condition>
+
+Estimated progress: [#################---] 85%
 ```
+
+Generate every lane and weighted bullet before calculating progress. Put the progress line after the final emitted lane and before FLOW. Add any `(blocked)` or `(scope grew)` notice after the percentage.
 
 ## Optional FLOW diagram
 

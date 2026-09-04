@@ -85,26 +85,44 @@ TASK STATUS
 Goal: <one sentence>
 
 ✅ Done
-  • <completed major outcome>
+  • [<weight>% weight; +<earned>% progress] <completed major outcome>
 
 🔄 Now
-  • <current activity>
+  • [<weight>% weight; +<earned>% progress] <current activity>
 
 ⬜ Next
-  • <remaining work in execution order>
+  • [<weight>% weight; +<earned>% progress] <remaining work in execution order>
 
 📌 Later
   • <explicitly deferred idea or follow-up>
 
 ⛔ Blocked
-  • <only when user or external action is truly required>
+  • [<weight>% weight; +<earned>% progress] <only when user or external action is truly required>
+
+Estimated progress: [#################---] 85%
 ```
 
 The display is vertical so double-width emoji cannot break column alignment.
-Each bullet under `Done`, `Now`, and `Next` represents one unique outcome, and
-the same outcome cannot appear in more than one of those lanes. A numeric
-progress estimate is intentionally omitted because conversational task units
-are subjective and repeated smoke tests produced misleading arithmetic.
+Each bullet under `Done`, `Now`, `Next`, and `Blocked` represents one unique
+outcome, and the same outcome cannot appear in more than one of those lanes.
+
+The progress line is a weighted estimate of the active scope rather than an
+equal item count. The agent assigns 5-point effort weights totaling 100% across
+`Done`, `Now`, `Next`, and `Blocked`; `Later` is excluded. Each bullet displays
+both its weight and its earned contribution. `Done` earns its full weight,
+`Next` and `Blocked` earn zero, and `Now` earns an evidence-backed multiple of 5
+that remains below its weight. Adding the earned contributions gives the exact
+overall percentage. No multiplication or rounding is required, and 100% is
+possible only when every active item is Done. The 20-character ASCII bar uses
+one hash per 5%. Before output, the skill checks the weight total, contribution
+rules, contribution sum, and bar length. These constraints and visible per-item
+arithmetic address the inconsistent, unauditable calculations seen in the
+earlier smoke tests.
+
+The agent emits all weighted lanes before the progress line. This generation
+order makes the visible contributions available before it calculates their
+sum. The progress line remains the final board summary immediately before any
+optional `FLOW` diagram.
 
 An optional `FLOW` section follows the board only when evidence establishes a
 branch or join through at least two explicit incoming or outgoing edges. An

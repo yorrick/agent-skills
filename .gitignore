@@ -4,3 +4,4 @@
 .claude/worktrees/
 dev-loop/tests/workflow_eval/results/
 __pycache__/
+.codex-marketplace-install.json

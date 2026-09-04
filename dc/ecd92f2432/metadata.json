@@ -3,7 +3,7 @@
   "checkpoint_id": "dcecd92f2432",
   "strategy": "manual-commit",
   "branch": "task-status/weighted-progress",
-  "checkpoints_count": 2,
+  "checkpoints_count": 3,
   "files_touched": [
     ".agents/plugins/marketplace.json",
     ".claude-plugin/marketplace.json",
@@ -27,13 +27,19 @@
       "transcript": "/dc/ecd92f2432/1/full.jsonl",
       "content_hash": "/dc/ecd92f2432/1/content_hash.txt",
       "prompt": "/dc/ecd92f2432/1/prompt.txt"
+    },
+    {
+      "metadata": "/dc/ecd92f2432/2/metadata.json",
+      "transcript": "/dc/ecd92f2432/2/full.jsonl",
+      "content_hash": "/dc/ecd92f2432/2/content_hash.txt",
+      "prompt": "/dc/ecd92f2432/2/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 8,
-    "cache_creation_tokens": 133254,
-    "cache_read_tokens": 382203,
-    "output_tokens": 523,
-    "api_call_count": 4
+    "input_tokens": 12,
+    "cache_creation_tokens": 163747,
+    "cache_read_tokens": 609807,
+    "output_tokens": 979,
+    "api_call_count": 6
   }
 }

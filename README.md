@@ -137,6 +137,8 @@ claude plugin install agent-session-monitor@yorrick
 
 Shows a compact, terminal-safe visual summary of the current task: what is done,
 what is happening now, what comes next, what was deferred, and what is blocked.
+It estimates each active item's relative effort and displays one weighted overall
+completion percentage, excluding explicitly deferred work.
 When conversation evidence establishes a real branch or join, it also adds a
 compact ASCII dependency diagram. It is strictly read-only and uses only the
 current conversation as evidence.

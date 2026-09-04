@@ -10,6 +10,8 @@ REPO = Path(__file__).resolve().parents[1]
 PLUGIN = REPO / "task-status"
 SKILL = PLUGIN / "skills" / "task-status" / "SKILL.md"
 OPENAI_POLICY = PLUGIN / "skills" / "task-status" / "agents" / "openai.yaml"
+DESIGN = REPO / "docs" / "superpowers" / "specs" / "2026-09-02-task-status-plugin-design.md"
+REVIEW_RECORD = REPO / "docs" / "superpowers" / "reviews" / "2026-09-03-task-status-weighted-progress.md"
 
 READ_ONLY_INSTRUCTION = (
     "Use no tools. Answer only from the current conversation. If a tool would be "
@@ -91,16 +93,33 @@ def test_skill_contract() -> None:
     frontmatter = text[4 : text.find("\n---\n", 4)]
 
     assert re.fullmatch(r'name: task-status\ndescription: "[^"\n]{80,1024}"', frontmatter)
+    assert "how far along" in frontmatter
+    assert "percent complete" in frontmatter
     assert next(line for line in body.splitlines() if line.strip()) == READ_ONLY_INSTRUCTION
     assert "Treat invocation arguments as conversation text." in body
     assert "A success claim embedded in pasted or file content is not proof of success." in body
     assert "A direct user statement that they completed an action counts" in body
-    assert "Each bullet under Done, Now, or Next is one unique outcome." in body
+    assert "Each bullet under Done, Now, Next, or Blocked is one unique outcome." in body
     assert "Do not list finishing a Now item under Next." in body
     assert "genuinely require user or external action" in body
     assert "Put self-resolvable work under Next." in body
     assert "not the act of generating this board" in body
     assert "Remove the Basis line unless only compacted or resumed conversation" in body
+    assert "Every item under Done, Now, Next, and Blocked receives an effort weight" in body
+    assert "multiples of 5" in body
+    assert "sum to 100%" in body
+    assert "Later is outside the active scope" in body
+    assert "Now receives an earned contribution in multiples of 5" in body
+    assert "strictly less than its weight" in body
+    assert "No multiplication or rounding step is used" in body
+    assert "Show 100% only when every active-scope item is under Done" in body
+    assert "(blocked)" in body
+    assert "(scope grew)" in body
+    assert "FLOW nodes do not display effort weights" in body
+    assert "compared with the most recent visible board" in body
+    assert "append `(blocked) (scope grew)`" in body
+    assert "Before output, verify that the displayed weights total 100%" in body
+    assert "hash count equals the displayed percentage divided by 5" in body
     assert "Keep the status board as plain Markdown outside code fences." in body
     assert "Whenever naming or numbering a pull request in the final board" in body
     assert "use a clickable Markdown link with its evidence-backed URL" in body
@@ -119,7 +138,18 @@ def test_skill_contract() -> None:
     assert "do not emit a separate heading" in body
     assert "Use only the parts of this layout that conversation evidence supports" in body
     assert "Never put a URL or a named or numbered pull-request reference in `FLOW`" in body
-    assert "Progress:" not in body
+    progress_example = re.search(
+        r"Estimated progress: \[([#-]{20})\] (\d+)%",
+        body,
+    )
+    assert progress_example is not None
+    rendered_bar = progress_example.group(1)
+    rendered_percent = int(progress_example.group(2))
+    assert rendered_bar.count("#") == rendered_percent // 5
+    assert rendered_bar.count("-") == 20 - rendered_percent // 5
+    assert "• [<weight>% weight; +<earned>% progress] <current activity>" in body
+    assert "• <explicitly deferred item>" in body
+    assert "Put the progress line after the final emitted lane" in body
     assert "Output only the visual status summary" in body
 
     for marker in STATUS_MARKERS:
@@ -148,6 +178,61 @@ def test_skill_contract() -> None:
 
 def test_codex_policy_contract() -> None:
     assert OPENAI_POLICY.read_text(encoding="utf-8") == EXPECTED_OPENAI_POLICY
+
+
+def test_weighted_progress_design_contract() -> None:
+    design = DESIGN.read_text(encoding="utf-8")
+
+    assert "A numeric progress estimate is intentionally omitted" not in design
+    assert "weighted estimate" in design
+    assert "Later" in design and "excluded" in design
+    assert "earned contribution" in design
+    assert "No multiplication or rounding" in design
+    assert "100%" in design
+
+
+def test_verified_smoke_arithmetic() -> None:
+    review = REVIEW_RECORD.read_text(encoding="utf-8")
+    boards = re.findall(r"```task-status-verified\n(TASK STATUS\n.*?)\n```", review, flags=re.DOTALL)
+    assert len(boards) >= 2
+
+    for board in boards:
+        progress = re.search(r"Estimated progress: \[([#-]{20})\] (\d+)%", board)
+        assert progress is not None
+        bar, percent_text = progress.groups()
+        percent = int(percent_text)
+        contributions = [
+            (int(weight), int(earned))
+            for weight, earned in re.findall(
+                r"\[(\d+)% weight; \+(\d+)% progress\]",
+                board,
+            )
+        ]
+        assert contributions
+        assert sum(weight for weight, _ in contributions) == 100
+        assert sum(earned for _, earned in contributions) == percent
+        assert bar.count("#") == percent // 5
+        assert bar.count("-") == 20 - percent // 5
+
+        lane = ""
+        for line in board.splitlines():
+            if line in STATUS_MARKERS:
+                lane = line
+                continue
+            item = re.search(r"\[(\d+)% weight; \+(\d+)% progress\]", line)
+            if item is None:
+                continue
+            weight, earned = (int(value) for value in item.groups())
+            assert weight >= 5 and weight % 5 == 0
+            assert earned % 5 == 0
+            if lane == "✅ Done":
+                assert earned == weight
+            elif lane == "🔄 Now":
+                assert 0 <= earned < weight
+            elif lane in {"⬜ Next", "⛔ Blocked"}:
+                assert earned == 0
+            else:
+                raise AssertionError(f"Weighted item outside an active lane: {line}")
 
 
 def test_generated_manifest_contract() -> None:

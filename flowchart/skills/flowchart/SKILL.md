@@ -30,13 +30,14 @@ Read `references/design-and-sources.md` for source-backed design decisions, form
 - Name actions with short verbs. Explain unfamiliar terms in ordinary language before using technical labels alone.
 - Identify who acts and what moves. For an internal action, show meaningful internal components or one process node; do not invent a second external party to satisfy a layout.
 - Use conventional shapes when their meaning helps, and use color sparingly with text or shape cues so color is never the only signal.
-- Show essential context and the current position. Put additional detail next to the selected step, without hiding branches needed to understand the process.
+- Show essential context and the current position. When global relationships matter, provide an overview of the process alongside step details; progressive disclosure must not hide the structure the reader needs to understand.
 - Keep proposed, observed, pending, succeeded, and failed states distinct. An explanatory scenario is not live telemetry.
 - Do not imply success after a failure, automatic recovery that does not exist, or an outcome that the evidence cannot verify.
 
 ## Interactive walkthroughs
 
 - Choose the number of steps from the process, not a fixed template. Let users go backward, forward, and directly to a step where useful.
+- If overview and detail views coexist, preserve selection when switching and keep focus on visible controls. Avoid duplicate step navigation in the same view.
 - Keep navigation controls in a stable position with constant labels. Display start/end status separately; do not silently wrap unless that behavior is requested.
 - Match keyboard behavior to the delivery surface. A standalone walkthrough should accept its advertised arrows on a fresh page, while an embedded diagram must not capture the surrounding application's shortcuts.
 - Make clicking the diagram canvas or explanatory text activate its keyboard controls when appropriate. Preserve native controls, label-to-control focus, text selection, modifier shortcuts, visible focus, and a way to Tab out.
@@ -52,5 +53,6 @@ A hidden focus-setup test is not end-to-end validation.
 - Check repeated mouse clicks at the same coordinates, not only locator-based clicks that find a moving button again.
 - Exercise every relevant branch/scenario, narrow layouts, live resizing, and supported themes. Inspect text clipping, connector direction, focus behavior, and JavaScript errors.
 - Test inline and exported versions separately; iframe wrappers and focus boundaries can change keyboard behavior even when the diagram code is identical.
+- For multiple views, check the overview's complete sequence, selection/focus across view changes, and stable navigation positions across views and scenarios.
 - Record what was actually tested and any access or browser limitation. Do not describe a test browser as the user's live tab, or synthetic key events as proof of native popup behavior.
 - Follow the session's review and delivery rules. Do not introduce a new release, installation, or approval policy solely because this skill was used.

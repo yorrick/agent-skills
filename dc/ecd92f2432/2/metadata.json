@@ -1,0 +1,41 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "dcecd92f2432",
+  "session_id": "433c75e2-6028-483c-9ab2-734d8907c0e1",
+  "strategy": "manual-commit",
+  "created_at": "2026-09-04T00:14:18.097721Z",
+  "branch": "task-status/weighted-progress",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".agents/plugins/marketplace.json",
+    ".claude-plugin/marketplace.json",
+    "README.md",
+    "docs/superpowers/specs/2026-09-02-task-status-plugin-design.md",
+    "task-status/.claude-plugin/plugin.json",
+    "task-status/.codex-plugin/plugin.json",
+    "task-status/plugin.toml",
+    "task-status/skills/task-status/SKILL.md",
+    "tests/test_task_status_skill.py"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "097909cee393",
+  "token_usage": {
+    "input_tokens": 4,
+    "cache_creation_tokens": 30493,
+    "cache_read_tokens": 227604,
+    "output_tokens": 456,
+    "api_call_count": 2
+  },
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-09-04T00:14:18.071312Z",
+    "agent_lines": 128,
+    "human_added": 205,
+    "human_modified": 7,
+    "human_removed": 0,
+    "total_committed": 340,
+    "agent_percentage": 37.64705882352941
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "dcecd92f2432",
+  "strategy": "manual-commit",
+  "branch": "task-status/weighted-progress",
+  "checkpoints_count": 4,
+  "files_touched": [
+    ".agents/plugins/marketplace.json",
+    ".claude-plugin/marketplace.json",
+    ".gitignore",
+    "README.md",
+    "docs/superpowers/specs/2026-09-02-task-status-plugin-design.md",
+    "task-status/.claude-plugin/plugin.json",
+    "task-status/.codex-plugin/plugin.json",
+    "task-status/plugin.toml",
+    "task-status/skills/task-status/SKILL.md",
+    "tests/test_task_status_skill.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/dc/ecd92f2432/0/metadata.json",
+      "transcript": "/dc/ecd92f2432/0/full.jsonl",
+      "content_hash": "/dc/ecd92f2432/0/content_hash.txt",
+      "prompt": "/dc/ecd92f2432/0/prompt.txt"
+    },
+    {
+      "metadata": "/dc/ecd92f2432/1/metadata.json",
+      "transcript": "/dc/ecd92f2432/1/full.jsonl",
+      "content_hash": "/dc/ecd92f2432/1/content_hash.txt",
+      "prompt": "/dc/ecd92f2432/1/prompt.txt"
+    },
+    {
+      "metadata": "/dc/ecd92f2432/2/metadata.json",
+      "transcript": "/dc/ecd92f2432/2/full.jsonl",
+      "content_hash": "/dc/ecd92f2432/2/content_hash.txt",
+      "prompt": "/dc/ecd92f2432/2/prompt.txt"
+    },
+    {
+      "metadata": "/dc/ecd92f2432/3/metadata.json",
+      "transcript": "/dc/ecd92f2432/3/full.jsonl",
+      "content_hash": "/dc/ecd92f2432/3/content_hash.txt",
+      "prompt": "/dc/ecd92f2432/3/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 16,
+    "cache_creation_tokens": 193948,
+    "cache_read_tokens": 837404,
+    "output_tokens": 1273,
+    "api_call_count": 8
+  }
+}

@@ -1,0 +1,3 @@
+Use the task-status skill to summarize this current task.
+
+Current task: ship the weighted task-status enhancement. Direct conversation evidence says the design was approved, the skill changes are implemented, and all repository tests passed. The activity underway immediately before this request is independent review; one of its three review-and-fix substeps has completed. After review, the remaining required outcome is opening the pull request. Updating an unrelated plugin was explicitly deferred and is outside this task. There are no active blockers. Implementation and tests were substantially more effort than review, while opening the pull request is small.

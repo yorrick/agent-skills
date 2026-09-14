@@ -1,0 +1,17 @@
+{
+  "name": "flowchart",
+  "description": "Create clear process flowcharts and interactive walkthroughs, with evidence-based layout guidance and keyboard checks for the actual delivery surface.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Yorrick Jansen"
+  },
+  "repository": "https://github.com/yorrick/agent-skills",
+  "license": "MIT",
+  "keywords": [
+    "flowchart",
+    "process",
+    "diagram",
+    "walkthrough",
+    "keyboard"
+  ]
+}

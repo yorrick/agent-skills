@@ -151,6 +151,17 @@ claude plugin install task-status@yorrick
 codex plugin add task-status@yorrick
 ```
 
+### flowchart
+
+Creates clear process diagrams and interactive walkthroughs for Claude Code and
+Codex. It covers source-backed flowchart design, format selection, plain labels,
+and keyboard checks on the actual inline or exported surface.
+
+```fish
+claude plugin install flowchart@yorrick
+codex plugin add flowchart@yorrick
+```
+
 ### supabase-security
 
 Access-control rules for Supabase projects exposed directly to a browser via PostgREST:

@@ -1,0 +1,6 @@
+[plugin]
+name = "flowchart"
+version = "0.1.0"
+license = "MIT"
+description = "Create clear process flowcharts and interactive walkthroughs, with evidence-based layout guidance and keyboard checks for the actual delivery surface."
+keywords = ["flowchart", "process", "diagram", "walkthrough", "keyboard"]

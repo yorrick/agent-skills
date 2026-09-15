@@ -1,0 +1,6 @@
+[plugin]
+name = "visual-design-review"
+version = "0.1.0"
+license = "MIT"
+description = "Present system designs as visual decisions, reuse available diagram skills, and carry the user's choices back into the specification."
+keywords = ["design", "review", "architecture", "decisions", "visualization"]

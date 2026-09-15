@@ -69,6 +69,15 @@
       "author": {
         "name": "Yorrick Jansen"
       }
+    },
+    {
+      "name": "visual-design-review",
+      "source": "./visual-design-review",
+      "description": "Present system designs as visual decisions, reuse available diagram skills, and carry the user's choices back into the specification.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Yorrick Jansen"
+      }
     }
   ]
 }

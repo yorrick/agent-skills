@@ -162,6 +162,18 @@ claude plugin install flowchart@yorrick
 codex plugin add flowchart@yorrick
 ```
 
+### visual-design-review
+
+Turns a system design into a concise visual review of consequential choices,
+then carries the user's decisions into the specification. It reuses available
+diagram skills, including flowchart, and rendering capabilities such as Codex's
+visualize skill without requiring a Codex-specific host in Claude Code.
+
+```fish
+claude plugin install visual-design-review@yorrick
+codex plugin add visual-design-review@yorrick
+```
+
 ### supabase-security
 
 Access-control rules for Supabase projects exposed directly to a browser via PostgREST:
@@ -189,4 +201,5 @@ claude --plugin-dir ./dev-loop
 claude --plugin-dir ./self-improve-skill
 claude --plugin-dir ./agent-session-monitor
 claude --plugin-dir ./task-status
+claude --plugin-dir ./visual-design-review
 ```

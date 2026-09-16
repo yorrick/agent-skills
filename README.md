@@ -1,10 +1,10 @@
 # Yorrick's Claude Code Plugins
 
-A collection of Claude Code plugins by Yorrick Jansen.
+A collection of agent plugins by Yorrick Jansen (Claude Code, Codex, and opencode).
 
 ## Installation
 
-Every plugin here works with **both Claude Code and Codex**.
+Every plugin here works with **Claude Code, Codex, and opencode**.
 
 **Claude Code**
 
@@ -20,7 +20,17 @@ codex plugin marketplace add yorrick/agent-skills
 codex plugin add <plugin-name>@yorrick
 ```
 
-Restart the CLI afterwards — both report that changes need one.
+**opencode**
+
+```json
+{
+  "plugin": ["yorrick-agent-skills@git+https://github.com/yorrick/agent-skills.git"]
+}
+```
+
+See [`.opencode/INSTALL.md`](.opencode/INSTALL.md) for the update story and caveats.
+
+Restart the CLI afterwards.
 
 ### Updating
 
@@ -62,11 +72,20 @@ ls ~/.codex/plugins/cache/yorrick/<plugin-name>/
 every installed machine at next Codex startup, with no review step and no notification.
 Protect this branch accordingly.
 
+opencode installs the repository as a git plugin spec and may pin the resolved commit
+in a lockfile, so a restart alone may not fetch a newer revision. If changes do not
+appear, remove the cached package (this also clears branch-pinned installs) and restart:
+
+```bash
+rm -rf ~/.cache/opencode/packages/yorrick-agent-skills*
+```
+
 ### Removing
 
 ```
 claude plugin uninstall <plugin-name>@yorrick
 codex plugin remove <plugin-name>@yorrick
+# opencode: remove the plugin line from opencode.json, then clear the package cache above
 ```
 
 Removing the *marketplace* is a bigger hammer — in Claude Code it also uninstalls every
@@ -202,4 +221,13 @@ claude --plugin-dir ./self-improve-skill
 claude --plugin-dir ./agent-session-monitor
 claude --plugin-dir ./task-status
 claude --plugin-dir ./visual-design-review
+```
+
+opencode resolves a filesystem path as a plugin spec, so a checkout can be loaded
+directly:
+
+```json
+{
+  "plugin": ["/path/to/agent-skills"]
+}
 ```

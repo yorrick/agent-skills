@@ -257,13 +257,15 @@ an unmaintained duplicate that is subtly wrong is worse than no check, and two o
 were (the `USING (true)` check missed `1=1` and every whitespace variant).
 
 Resolve the script's path first — a bare relative path resolves against the user's
-working directory, not the plugin, and Codex sets no plugin-root variable at all:
+working directory, not the plugin. Codex sets no plugin-root variable at all, and
+opencode installs packages under `~/.cache/opencode/packages`, so the fallback
+searches every harness's install location:
 
 ```bash
 AUDIT="${CLAUDE_PLUGIN_ROOT:-}/scripts/audit_rls.py"
 [ -f "$AUDIT" ] || AUDIT=$(
-  find ~/.claude/plugins ~/.codex/plugins ~/.agents -name audit_rls.py 2>/dev/null \
-    | xargs -r ls -t | head -1
+  find ~/.claude/plugins ~/.codex/plugins ~/.agents ~/.cache/opencode \
+    -name audit_rls.py 2>/dev/null | xargs -r ls -t | head -1
 )
 [ -f "$AUDIT" ] || echo "audit_rls.py not found — is the plugin installed?"
 

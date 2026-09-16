@@ -1,6 +1,6 @@
 # Agent Instructions
 
-Agent skills and plugins for **both Claude Code and Codex**.
+Agent skills and plugins for **Claude Code, Codex, and opencode**.
 
 `CLAUDE.md` is a symlink to this file, so there is one set of instructions and it cannot
 drift between harnesses.
@@ -8,9 +8,9 @@ drift between harnesses.
 ## The rule that matters
 
 `skills/<name>/SKILL.md` and `references/` are shared **verbatim** between harnesses —
-Codex adopted the same format. The JSON manifests are **generated** from each plugin's
-`plugin.toml`; never hand-edit a `plugin.json` or `marketplace.json`. After changing any
-`plugin.toml`:
+Codex and opencode adopted the same format. The JSON manifests and the root
+`package.json` are **generated** from each plugin's `plugin.toml`; never hand-edit a
+`plugin.json`, `marketplace.json`, or `package.json`. After changing any `plugin.toml`:
 
 ```bash
 uv run scripts/sync_manifests.py
@@ -41,6 +41,12 @@ matching what OpenAI's own manifests do rather than relying on fallback behaviou
 Marketplace manifests: `.claude-plugin/marketplace.json` (Claude Code — Codex reads it as
 a legacy path) and `.agents/plugins/marketplace.json` (Codex canonical). Both generated.
 
+opencode has no manifest. Its install surface is `package.json` (generated) plus
+`.opencode/plugins/agent-skills.js` (hand-written), a plugin entry that discovers every
+`plugin.toml` directory at load time and registers its `skills/` and `commands/` with
+opencode's config. The same file also works as a project plugin when opencode runs
+inside a checkout of this repository.
+
 ## Code quality
 
 - **Ruff** for formatting and linting, **pyright** for type checking.
@@ -52,7 +58,8 @@ a legacy path) and `.agents/plugins/marketplace.json` (Codex canonical). Both ge
 
 - **Manifests**: `uv run scripts/sync_manifests.py --check` must pass.
 - **Skills**: `uv run scripts/validate_skills.py` must pass.
-- **Contract tests**: `uv run pytest tests/` must pass when `tests/` exists.
+- **Contract tests**: `uv run pytest tests/` must pass when `tests/` exists. This
+  includes the opencode entry test, which runs `node`.
 - **Linting**: `uv run ruff check scripts/ tests/` must pass with no errors.
 - **Formatting**: `uv run ruff format --check .` must pass.
 - **Type checking**: `uv run pyright` must pass.
@@ -104,6 +111,14 @@ claude plugin install <name>@yorrick
 ```bash
 codex plugin marketplace add yorrick/agent-skills
 codex plugin add <name>@yorrick
+```
+
+**opencode**
+
+```json
+{
+  "plugin": ["yorrick-agent-skills@git+https://github.com/yorrick/agent-skills.git"]
+}
 ```
 
 Both harnesses auto-update, differently. Claude Code's is **opt-in per marketplace** (off

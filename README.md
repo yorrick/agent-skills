@@ -74,7 +74,7 @@ Protect this branch accordingly.
 
 opencode installs the repository as a git plugin spec and may pin the resolved commit
 in a lockfile, so a restart alone may not fetch a newer revision. If changes do not
-appear, remove the cached package and restart:
+appear, remove the cached package (this also clears branch-pinned installs) and restart:
 
 ```bash
 rm -rf ~/.cache/opencode/packages/yorrick-agent-skills*

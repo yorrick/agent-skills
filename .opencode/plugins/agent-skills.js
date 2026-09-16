@@ -39,10 +39,11 @@ function parseCommandFile(source) {
   for (const line of match[1].split(/\r?\n/)) {
     const colon = line.indexOf(':');
     if (colon <= 0 || line.slice(0, colon).trim() !== 'description') continue;
-    description = line
-      .slice(colon + 1)
-      .trim()
-      .replace(/^["']|["']$/g, '');
+    const value = line.slice(colon + 1).trim();
+    // Only single-line scalars are mapped; a YAML block scalar (`|` or `>`)
+    // would otherwise land a literal "|" in the command menu.
+    if (!value || value.startsWith('|') || value.startsWith('>')) continue;
+    description = value.replace(/^["']|["']$/g, '');
   }
   return { body: source.slice(match[0].length), description };
 }

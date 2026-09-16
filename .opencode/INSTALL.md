@@ -31,6 +31,9 @@ repository separately for each harness.
   `review-loop`, and `workflow`).
 - Not registered: `self-improve-skill`'s session hooks, which have no opencode
   equivalent yet.
+- Not translated: Claude-style `allowed-tools` and `argument-hint` frontmatter.
+  opencode has no per-command tool restrictions, so a command that is tool-limited in
+  Claude Code is not limited here.
 
 A skill or command you defined yourself wins over the plugin's version.
 
@@ -43,6 +46,9 @@ newest commit. If updates do not appear, remove the cached package and restart:
 ```bash
 rm -rf ~/.cache/opencode/packages/yorrick-agent-skills*
 ```
+
+The glob removes branch-pinned installs too (specs using `#branch`), which is
+intended: they are all replaced on the next start.
 
 No git tags exist yet, so installs track `main`.
 

@@ -140,15 +140,20 @@ existing behavior.
 
 The export is a single async function returning `{ config }`.
 
-### 3. Shared skill fix: portable plugin root
+### 3. Shared skill fix: fallbacks also search opencode's cache
 
-`supabase-security/skills/supabase-security/SKILL.md:263` currently reads
-`${CLAUDE_PLUGIN_ROOT:-}/scripts/audit_rls.py`, which resolves nowhere in
-opencode. Adopt the self-locating idiom that
-`pr-review/skills/pr-review/SKILL.md:29` already uses: try the environment
-variable, otherwise derive the plugin root from the skill's own location. The
-skill file stays verbatim across harnesses, and Codex benefits from the same
-fix.
+Both scripts that need a plugin root already carry a self-locating fallback:
+`supabase-security/skills/supabase-security/SKILL.md:263` tries
+`${CLAUDE_PLUGIN_ROOT:-}` first and then searches the known harness cache
+directories, and `pr-review/skills/pr-review/SKILL.md:29` does the same for its
+prompt builder. opencode installs git plugin specs under
+`~/.cache/opencode/packages`, which neither fallback searched, so both `find`
+invocations gain that root. The skills stay verbatim across harnesses, and the
+primary path (`CLAUDE_PLUGIN_ROOT`, which Claude Code sets) is unchanged.
+
+Note for future readers: the fallback takes the most recently modified match, so
+when the same plugin is installed in several harnesses a stale copy can win. That
+behaviour predates this change and is out of scope here.
 
 ### 4. Documentation
 
@@ -231,9 +236,12 @@ Manual end to end, before claiming done:
 3. Add the plugin line to the global `opencode.json`, restart opencode, verify
    the skill list and command menu once more.
 
-## Open items
+## Resolved during implementation
 
-- Whether opencode/bun accepts `#branch` in a git spec (affects only the
-  pre-merge verification path).
-- Whether bun validates that the git package's `name` matches the spec prefix;
-  the design keeps them identical, so either behavior works.
+- opencode accepts `#branch` in a git spec: a branch-pinned install
+  (`#feat/opencode-harness`) registered every skill and command, so the pre-merge
+  verification path was the real shipping path.
+- bun resolves the spec prefix to the package: the install landed in
+  `~/.cache/opencode/packages/yorrick-agent-skills@git+https:...` with the repository
+  under `node_modules/yorrick-agent-skills`, and the plugin-root fallbacks find the
+  scripts there.

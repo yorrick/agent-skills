@@ -23,15 +23,16 @@ Scripts in `scripts/` handle deterministic work (prompt building, GitHub posting
 ## Step 0: Locate the plugin
 
 `CLAUDE_PLUGIN_ROOT` is set by Claude Code only — **Codex sets no plugin-root variable
-at all**, so it would expand to an empty string. Resolve the root once, then reuse it:
+at all**, so it would expand to an empty string, and opencode uses neither. Resolve the
+root once, then reuse it:
 
 ```bash
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 [ -f "$PLUGIN_ROOT/scripts/build_prompts.py" ] || PLUGIN_ROOT=$(
-  find ~/.claude/plugins ~/.codex/plugins ~/.agents -path "*pr-review*" \
-       -name build_prompts.py 2>/dev/null | head -1 | xargs -r dirname | xargs -r dirname
+  find ~/.claude/plugins ~/.codex/plugins ~/.agents ~/.cache/opencode \
+       -path "*pr-review*" -name build_prompts.py 2>/dev/null \
+       | head -1 | xargs -r dirname | xargs -r dirname
 )
-echo "$PLUGIN_ROOT"
 ```
 
 ## Step 1: Build Prompts

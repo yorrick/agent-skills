@@ -5,15 +5,20 @@
 """Generate every harness-specific manifest from one source of truth.
 
 Write the skill ONCE. Each plugin declares itself in `plugins/<name>/plugin.toml`;
-this script derives all four generated files from it:
+this script derives all five generated files from it:
 
     .claude-plugin/plugin.json          per plugin, Claude Code
     .codex-plugin/plugin.json           per plugin, Codex
     .claude-plugin/marketplace.json     repo root, Claude Code (Codex reads it too)
     .agents/plugins/marketplace.json    repo root, Codex canonical
+    package.json                        repo root, opencode
 
 Nothing else differs between the harnesses: SKILL.md, references/ and scripts/ are
-shared verbatim, because both CLIs consume the same SKILL.md format.
+shared verbatim, because all three CLIs consume the same SKILL.md format.
+
+opencode has no manifest of its own: it installs this repository as a git package
+and resolves package.json's `main` to .opencode/plugins/agent-skills.js, a
+hand-written entry that registers every plugin's skills and commands at load time.
 
 Usage:
     uv run scripts/sync_manifests.py            # write the manifests
@@ -37,8 +42,9 @@ PLUGINS = REPO
 
 MARKETPLACE_NAME = "yorrick"
 OWNER = "Yorrick Jansen"
-MARKETPLACE_DESCRIPTION = "Agent skills and plugins by Yorrick Jansen (Claude Code and Codex)"
+MARKETPLACE_DESCRIPTION = "Agent skills and plugins by Yorrick Jansen (Claude Code, Codex, and opencode)"
 REPOSITORY_URL = "https://github.com/yorrick/agent-skills"
+PACKAGE_NAME = "yorrick-agent-skills"
 
 
 def load_plugins() -> list[dict]:
@@ -121,6 +127,34 @@ def marketplace_manifest(plugins: list[dict]) -> dict:
     }
 
 
+def version_tuple(version: str) -> tuple[int, int, int]:
+    """Parse a plain x.y.z version, raising rather than guessing."""
+    parts = version.split(".")
+    if len(parts) != 3 or not all(p.isdigit() for p in parts):
+        raise SystemExit(f"version '{version}' is not plain x.y.z")
+    return int(parts[0]), int(parts[1]), int(parts[2])
+
+
+def package_json(plugins: list[dict]) -> dict:
+    """The opencode package manifest.
+
+    opencode installs this repository as a git package and resolves `main` to
+    the plugin entry, which registers every plugin's skills and commands.
+    The version exists only to satisfy the package format -- opencode keys its
+    git cache on the spec, not on this field -- so it is derived from the
+    newest plugin version instead of being hand-edited, and cannot drift.
+    """
+    newest = max(version_tuple(p["version"]) for p in plugins)
+    return {
+        "name": PACKAGE_NAME,
+        "version": ".".join(str(n) for n in newest),
+        "description": MARKETPLACE_DESCRIPTION,
+        "license": "MIT",
+        "type": "module",
+        "main": ".opencode/plugins/agent-skills.js",
+    }
+
+
 def targets(plugins: list[dict]) -> dict[Path, dict]:
     """Every generated file, mapped to its expected content."""
     out: dict[Path, dict] = {}
@@ -131,6 +165,7 @@ def targets(plugins: list[dict]) -> dict[Path, dict]:
     market = marketplace_manifest(plugins)
     out[REPO / ".claude-plugin" / "marketplace.json"] = market
     out[REPO / ".agents" / "plugins" / "marketplace.json"] = market
+    out[REPO / "package.json"] = package_json(plugins)
     return out
 
 

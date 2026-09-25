@@ -363,6 +363,7 @@ inspector_port = 8083
 deno_version = 2
 
 [functions.lab-tenant]
+# The local handler verifies the Auth user before its service-role query.
 verify_jwt = false
 
 # [edge_runtime.secrets]

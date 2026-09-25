@@ -54,7 +54,7 @@ See `beyond-the-data-api.md`.
 - [ ] Every `storage.objects` policy pins `bucket_id` **and** an owner or path predicate, and names its role. (R1, R14)
 - [ ] Signed URLs are issued server-side with short lifetimes. (R14)
 - [ ] Realtime "Allow public access" is off if any channel carries private data, and `realtime.messages` has topic-scoped policies. (R14)
-- [ ] Tables whose deletions are sensitive are not in the `supabase_realtime` publication with `REPLICA IDENTITY FULL`. (R14)
+- [ ] Tables whose primary keys are sensitive are not in the `supabase_realtime` publication; `DELETE` events skip RLS. (R14)
 - [ ] Every Edge Function with `verify_jwt = false`, or that uses the secret key, authorizes the caller in its handler. (R14)
 
 ## Vault / secrets

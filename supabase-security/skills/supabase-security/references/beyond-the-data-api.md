@@ -61,8 +61,10 @@ A's folder gets an empty list and a 400/404, before and after any policy change.
 
 - `postgres_changes` delivers row changes filtered by the **source table's RLS**, so it
   inherits your table policies. Exception: RLS is **not** applied to `DELETE` events,
-  because the deleted row no longer exists to check. The event carries the primary key
-  (or the full old row with `REPLICA IDENTITY FULL`).
+  because the deleted row no longer exists to check. On a table with RLS enabled the
+  event carries only the primary key, even with `REPLICA IDENTITY FULL`, so every
+  subscriber on the table learns which keys were deleted. That matters when the key
+  itself is meaningful (an email, a slug, a sequential ID).
 - **Broadcast** and **Presence** on a *public* channel are open to anyone holding the
   publishable key, for reading and sending.
 - *Private* channels are authorized by RLS policies on `realtime.messages`, keyed on
@@ -71,7 +73,9 @@ A's folder gets an empty list and a 400/404, before and after any policy change.
 **The fix**
 
 1. Turn off **"Allow public access"** in Realtime settings, so every channel must be
-   private. Without this, a client can simply ask for a public channel with the same name.
+   private. A public channel with the same topic is a separate channel and does not
+   receive private messages, but while public access is on, any feature that sends on
+   a public channel is open to every holder of the publishable key.
 2. Create channels with `{ config: { private: true } }`.
 3. Add topic-scoped policies:
 
@@ -88,9 +92,8 @@ create policy "members read their room" on realtime.messages
 
 Use the same predicate for an `insert` policy if members may send.
 
-4. Tables whose deletions are sensitive should not be in the `supabase_realtime`
-   publication, or should use the default replica identity so `DELETE` events carry only
-   the key.
+4. Tables whose primary keys are sensitive should not be in the `supabase_realtime`
+   publication: `DELETE` events reach every subscriber without an RLS check.
 
 **Checking it**
 

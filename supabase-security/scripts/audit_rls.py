@@ -16,12 +16,16 @@ Runs TWO rule sets in one pass:
    gives complete coverage instead of relying on someone remembering a second
    tool, which is exactly what does not happen.
 
-2. FOUR RULES SPLINTER DOES NOT HAVE:
+2. RULES SPLINTER DOES NOT HAVE:
 
        R4   delete-and-reinsert defeating a column-level UPDATE revoke
+       R13  an Auth hook left executable by the API roles
+       R1   permissive policies covering ALL commands, or applying TO PUBLIC
+            (including storage.objects and realtime.messages)
+       R2   RLS tables with no RESTRICTIVE policy, or one covering reads only
        R11  TRUNCATE, which no RLS policy applies to
-       R1   policies covering ALL commands, or applying TO PUBLIC
-       R2   RLS tables with no RESTRICTIVE policy pinning tenancy
+       R12  default privileges that expose every future table or function
+       R14  public Storage buckets
 
 An earlier version reimplemented seven Splinter rules by hand. Those were
 removed: an unmaintained duplicate that is subtly wrong is worse than no check,
@@ -286,7 +290,10 @@ QUERIES: list[tuple[str, str, str, str]] = [
                'no global default privilege replaces PostgreSQL''s built-in EXECUTE for PUBLIC - '
                  || 'every new function is callable by anon and authenticated until revoked'
           FROM pg_roles r
-         WHERE r.rolname IN ('postgres', 'supabase_admin')
+         WHERE r.rolname !~ '^pg_'
+           AND EXISTS (SELECT 1 FROM pg_namespace n
+                        WHERE n.nspname = ANY(%(schemas)s)
+                          AND has_schema_privilege(r.oid, n.oid, 'CREATE'))
            AND NOT EXISTS (SELECT 1 FROM pg_default_acl d
                             WHERE d.defaclrole = r.oid AND d.defaclnamespace = 0
                               AND d.defaclobjtype = 'f')
@@ -301,8 +308,9 @@ QUERIES: list[tuple[str, str, str, str]] = [
         # reach anon. The UNION arm covers PostgreSQL's hard-wired default, which
         # grants EXECUTE on functions to PUBLIC and has no pg_default_acl row at
         # all. Only a GLOBAL entry (defaclnamespace = 0) replaces it; a per-schema
-        # REVOKE ... FROM PUBLIC has no effect. postgres and supabase_admin are
-        # the roles that create objects on Supabase.
+        # REVOKE ... FROM PUBLIC has no effect. Every role that can CREATE in an
+        # audited schema is checked, since defaults belong to the creating role
+        # (on a stock project that is postgres and supabase_admin).
         "Snapshot audits miss what the next CREATE will expose.",
     ),
     (

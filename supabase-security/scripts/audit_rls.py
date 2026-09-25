@@ -82,37 +82,62 @@ QUERIES: list[tuple[str, str, str, str]] = [
         "ERROR",
         "R4-delete-reinsert",
         """
-        SELECT t.table_schema || '.' || t.table_name || ' (' || t.grantee || ')',
-               'column-level UPDATE granted, but the role holds BOTH INSERT and DELETE - '
-               'the column revoke can be bypassed by deleting and re-inserting the row'
-          FROM (SELECT DISTINCT table_schema, table_name, grantee
-                  FROM information_schema.column_privileges
-                 WHERE privilege_type = 'UPDATE'
-                   AND grantee = ANY(%(api_roles)s)
-                   AND table_schema = ANY(%(schemas)s)) t
-         WHERE has_table_privilege(t.grantee,
-                                   format('%%I.%%I', t.table_schema, t.table_name), 'INSERT')
-           AND has_table_privilege(t.grantee,
-                                   format('%%I.%%I', t.table_schema, t.table_name), 'DELETE')
-           AND NOT has_table_privilege(t.grantee,
-                                       format('%%I.%%I', t.table_schema, t.table_name), 'UPDATE')
+        SELECT n.nspname || '.' || c.relname || ' (' || r.rolname || ')',
+               'column-level UPDATE withholds ' || string_agg(quote_ident(a.attname), ', ' ORDER BY a.attnum)
+                 || ', but the role can DELETE the row and INSERT those columns - '
+                 || 'the column revoke can be bypassed by deleting and re-inserting the row'
+          FROM pg_class c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+          CROSS JOIN unnest(%(api_roles)s::text[]) AS r(rolname)
+          JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+         WHERE c.relkind IN ('r', 'p')
+           AND n.nspname = ANY(%(schemas)s)
+           AND has_any_column_privilege(r.rolname, c.oid, 'UPDATE')
+           AND NOT has_table_privilege(r.rolname, c.oid, 'UPDATE')
+           AND has_table_privilege(r.rolname, c.oid, 'DELETE')
+           AND NOT has_column_privilege(r.rolname, c.oid, a.attnum, 'UPDATE')
+           AND has_column_privilege(r.rolname, c.oid, a.attnum, 'INSERT')
+           AND (NOT c.relrowsecurity
+                OR (EXISTS (SELECT 1 FROM pg_policies p
+                             WHERE p.schemaname = n.nspname AND p.tablename = c.relname
+                               AND p.permissive = 'PERMISSIVE' AND p.cmd IN ('DELETE', 'ALL')
+                               AND EXISTS (SELECT 1 FROM unnest(p.roles) AS pr(name)
+                                            WHERE pr.name = 'public'
+                                               OR pg_has_role(r.rolname, pr.name, 'USAGE')))
+                    AND EXISTS (SELECT 1 FROM pg_policies p
+                                 WHERE p.schemaname = n.nspname AND p.tablename = c.relname
+                                   AND p.permissive = 'PERMISSIVE' AND p.cmd IN ('INSERT', 'ALL')
+                                   AND EXISTS (SELECT 1 FROM unnest(p.roles) AS pr(name)
+                                                WHERE pr.name = 'public'
+                                                   OR pg_has_role(r.rolname, pr.name, 'USAGE')))))
+         GROUP BY n.nspname, c.relname, r.rolname
         """,
         # Reason: the bypass needs BOTH -- DELETE alone destroys the row but
         # cannot recreate it with attacker-chosen values, so it is data loss,
         # not privilege escalation.
         #
-        # has_table_privilege (rather than information_schema) is deliberate: it
+        # INSERT is checked per column, not per table: a column-level INSERT
+        # grant makes has_table_privilege(..., 'INSERT') false, and an earlier
+        # version missed exactly that case. The columns reported are the ones
+        # the role cannot UPDATE yet can write by re-inserting.
+        #
+        # With RLS on, both halves also need a permissive policy for the role:
+        # without a DELETE and an INSERT policy the path is closed by default
+        # deny, whatever the grants say. The policy predicates are not examined,
+        # so a finding on an RLS table means "possible", to be tested.
+        #
+        # has_*_privilege (rather than information_schema) is deliberate: it
         # resolves privileges inherited via role membership and PUBLIC, which the
         # information_schema views do not show.
         "Undocumented by Supabase and Postgres alike. The reason this script exists.",
     ),
     (
-        "ERROR",
+        "WARN",
         "R11-truncate-granted",
         """
         SELECT n.nspname || '.' || c.relname || ' (' || r.rolname || ')',
-               'TRUNCATE granted - NO RLS policy applies to it; this role can wipe '
-                 || 'every tenant''s rows regardless of isolation'
+               'TRUNCATE granted - no RLS policy applies to it, so any function that '
+                 || 'truncates as the caller wipes every tenant''s rows'
           FROM pg_class c
           JOIN pg_namespace n ON n.oid = c.relnamespace
           CROSS JOIN unnest(%(api_roles)s::text[]) AS r(rolname)
@@ -121,24 +146,32 @@ QUERIES: list[tuple[str, str, str, str]] = [
            AND has_table_privilege(r.rolname, c.oid, 'TRUNCATE')
         """,
         # Reason: RLS governs rows; TRUNCATE is a whole-table operation and no
-        # policy is consulted. Perfect tenant isolation does not survive it.
-        "The gap RLS cannot cover at all.",
+        # policy is consulted. WARN, not ERROR: PostgREST and pg_graphql expose no
+        # TRUNCATE verb and anon/authenticated cannot log in, so it is reachable
+        # only through a SECURITY INVOKER function that truncates (or builds SQL
+        # dynamically). Legacy default privileges grant it on every new table,
+        # so expect this on older projects.
+        "Defence in depth: the one privilege RLS cannot narrow at all.",
     ),
     (
         "WARN",
         "R1-policy-for-all",
         """
         SELECT p.schemaname || '.' || p.tablename || ' :: ' || p.policyname,
-               'policy covers ALL commands - if FOR was omitted this is also your '
+               'permissive policy covers ALL commands - if FOR was omitted this is also your '
                  || 'INSERT/UPDATE/DELETE rule; confirm it is intentional'
           FROM pg_policies p
-         WHERE p.schemaname = ANY(%(schemas)s)
+         WHERE (p.schemaname = ANY(%(schemas)s)
+                OR (p.schemaname, p.tablename) IN (('storage', 'objects'), ('realtime', 'messages')))
            AND p.cmd = 'ALL'
+           AND p.permissive = 'PERMISSIVE'
         """,
         # Reason: Postgres does not record whether ALL came from an omitted FOR
         # or an explicit `FOR ALL`, so this cannot prove a mistake -- it asks for
-        # confirmation. A policy named "Users can VIEW..." that is silently also
-        # the write rule caused three separate escalations in one codebase.
+        # confirmation. RESTRICTIVE policies are exempt: they only narrow, and a
+        # restrictive FOR ALL is the recommended shape for tenant isolation (R2).
+        # A policy named "Users can VIEW..." that is silently also the write rule
+        # caused three separate escalations in one codebase.
         "Splinter has no equivalent; this is the highest-yield policy check.",
     ),
     (
@@ -148,7 +181,8 @@ QUERIES: list[tuple[str, str, str, str]] = [
         SELECT p.schemaname || '.' || p.tablename || ' :: ' || p.policyname,
                'policy applies TO PUBLIC (every role) - name anon/authenticated explicitly'
           FROM pg_policies p
-         WHERE p.schemaname = ANY(%(schemas)s)
+         WHERE (p.schemaname = ANY(%(schemas)s)
+                OR (p.schemaname, p.tablename) IN (('storage', 'objects'), ('realtime', 'messages')))
            AND p.roles = ARRAY['public']::name[]
         """,
         # Reason: the RAW catalogue (pg_policy.polroles) stores PUBLIC as {0},
@@ -182,19 +216,181 @@ QUERIES: list[tuple[str, str, str, str]] = [
         # here legitimately.
         "Advisory: multi-tenant invariants belong in a RESTRICTIVE policy.",
     ),
+    (
+        "WARN",
+        "R2-restrictive-reads-only",
+        """
+        SELECT n.nspname || '.' || c.relname || ' (' || r.rolname || ')',
+               'RESTRICTIVE policy exists, but not for ' || string_agg(w.cmd, ', ' ORDER BY w.cmd)
+                 || ' - a permissive write policy there is not held to the tenant invariant'
+          FROM pg_class c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+          CROSS JOIN unnest(%(api_roles)s::text[]) AS r(rolname)
+          CROSS JOIN unnest(ARRAY['INSERT', 'UPDATE', 'DELETE']) AS w(cmd)
+         WHERE c.relkind IN ('r', 'p')
+           AND n.nspname = ANY(%(schemas)s)
+           AND c.relrowsecurity
+           AND (has_table_privilege(r.rolname, c.oid, w.cmd)
+                OR (w.cmd <> 'DELETE' AND has_any_column_privilege(r.rolname, c.oid, w.cmd)))
+           AND EXISTS (SELECT 1 FROM pg_policies p
+                        WHERE p.schemaname = n.nspname AND p.tablename = c.relname
+                          AND p.permissive = 'RESTRICTIVE')
+           AND EXISTS (SELECT 1 FROM pg_policies p
+                        WHERE p.schemaname = n.nspname AND p.tablename = c.relname
+                          AND p.permissive = 'PERMISSIVE'
+                          AND p.cmd IN (w.cmd, 'ALL')
+                          AND EXISTS (SELECT 1 FROM unnest(p.roles) AS pr(name)
+                                       WHERE pr.name = 'public' OR pg_has_role(r.rolname, pr.name, 'USAGE')))
+           AND NOT EXISTS (SELECT 1 FROM pg_policies p
+                            WHERE p.schemaname = n.nspname AND p.tablename = c.relname
+                              AND p.permissive = 'RESTRICTIVE'
+                              AND p.cmd IN (w.cmd, 'ALL')
+                              AND EXISTS (SELECT 1 FROM unnest(p.roles) AS pr(name)
+                                           WHERE pr.name = 'public' OR pg_has_role(r.rolname, pr.name, 'USAGE')))
+         GROUP BY n.nspname, c.relname, r.rolname
+        """,
+        # Reason: the common shape is a RESTRICTIVE `FOR SELECT` tenancy policy
+        # plus permissive write policies. Restrictive policies bind only the
+        # commands they name, so writes -- including the NEW row an UPDATE
+        # produces -- are held only to the permissive predicate. Reported only
+        # where the role holds the privilege AND a permissive policy applies to
+        # the command; otherwise the command is denied anyway. The permissive
+        # predicate is not examined, so it may already pin tenancy. Policy roles
+        # are matched by effective membership (pg_has_role), because a policy
+        # granted to a parent role applies to its members.
+        "Restrictive tenancy must cover every command the role can run.",
+    ),
+    (
+        "WARN",
+        "R12-default-privileges",
+        """
+        SELECT coalesce(nullif(d.defaclnamespace::regnamespace::text, '-'), '<all schemas>')
+                 || ' (objects created by ' || d.defaclrole::regrole::text || ')',
+               'default privileges grant '
+                 || string_agg(DISTINCT a.privilege_type || ' on new '
+                      || CASE d.defaclobjtype WHEN 'r' THEN 'tables' ELSE 'functions' END
+                      || ' to ' || CASE a.grantee WHEN 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END,
+                    '; ')
+                 || ' - every future object starts out reachable from the Data API'
+          FROM pg_default_acl d
+          CROSS JOIN LATERAL aclexplode(d.defaclacl) a
+         WHERE (a.grantee = 0
+                OR EXISTS (SELECT 1 FROM unnest(%(api_roles)s::text[]) AS r(rolname)
+                            WHERE pg_has_role(r.rolname, a.grantee, 'USAGE')))
+           AND d.defaclobjtype IN ('r', 'f')
+           AND (d.defaclnamespace = 0
+                OR (SELECT nspname FROM pg_namespace WHERE oid = d.defaclnamespace) = ANY(%(schemas)s))
+         GROUP BY d.defaclnamespace, d.defaclrole
+        UNION ALL
+        SELECT '<all schemas> (functions created by ' || r.rolname || ')',
+               'no global default privilege replaces PostgreSQL''s built-in EXECUTE for PUBLIC - '
+                 || 'every new function is callable by anon and authenticated until revoked'
+          FROM pg_roles r
+         WHERE r.rolname IN ('postgres', 'supabase_admin')
+           AND NOT EXISTS (SELECT 1 FROM pg_default_acl d
+                            WHERE d.defaclrole = r.oid AND d.defaclnamespace = 0
+                              AND d.defaclobjtype = 'f')
+        """,
+        # Reason: a table-by-table audit is a snapshot; default privileges decide
+        # what the NEXT migration exposes. Tables and functions only -- sequence
+        # USAGE is functional, not an authorization boundary. Expected on
+        # projects created before Supabase's safer-defaults change; it is the
+        # reason RLS must be enabled in the same migration that creates a table.
+        #
+        # Grantees are matched by effective membership, and PUBLIC counts: both
+        # reach anon. The UNION arm covers PostgreSQL's hard-wired default, which
+        # grants EXECUTE on functions to PUBLIC and has no pg_default_acl row at
+        # all. Only a GLOBAL entry (defaclnamespace = 0) replaces it; a per-schema
+        # REVOKE ... FROM PUBLIC has no effect. postgres and supabase_admin are
+        # the roles that create objects on Supabase.
+        "Snapshot audits miss what the next CREATE will expose.",
+    ),
+    (
+        "WARN",
+        "R13-auth-hook-callable",
+        """
+        SELECT n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')',
+               'granted to supabase_auth_admin (likely an Auth hook) and executable by '
+                 || string_agg(r.rolname, ', ' ORDER BY r.rolname)
+                 || ' in an exposed schema - callable as POST /rest/v1/rpc/' || p.proname
+                 || '; revoke it from anon, authenticated and public'
+          FROM pg_proc p
+          JOIN pg_namespace n ON n.oid = p.pronamespace
+          CROSS JOIN unnest(%(api_roles)s::text[]) AS r(rolname)
+         WHERE n.nspname = ANY(%(schemas)s)
+           AND EXISTS (SELECT 1 FROM aclexplode(p.proacl) a
+                        JOIN pg_roles g ON g.oid = a.grantee
+                       WHERE g.rolname = 'supabase_auth_admin' AND a.privilege_type = 'EXECUTE')
+           AND has_function_privilege(r.rolname, p.oid, 'EXECUTE')
+           AND has_schema_privilege(r.rolname, n.oid, 'USAGE')
+         GROUP BY n.nspname, p.proname, p.oid
+        """,
+        # Reason: an Auth hook (e.g. custom access token) is recognised by the
+        # explicit EXECUTE grant Supabase's docs require for supabase_auth_admin.
+        # That grant does not prove the hook is configured, hence WARN and
+        # "likely". Left executable by the API roles, it is an RPC that returns
+        # the claims it would issue for an arbitrary user_id (it does not sign a
+        # token). The docs require the revoke from authenticated, anon and public.
+        "Hooks must be revoked from the API roles.",
+    ),
 ]
 
-# Reason: resolve the schemas PostgREST actually exposes, the way Splinter does,
-# instead of assuming 'public'. A project serving an `api` schema would otherwise
-# be audited on the wrong objects entirely -- and report a clean bill of health.
+# Reason: Storage is outside the schemas PostgREST exposes, but a public bucket
+# is readable by anyone who knows an object's path -- no policy is consulted on
+# the public download route. Kept separate from QUERIES because it targets a
+# fixed Supabase schema, and skipped when Storage is not installed.
+STORAGE_QUERIES: list[tuple[str, str, str, str]] = [
+    (
+        "WARN",
+        "R14-public-bucket",
+        """
+        SELECT 'storage.buckets :: ' || b.id,
+               'public bucket - objects are served to anyone with the URL and '
+                 || 'storage.objects policies are not consulted for downloads'
+          FROM storage.buckets b
+         WHERE b.public
+        """,
+        "Per-user files belong in a private bucket with owner- or path-scoped policies.",
+    ),
+]
+
+# Reason: resolve the schemas PostgREST actually exposes instead of assuming
+# 'public'. A project serving an `api` schema would otherwise be audited on the
+# wrong objects entirely -- and report a clean bill of health.
+#
+# The auditor's own session almost never carries `pgrst.db_schemas`: PostgREST
+# reads it from its config file or environment (the Supabase CLI passes
+# PGRST_DB_SCHEMAS), or from a role setting on `authenticator`. Only the last is
+# visible from SQL, so read it there. NULL means "not discoverable", and the
+# caller must then name the schemas -- silently falling back to 'public' is the
+# bug this replaces.
 EXPOSED_SCHEMAS_SQL = """
-    SELECT array(
-        SELECT trim(unnest(string_to_array(
-            coalesce(current_setting('pgrst.db_schemas', true), 'public'), ',')))
+    WITH configured AS (
+        SELECT coalesce(
+            nullif(current_setting('pgrst.db_schemas', true), ''),
+            (SELECT substr(cfg, length('pgrst.db_schemas=') + 1)
+               FROM pg_db_role_setting s
+               JOIN pg_roles r ON r.oid = s.setrole
+               CROSS JOIN LATERAL unnest(s.setconfig) AS cfg
+              WHERE r.rolname = 'authenticator'
+                AND s.setdatabase IN (0, (SELECT oid FROM pg_database
+                                           WHERE datname = current_database()))
+                AND cfg LIKE 'pgrst.db_schemas=%%'
+              ORDER BY s.setdatabase DESC   -- a per-database setting beats a global one
+              LIMIT 1)
+        ) AS value
+    )
+    SELECT CASE WHEN value IS NULL THEN NULL ELSE array(
+        SELECT trim(unnest(string_to_array(value, ',')))
         EXCEPT
         SELECT trim(unnest(string_to_array(%(system_schemas)s, ',')))
-    )
+    ) END
+    FROM configured
 """
+
+
+class SchemasNotDiscoverable(Exception):
+    """PostgREST's exposed-schema list is not readable from this connection."""
 
 
 def resolve_schemas(conn: psycopg.Connection, override: list[str] | None) -> list[str]:
@@ -204,7 +400,9 @@ def resolve_schemas(conn: psycopg.Connection, override: list[str] | None) -> lis
     with conn.cursor() as cur:
         cur.execute(cast("LiteralString", EXPOSED_SCHEMAS_SQL), {"system_schemas": SYSTEM_SCHEMAS})
         row = cur.fetchone()
-    return list(row[0]) if row and row[0] else ["public"]
+    if not row or row[0] is None:
+        raise SchemasNotDiscoverable
+    return list(row[0])
 
 
 SPLINTER_SQL = Path(__file__).resolve().parent.parent / "vendor" / "splinter.sql"
@@ -295,7 +493,12 @@ def run_audit(
         if with_splinter:
             findings.extend(run_splinter(conn, schemas))
 
-        for severity, rule, sql, _rationale in QUERIES:
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('storage.buckets') IS NOT NULL")
+            row = cur.fetchone()
+            has_storage = bool(row and row[0])
+
+        for severity, rule, sql, _rationale in QUERIES + (STORAGE_QUERIES if has_storage else []):
             with conn.cursor() as cur:
                 try:
                     # Reason: cast is safe here -- every entry in QUERIES is a
@@ -322,6 +525,15 @@ def main(
     """Audit a Supabase database for access-control defects Supabase's own linter misses."""
     try:
         findings, schemas = run_audit(db_url, list(schema) if schema else None, with_splinter=splinter)
+    except SchemasNotDiscoverable:
+        typer.echo(
+            "Cannot tell which schemas PostgREST exposes: no `pgrst.db_schemas` role "
+            "setting on `authenticator`. Pass them explicitly, e.g. "
+            "--schema public --schema api (Dashboard -> Data API -> Exposed schemas, "
+            "or [api].schemas in supabase/config.toml).",
+            err=True,
+        )
+        raise typer.Exit(2) from None
     except psycopg.Error as exc:
         # Reason: never echo the exception body - a connection string with a
         # password can appear in psycopg error text.

@@ -50,12 +50,24 @@ declare
   old_j    jsonb;
   changed  text;
 begin
-  -- Reason: current_user is the role that actually queued the statement, and it
-  -- cannot be spoofed by a request claim. auth.role() reads the request JWT and
-  -- is deprecated by Supabase; it is also NULL for direct database jobs (cron,
-  -- psql, migrations), which would then be wrongly subjected to the guard.
-  -- This works because the function is SECURITY INVOKER (the default).
-  if current_user = 'service_role' or public.is_admin() then
+  -- Reason: exempt an explicit list of trusted roles and guard everyone else.
+  -- current_user is the role that actually queued the statement, and it cannot
+  -- be spoofed by a request claim. auth.role() reads the request JWT and is
+  -- deprecated by Supabase; it is also NULL for direct database jobs.
+  -- postgres is listed because cron jobs, migrations and SECURITY DEFINER RPCs
+  -- run as it; a definer RPC must authorize its caller itself (R6). An
+  -- allow-list rather than `not in ('authenticated', 'anon')` keeps the guard
+  -- closed for any custom role PostgREST switches to from a JWT `role` claim.
+  -- Add your own job roles here. This works because the function is SECURITY
+  -- INVOKER (the default).
+  if current_user in ('service_role', 'postgres', 'supabase_admin') then
+    return new;
+  end if;
+
+  -- Reason: a separate IF, not `... or private.is_admin()`. PL/pgSQL plans the
+  -- whole expression, so service_role and postgres would need USAGE on the
+  -- helper's schema just to reach the short-circuit, and fail without it.
+  if private.is_admin() then
     return new;
   end if;
 
@@ -116,6 +128,7 @@ revoke insert, update, delete on public.account from anon;
 
 **Watch out:**
 - Useless unless `INSERT` or `DELETE` is revoked (see above). Not optional.
+- `private.is_admin()` must be executable by `authenticated`, which needs `grant usage on schema private to authenticated`. The schema stays unexposed; usage only lets the trigger call the helper.
 - **Not safe on tables with generated columns** — see the warning at the top.
 - **Trigger firing order is alphabetical by name** and can break this — see above.
 - `to_jsonb` cost scales with serialized row width, not row count alone. Wide
@@ -148,7 +161,9 @@ Minimum cases, all of which must pass:
 | user attempts DELETE then INSERT | blocked at the privilege layer |
 | admin changes every guarded column | allowed |
 | `service_role` writes | allowed |
+| a cron job, migration or definer RPC (runs as `postgres`) writes | allowed |
 | `anon` writes | blocked |
+| a custom role PostgREST switches to from a JWT `role` claim | blocked unless admin |
 | **a column added *after* the migration** | **blocked for users, allowed for admins** |
 
 That last row is the one that proves the subtraction approach works. Test it by

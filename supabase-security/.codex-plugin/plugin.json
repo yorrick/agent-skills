@@ -1,7 +1,7 @@
 {
   "name": "supabase-security",
-  "description": "Access-control rules for Supabase projects exposed directly to a browser via PostgREST. Covers the three enforcement layers (GRANT, RLS, triggers), the traps that cause privilege escalation, and how anon keys, JWTs and service_role actually differ.",
-  "version": "0.1.2",
+  "description": "Access-control rules for Supabase projects exposed directly to a browser via PostgREST. Covers the three enforcement layers (GRANT, RLS, triggers), the traps that cause privilege escalation, how anon keys, JWTs and service_role actually differ, and the separate gates on Storage, Realtime and Edge Functions.",
+  "version": "0.2.0",
   "author": {
     "name": "Yorrick Jansen"
   },

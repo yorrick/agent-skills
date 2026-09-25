@@ -13,13 +13,20 @@ grant, function, view, or trigger. Each line maps to a rule in `SKILL.md`.
 - [ ] No policy reads `user_metadata` for authorization. (R8)
 - [ ] Auth calls wrapped: `(select auth.uid())`, not bare `auth.uid()`.
 - [ ] The table has RLS **enabled**, not merely policies defined. (R10)
-- [ ] Anonymous sign-ins considered: they arrive as `authenticated`. Check the `is_anonymous` claim if that matters.
+- [ ] Tenant isolation covers **writes** too: restrictive `FOR ALL` (or per write command) with `WITH CHECK`, not just `FOR SELECT`. (R2)
+- [ ] No `to authenticated using (true)` on user data. Anyone who signs up is `authenticated`, including anonymous sign-ins. (R13)
+- [ ] Anonymous sign-ins considered: they arrive as `authenticated`. Check the `is_anonymous` claim if that matters. (R13)
+- [ ] No authorization on the `email` claim. (R13)
+- [ ] Every `UPDATE`/upsert/`return=representation` path has a `SELECT` policy scoped like the write, not `using (true)`. (R15)
+- [ ] Rows readable by other users contain no sensitive columns, or those columns are revoked from `SELECT`. (R16)
 
 ## Grants
 
 - [ ] `REVOKE` precedes any column `GRANT` — privileges are additive, and a table grant implies every column.
 - [ ] Column `UPDATE` grants are paired with a revoke of `INSERT` **or** `DELETE` — holding both defeats the boundary. (R4)
 - [ ] `TRUNCATE` is not granted to `anon`/`authenticated`. No policy applies to it. (R11)
+- [ ] The migration that creates a table also enables RLS on it, and default privileges were checked. (R12)
+- [ ] Unique constraints on user data are scoped per tenant; a global unique check reveals rows RLS hides. (R11)
 - [ ] `anon` explicitly revoked where it should not write.
 - [ ] Any admin path does **not** depend on re-granting a column to `authenticated` — that grants it to every user. (R2, "Admins are not a database role")
 
@@ -28,7 +35,9 @@ grant, function, view, or trigger. Each line maps to a rule in `SKILL.md`.
 - [ ] `REVOKE` names `anon` and `authenticated` explicitly, not just `PUBLIC`. (R5)
 - [ ] Re-check after any `DROP FUNCTION` + `CREATE` — the default grant comes back.
 - [ ] `SECURITY DEFINER` functions pin `search_path`. (R6)
-- [ ] `SECURITY DEFINER` functions authorize the caller **in the body**. RLS does not apply to functions. (R5, R6)
+- [ ] `SECURITY DEFINER` functions authorize the caller **in the body**. They run as their owner, usually `postgres`, which bypasses RLS. (`SECURITY INVOKER` functions still run under the caller's policies.) (R5, R6)
+- [ ] Helper functions called from policies (`is_admin()`, `tenant_id()`) live in a schema PostgREST does not expose. (R6)
+- [ ] Auth hooks are revoked from `anon`, `authenticated` and `public`, and never build claims from user-writable data. (R13)
 - [ ] The function is not a privileged primitive reachable from a browser (`POST /rpc/...`).
 
 ## Views
@@ -36,6 +45,17 @@ grant, function, view, or trigger. Each line maps to a rule in `SKILL.md`.
 - [ ] `WITH (security_invoker = on)`. (R7)
 - [ ] Grants restated after `DROP VIEW` + `CREATE VIEW`.
 - [ ] No materialized views or foreign tables in an exposed schema — they cannot enforce RLS.
+
+## Storage, Realtime, Edge Functions
+
+See `beyond-the-data-api.md`.
+
+- [ ] No per-user files in a public bucket. (R14)
+- [ ] Every `storage.objects` policy pins `bucket_id` **and** an owner or path predicate, and names its role. (R1, R14)
+- [ ] Signed URLs are issued server-side with short lifetimes. (R14)
+- [ ] Realtime "Allow public access" is off if any channel carries private data, and `realtime.messages` has topic-scoped policies. (R14)
+- [ ] Tables whose deletions are sensitive are not in the `supabase_realtime` publication with `REPLICA IDENTITY FULL`. (R14)
+- [ ] Every Edge Function with `verify_jwt = false`, or that uses the secret key, authorizes the caller in its handler. (R14)
 
 ## Vault / secrets
 
@@ -58,7 +78,7 @@ grant, function, view, or trigger. Each line maps to a rule in `SKILL.md`.
 - [ ] Tested as `service_role`: unaffected.
 - [ ] Tested as `anon`: blocked.
 - [ ] Cross-tenant attempt returns zero rows, not an error that leaks existence.
-- [ ] Supabase advisors re-run after the migration.
+- [ ] Supabase advisors and `audit_rls.py` re-run after the migration.
 
 ## Rollback
 

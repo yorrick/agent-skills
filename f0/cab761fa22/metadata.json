@@ -1,0 +1,41 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "f0cab761fa22",
+  "strategy": "manual-commit",
+  "branch": "feat/supabase-security-coverage",
+  "checkpoints_count": 5,
+  "files_touched": [
+    ".agents/plugins/marketplace.json",
+    ".claude-plugin/marketplace.json",
+    "README.md",
+    "supabase-security/.claude-plugin/plugin.json",
+    "supabase-security/.codex-plugin/plugin.json",
+    "supabase-security/README.md",
+    "supabase-security/lab/README.md",
+    "supabase-security/lab/audit-fixtures.sql",
+    "supabase-security/lab/trigger-guard/setup.sql",
+    "supabase-security/lab/trigger-guard/tests.sql",
+    "supabase-security/plugin.toml",
+    "supabase-security/scripts/audit_rls.py",
+    "supabase-security/skills/supabase-security/SKILL.md",
+    "supabase-security/skills/supabase-security/references/beyond-the-data-api.md",
+    "supabase-security/skills/supabase-security/references/threat-checklist.md",
+    "supabase-security/skills/supabase-security/references/trigger-guard-pattern.md",
+    "tests/test_supabase_security_audit.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/f0/cab761fa22/0/metadata.json",
+      "transcript": "/f0/cab761fa22/0/full.jsonl",
+      "content_hash": "/f0/cab761fa22/0/content_hash.txt",
+      "prompt": "/f0/cab761fa22/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 272,
+    "cache_creation_tokens": 465091,
+    "cache_read_tokens": 21447526,
+    "output_tokens": 116976,
+    "api_call_count": 139
+  }
+}

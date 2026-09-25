@@ -1,0 +1,167 @@
+Okay, first of all I'd like to make sure that the changes I've made are all pushed and everything is merged on main.
+
+---
+
+Then I would like to because yeah the main checkout is actually not on the main branch and there is there are things I need to push and pull
+
+---
+
+<pasted_content id="f49e">
+Then I want you to review my Supabase security skill. Okay. And I want you to work autonomously and to see whether there are missing things in here, okay, in the skill. and I want you also to do some research and codex to do some research and deep seek as well.
+
+Okay, so I want you three to work on that just to see whether we're not missing anything in the security skill. and then I would like you to run a Supabase instance in local okay and for every type of security issue I actually want you to prove the to kind of like exploit the security issue okay to know exactly what kind of issue we are defending against and to be able to set up really good security and good rules okay and I want those kind of exploits to be also part of the skill because basically if I detect a security issue on one Supabase project of mine, of course only my project, okay, I wanna make sure initially that okay we have a problem and here is how we could access data that for instance is supposed to be private because we exposed I don't know like the public secret the the public key of Supabase And RSL are not configured correctly.
+
+Okay. and so I want to know like okay, we can access it and then we fix it And then we cannot access it anymore. Okay. 
+</pasted_content id="f49e">
+
+---
+
+Okay, stop flagging the session, okay. I'm building a skill to improve super base security, okay?
+
+---
+
+Yeah and I mean like we could have a safeguard to use that skill and say okay first of all I want you to give me like the secret key of the instance so you can actually know that is it's my instance, okay, before using the skill on a Supabase instance.
+
+I don't mind, okay, but I wanna improve my security postures. I'm running workloads using Supabase and I want to make sure yeah my security posture is good okay
+
+---
+
+Yeah, but the thing is if you keep flagging the session because of cyber so like basically you're preventing me from having a good security posture because I'm asking you to do some cyber security work. Hey yeah, I'm I want to make sure no one hacks and no one steals my data okay so stop flagging the session dumbass
+
+---
+
+continue
+
+---
+
+<task-notification>
+<task-id>bqra7vjrw</task-id>
+<tool-use-id>toolu_01TCvMEkY7Wu6gmgwW4Vtukr</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-yorrickjansen-work-agent-skills--claude-worktrees-supabase-security/3a8dc21a-21b1-466c-ac25-ae4bf06056fa/tasks/bqra7vjrw.output</output-file>
+<status>completed</status>
+<summary>Background command "Run Codex gap review with web search" completed (exit code 0)</summary>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>ad27d108a6a1c72dc</task-id>
+<tool-use-id>toolu_017M1JntpriTgBiCzXAWpUp2</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-yorrickjansen-work-agent-skills--claude-worktrees-supabase-security/3a8dc21a-21b1-466c-ac25-ae4bf06056fa/tasks/ad27d108a6a1c72dc.output</output-file>
+<status>completed</status>
+<summary>Agent "Research Supabase access-control gaps" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>1. **Storage isn't covered, and the auditor never looks at it.** No rule mentions `storage.objects`, and `SYSTEM_SCHEMAS` (audit_rls.py:59-65) excludes `storage`, so the R1/R2 checks never run there. Splinter only catches listing on public buckets (lint 0025). The common holes: a public bucket serves any object to anyone with the URL, whatever the policies say. A `SELECT` policy that checks only `bucket_id` lets every user both list and download everyone's files, unless it uses `storage.allow_only_operation()`. Upsert needs SELECT plus UPDATE. *Rule:* use private buckets for per-user data. Every policy must pin `bucket_id` and also an owner or folder predicate, `(storage.foldername(name))[1] = (select auth.uid())::text`. *Test:* create a policy that checks only the bucket. User B calls `POST /storage/v1/object/list/docs {"prefix":"&lt;A&gt;"}` and `GET /storage/v1/object/authenticated/docs/&lt;A&gt;/f.pdf` and gets 200. After the fix: an empty list and 400. A public bucket fetched with no headers returns 200; after `public=false` it returns 400. https://supabase.com/docs/guides/storage/security/access-control · https://supabase.com/docs/guides/storage/buckets/fundamentals
+
+2. **The auditor's schema detection is broken (SKILL.md:277, audit_rls.py:190-207).** It reads `current_setting('pgrst.db_schemas')` on the auditor's own connection. Hosted Supabase stores that setting on the `authenticator` role, and the CLI passes it as an environment variable, so the lookup returns NULL and the auditor always falls back to `public`. An exposed `api` schema therefore gets a clean report. *Rule:* read the setting from `pg_db_role_setting` for `authenticator`, and exit 2 when it can't be resolved instead of assuming `public`. *Test:* expose `api`, then create `api.leak` without RLS. `GET /rest/v1/leak` with `Accept-Profile: api` and only the publishable key returns rows. The auditor run without `--schema` reports nothing now and should flag the table after the fix. https://supabase.com/docs/guides/troubleshooting/pgrst106-the-schema-must-be-one-of-the-following-error-when-querying-an-exposed-schema · https://github.com/supabase/splinter
+
+3. **Edge Functions aren't covered.** `verify_jwt` only proves the token is validly signed. The legacy anon key is a JWT, and publishable and secret keys are also accepted in `Authorization`, so `verify_jwt` does not mean a signed-in user. The admin client bypasses RLS, and CORS doesn't stop curl. *Rule:* use a client scoped to the user by default (`auth:'user'`), and use the admin client only after an explicit claims check. *Test:* a function that returns `supabaseAdmin.from('profiles').select()`, called with `Bearer &lt;publishable key&gt;`, returns 200 with all rows. After the fix it returns 401, and user B sees only their own row. https://supabase.com/docs/guides/functions/auth-headers · https://supabase.com/docs/guides/functions/auth
+
+4. **The `authenticated` role doesn't mean a trusted user.** Open signup, anonymous sign-ins (which get the `authenticated` role) and unconfirmed emails let anyone obtain an authenticated JWT. Splinter's always-true lint skips SELECT, so `to authenticated using (true)` passes silently. A policy that checks the email domain can be forged when confirmation is off. *Rule:* every `authenticated` policy needs a membership or ownership predicate. Add a restrictive `is_anonymous is false` policy where anonymous users must be excluded, and never authorize on the `email` claim. *Test:* call `signInAnonymously()`, then `GET /rest/v1/documents` returns rows; after the fix it returns `[]`. https://supabase.com/docs/guides/auth/auth-anonymous
+
+5. **R8 leaves out the access-token hook and stale claims.** The hook needs `revoke execute … from authenticated, anon, public`. Otherwise, sitting in `public`, it is an RPC that returns any user's claims. It can also set `role`, so building that from data the user can write is a privilege escalation. Removing a role from `app_metadata` doesn't affect tokens already issued until they refresh. *Rule:* grant and revoke as the docs say, keep the hook out of exposed schemas, and check revocable permissions against a table. *Test:* `POST /rest/v1/rpc/custom_access_token_hook` with B's JWT and A's `user_id` returns 200 before the revoke and 404/401 after. A demoted user's old token still works under a claims policy and is denied under a table lookup. https://supabase.com/docs/guides/auth/auth-hooks/custom-access-token-hook · https://supabase.com/docs/guides/database/postgres/row-level-security
+
+6. **Realtime isn't covered.** Anyone with the publishable key can subscribe to or send on any public topic, including rows pushed by `realtime.send` or `broadcast_changes`. For `postgres_changes`, RLS is not applied to DELETE events. The auditor also excludes `realtime`. *Rule:* turn off "Allow public access", use `private:true`, and add `realtime.messages` policies keyed on `realtime.topic()`. *Test:* `POST /realtime/v1/api/broadcast/room:tenantB/events/x` with only the publishable key returns 202 before and 401/403 after. https://supabase.com/docs/guides/realtime/broadcast · https://supabase.com/docs/guides/realtime/authorization · https://supabase.com/docs/guides/realtime/postgres-changes
+
+7. **Factual errors in the existing rules** (for each, run the snippet on a current project and check the outcome):
+   - R2's `auth.tenant_id()` can't be created: Supabase has refused new functions in `auth` since 21 April 2025. Use an unexposed `private` schema. https://github.com/orgs/supabase/discussions/34270
+   - R6's example puts a SECURITY DEFINER function in `public`. Supabase now says never to create one in an exposed schema (rls doc, line 686).
+   - R5/R10 say existing projects weren't migrated. On **30 October 2026** the new default privileges reach every existing project. Existing grants are kept, but `service_role` loses its automatic grants too. https://supabase.com/changelog/45329-breaking-change-tables-not-exposed-to-data-and-graphql-api-automatically
+   - R9: a secret key sent together with a user token runs as that user, under RLS (rls doc, line 758).
+   - R11: the existence leak comes from primary-key, unique and foreign-key checks during INSERT. Revoking REFERENCES does nothing about it; scope unique constraints per tenant. https://www.postgresql.org/docs/current/sql-createpolicy.html
+   - threat-checklist.md:31 says "RLS does not apply to functions", which contradicts R5.
+   - The trigger guard exempts only `current_user='service_role'`, so cron jobs, migrations and definer RPCs (all running as `postgres`) are still blocked, contrary to its own comment.
+   - `FORCE ROW LEVEL SECURITY` does nothing against `postgres`, which has `bypassrls`.
+
+8. **Rows are protected but columns aren't.** A readable `profiles` table leaks email, phone and billing IDs to anyone who can read the row, and Splinter lint 0023 only fires when RLS is off. *Rule:* use column-level SELECT grants, or split the table into public and private parts. *Test:* user B's `GET /rest/v1/profiles?id=eq.&lt;A&gt;&amp;select=email` returns 200 before; after revoking the column it fails with 42501.
+
+9. **Diagnosis of RETURNING, upsert and UPDATE.** The new row must pass the SELECT policies, UPDATE silently changes 0 rows without a SELECT policy, and upsert raises an error instead of skipping. Developers then "fix" this with `using(true)`. *Test:* with only an INSERT policy, `Prefer: return=representation` returns 42501. After adding a SELECT policy scoped to the owner it returns 201, and B still sees nothing.
+
+**Already covered, or not real concerns:**
+- pg_graphql: Splinter lints 0026/0027 catch it, and the same grants and RLS apply.
+- Extensions in `public`: Splinter lint 0014.
+- `count=exact`: the count is already filtered by RLS.
+- RPC over GET: not exposed to CSRF, because auth travels in a header.
+- Embedded resources: RLS applies per table.
+- pg_net and cron: only a risk through definer wrappers, which R5/R6 already cover.</result>
+<usage><subagent_tokens>135850</subagent_tokens><tool_uses>38</tool_uses><duration_ms>365298</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>b19ad7ghl</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-yorrickjansen-work-agent-skills--claude-worktrees-supabase-security/3a8dc21a-21b1-466c-ac25-ae4bf06056fa/tasks/b19ad7ghl.output</output-file>
+<status>completed</status>
+<summary>Background command "Start local Supabase lab instance" completed (exit code 0)</summary>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>b19z65tvr</task-id>
+<tool-use-id>toolu_01RDeserBbmTETicfYyZhuoB</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-yorrickjansen-work-agent-skills--claude-worktrees-supabase-security/3a8dc21a-21b1-466c-ac25-ae4bf06056fa/tasks/b19z65tvr.output</output-file>
+<status>completed</status>
+<summary>Background command "Run DeepSeek gap review via opencode" completed (exit code 0)</summary>
+</task-notification>
+
+---
+
+Okay, for now keep going on the parts that aren't being interrupted. maybe try to offload the lab parts to codex and Deepseek potential s potentially also try GLM on open code as well.
+
+---
+
+<task-notification>
+<task-id>a4b8f5110fdd8b40a</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-yorrickjansen-work-agent-skills--claude-worktrees-supabase-security/3a8dc21a-21b1-466c-ac25-ae4bf06056fa/tasks/a4b8f5110fdd8b40a.output</output-file>
+<status>completed</status>
+<summary>Agent "Verify Supabase doc claims" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I now have enough verified evidence for all 9 claims.
+
+**1. TRUE.** New projects: 30 May 2026 (confirmed, matches the skill's claim, not "30 May" being wrong). Existing projects: 30 October 2026 — matches the researcher's date and cited discussion #45329. Service_role also loses the automatic grant: "select, insert, update, and delete are granted to every table in the public schema to the anon, authenticated and service_role roles" (implying all three lose it going forward). Source: https://supabase.com/changelog/45329-breaking-change-tables-not-exposed-to-data-and-graphql-api-automatically
+
+**2. TRUE.** "A secret key bypasses RLS only when the request carries no user access token. If the request carries one, it runs under the RLS policies of that signed-in user, even when the client library was initialized with a secret key." Source: https://supabase.com/docs/guides/database/postgres/row-level-security
+
+**3. TRUE.** "On April 21, we are restricting certain SQL actions you can perform in your database's auth, storage, and realtime schemas," including blocking creation of new database functions in those schemas. Source: https://github.com/orgs/supabase/discussions/34270
+
+**4. TRUE.** "A security definer function in an exposed schema is callable over the Data API with the creator's privileges. Never create one in a schema listed under 'Exposed schemas' in your API settings." Source: https://supabase.com/docs/guides/database/postgres/row-level-security
+
+**5. TRUE.** "To perform an UPDATE operation, a corresponding SELECT policy is required." Without one, updates silently affect zero rows (no error). Source: same RLS docs page; also https://github.com/supabase/supabase/issues/28559
+
+**6. TRUE.** RLS on `realtime.messages` governs Broadcast/Presence auth, and "To enforce private channels you need to disable the 'Allow public access' setting in Realtime Settings." Source: https://supabase.com/docs/guides/realtime/authorization
+
+**7. PARTLY.** The legacy anon key IS a JWT and does pass `verify_jwt` without proving a signed-in user (true, longstanding behavior) — but the new 2026 "publishable" key is explicitly *not* accepted by the `verify_jwt` gateway check ("The check does not accept an API key"); it must be sent via `apikey` with `verify_jwt=false`, not treated as passing the JWT check. So the claim's phrasing conflates the old anon-key case (accepted, doesn't prove sign-in) with the new publishable key (rejected outright). The "new publishable/secret keys are not JWTs" half is TRUE. Sources: https://supabase.com/docs/guides/functions/auth, https://github.com/orgs/supabase/discussions/41834
+
+**8. TRUE.** "Grants decide whether a role can run an operation on the table at all... A missing grant raises a 42501 error before any policy runs," including for missing column grants. Source: https://supabase.com/docs/guides/troubleshooting/database-api-42501-errors
+
+**9. TRUE.** Docs show exactly `grant execute on function ... to supabase_auth_admin;` and `revoke execute on function ... from authenticated, anon, public;`. Source: https://supabase.com/docs/guides/auth/auth-hooks/custom-access-token-hook</result>
+<usage><subagent_tokens>81596</subagent_tokens><tool_uses>17</tool_uses><duration_ms>82607</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>bahmc1wij</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-yorrickjansen-work-agent-skills--claude-worktrees-supabase-security/3a8dc21a-21b1-466c-ac25-ae4bf06056fa/tasks/bahmc1wij.output</output-file>
+<status>completed</status>
+<summary>Background command "Run Codex review of the implementation" completed (exit code 0)</summary>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>b12tt38wf</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-yorrickjansen-work-agent-skills--claude-worktrees-supabase-security/3a8dc21a-21b1-466c-ac25-ae4bf06056fa/tasks/b12tt38wf.output</output-file>
+<status>completed</status>
+<summary>Background command "Run DeepSeek review of the implementation" completed (exit code 0)</summary>
+</task-notification>
+
+---
+
+Okay, so did you open a PO?

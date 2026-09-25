@@ -1,0 +1,27 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "03bd64c693a3",
+  "strategy": "manual-commit",
+  "branch": "feat/supabase-security-coverage",
+  "checkpoints_count": 5,
+  "files_touched": [
+    "supabase-security/scripts/audit_rls.py",
+    "supabase-security/skills/supabase-security/references/beyond-the-data-api.md",
+    "supabase-security/skills/supabase-security/references/threat-checklist.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/03/bd64c693a3/0/metadata.json",
+      "transcript": "/03/bd64c693a3/0/full.jsonl",
+      "content_hash": "/03/bd64c693a3/0/content_hash.txt",
+      "prompt": "/03/bd64c693a3/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 42,
+    "cache_creation_tokens": 17853,
+    "cache_read_tokens": 4859008,
+    "output_tokens": 9915,
+    "api_call_count": 20
+  }
+}

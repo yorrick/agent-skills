@@ -1,0 +1,38 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "03bd64c693a3",
+  "session_id": "3a8dc21a-21b1-466c-ac25-ae4bf06056fa",
+  "strategy": "manual-commit",
+  "created_at": "2026-09-25T13:29:57.236743Z",
+  "branch": "feat/supabase-security-coverage",
+  "checkpoints_count": 5,
+  "files_touched": [
+    "supabase-security/scripts/audit_rls.py",
+    "supabase-security/skills/supabase-security/references/beyond-the-data-api.md",
+    "supabase-security/skills/supabase-security/references/threat-checklist.md"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-5-5[1m]",
+  "turn_id": "94f074e2d019",
+  "checkpoint_transcript_start": 1085,
+  "transcript_lines_at_start": 1085,
+  "token_usage": {
+    "input_tokens": 42,
+    "cache_creation_tokens": 17853,
+    "cache_read_tokens": 4859008,
+    "output_tokens": 9915,
+    "api_call_count": 20
+  },
+  "session_metrics": {
+    "turn_count": 12
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-09-25T13:29:56.755708Z",
+    "agent_lines": 24,
+    "human_added": 236,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 260,
+    "agent_percentage": 9.230769230769232
+  }
+}

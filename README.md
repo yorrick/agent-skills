@@ -198,12 +198,15 @@ codex plugin add visual-design-review@yorrick
 Access-control rules for Supabase projects exposed directly to a browser via PostgREST:
 the three enforcement layers (`GRANT`, RLS, triggers) and **the order they run in**, the
 traps that cause privilege escalation, and how anon keys, JWTs and `service_role` differ.
+Also covers the separate access gates on Storage buckets, Realtime channels and Edge
+Functions.
 
 Ships a read-only audit script that **bundles [Splinter](https://github.com/supabase/splinter)**
 — Supabase's own SQL linter, the engine behind the dashboard's Security Advisor —
-vendored unmodified, and adds four rules it does not have (policies with no `FOR`/`TO`,
-missing `RESTRICTIVE` tenant isolation, the delete-and-reinsert column bypass, and
-`TRUNCATE`, which no policy applies to). See
+vendored unmodified, and adds rules it does not have: policies with no `FOR`/`TO`,
+tenant isolation that is missing or covers reads only, the delete-and-reinsert column
+bypass, `TRUNCATE`, default privileges, callable Auth hooks, and public buckets. A local
+lab (`supabase-security/lab/`) tests the auditor and the trigger-guard pattern. See
 [`supabase-security/README.md`](supabase-security/README.md) for the credit and licence
 position.
 

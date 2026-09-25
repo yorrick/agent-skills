@@ -1,6 +1,6 @@
 ---
 name: supabase-security
-description: "Access control for Supabase projects where a browser talks straight to PostgREST with no API middle layer. Load this skill BEFORE writing or reviewing anything that decides who can read or write data: RLS policies, GRANT/REVOKE statements, SECURITY DEFINER functions, RPCs, views, triggers used as authorization, migrations that touch permissions, custom JWT claims, or code that handles an anon/publishable key or a service_role/secret key. Also load it when diagnosing 'permission denied for table', a 403 or empty result that should have returned rows, when a user can see or change data belonging to another tenant, or when asked to audit a Supabase project for privilege escalation. Bundles Supabase's own Splinter linter and adds four checks it lacks. Triggers on: RLS, row level security, Supabase policy, anon key, service_role, privilege escalation, multi-tenant isolation, column level security, PostgREST, Splinter, Security Advisor."
+description: "Access control for Supabase projects where a browser talks straight to PostgREST with no API middle layer. Load BEFORE writing or reviewing anything that decides who can read or write data: RLS policies, GRANT/REVOKE, SECURITY DEFINER functions, RPCs, views, triggers used as authorization, permission migrations, custom JWT claims or Auth hooks, Storage bucket policies, Realtime channel authorization, Edge Functions using a secret key, or code handling an anon/publishable or service_role/secret key. Also load when diagnosing 'permission denied for table', a 403 or empty result that should have rows, one tenant seeing another's data, or when auditing a Supabase project. Bundles Supabase's Splinter linter plus checks it lacks. Triggers on: RLS, row level security, Supabase policy, anon key, service_role, privilege escalation, multi-tenant isolation, column level security, public bucket, realtime authorization, PostgREST, Splinter, Security Advisor."
 license: MIT
 ---
 
@@ -10,7 +10,7 @@ With no API between the browser and the database, **Postgres is the entire secur
 
 > **Built on Supabase's own linter.** The audit script bundles
 > [Splinter](https://github.com/supabase/splinter) — the SQL linter behind the
-> dashboard's Security Advisor and the `get_advisors` MCP tool — and adds four checks it
+> dashboard's Security Advisor and the `get_advisors` MCP tool — and adds checks it
 > does not have. Splinter is Supabase's work, vendored unmodified at
 > `vendor/splinter.sql`; see [Credits](#credits).
 
@@ -36,7 +36,7 @@ Note steps 3 and 4: **`WITH CHECK` runs *after* `BEFORE` triggers**, so a trigge
 
 Three consequences, each of which has caused a production incident:
 
-**Each layer only narrows the one above it.** RLS can never grant a privilege the GRANT layer withheld. If you revoke a column, a policy saying "admins may update everything" becomes *unreachable* — the privilege check rejects the statement before any row is considered. This is Postgres-documented; **Supabase does not document it anywhere.**
+**Each layer only narrows the one above it.** RLS can never grant a privilege the GRANT layer withheld. If you revoke a column, a policy saying "admins may update everything" becomes *unreachable* — the privilege check rejects the statement with `42501` before any row is considered. Postgres documents this, and Supabase now does too, in its [42501 troubleshooting guide](https://supabase.com/docs/guides/troubleshooting/database-api-42501-errors).
 
 **RLS cannot compare the old and new values.** A policy *can* reference columns — what it cannot do is correlate `OLD` with `NEW`, because `WITH CHECK` only ever sees the proposed row. So *"this column must not change"* is **inexpressible as a policy.** (A policy can still pin a column to a stable external invariant, e.g. `tenant_id = auth.jwt() ->> 'tenant_id'` — that works because it needs no `OLD`.) General per-column change rules need a trigger.
 
@@ -85,9 +85,14 @@ create policy documents_read on documents
 
 -- ...and the restrictive one constrains it. Both must pass.
 create policy tenant_isolation on documents
-  as restrictive for select to authenticated
-  using (tenant_id = (select auth.tenant_id()));
+  as restrictive for all to authenticated
+  using (tenant_id = (select private.tenant_id()))
+  with check (tenant_id = (select private.tenant_id()));
 ```
+
+`private.tenant_id()` is your own helper in a schema PostgREST does not expose. Supabase has refused new functions in the `auth` schema since April 2025, so an `auth.tenant_id()` example will not run on a current project.
+
+**Cover every command the role can run, not just `SELECT`.** A restrictive policy binds only the commands it names. The common shape, a restrictive `FOR SELECT` plus permissive `INSERT`/`UPDATE` policies, lets a user insert a row carrying another tenant's ID or `PATCH` their own row into another tenant, because the proposed row is held only to the permissive `WITH CHECK`. Use `FOR ALL` with both `USING` and `WITH CHECK`, as above, or one restrictive policy per write command. The auditor flags this as `R2-restrictive-reads-only`.
 
 Three caveats that bite:
 
@@ -129,7 +134,7 @@ revoke all on function public.f(text) from public, anon, authenticated;
 grant execute on function public.f(text) to service_role;
 ```
 
-Projects created from **30 May 2026** get a safer default that does not auto-expose new objects. **Existing projects were not migrated** — check yours rather than assume, and keep the explicit revokes either way (they are harmless when redundant).
+Projects created from **30 May 2026** get a safer default that does not auto-expose new objects, and Supabase applies it to **existing projects on 30 October 2026** ([changelog](https://supabase.com/changelog/45329-breaking-change-tables-not-exposed-to-data-and-graphql-api-automatically)). Grants that already exist are kept, so the change stops *future* exposure and fixes nothing retroactively. `service_role` loses its automatic grants too, so server code that relied on them needs explicit grants. Keep the explicit revokes either way; they are harmless when redundant. See R12.
 
 **A function has no policies of its own.** That does not mean it bypasses RLS: a `SECURITY INVOKER` function (the default) runs table queries as the *caller*, so their policies still apply. A `SECURITY DEFINER` function runs as the owner — usually `postgres`, which owns the tables and therefore bypasses RLS. That is the dangerous case, and in an exposed schema it is a `POST /rpc/f` away from any browser. Assume every such function is internet-facing and authorize inside it.
 
@@ -148,7 +153,9 @@ begin
 end $$;
 ```
 
-A definer function that does neither is a privilege-escalation primitive. Tables are typically owned by `postgres`, so a definer function owned by `postgres` **reads and writes with RLS off**.
+A definer function that does neither is a privilege-escalation primitive. Tables are typically owned by `postgres`, so a definer function owned by `postgres` **reads and writes with RLS off**. `FORCE ROW LEVEL SECURITY` does not change that: it binds an ordinary table owner, but `postgres` holds `BYPASSRLS`, and no table setting constrains a `BYPASSRLS` role.
+
+Supabase's guidance is to **never create a definer function in an exposed schema** unless it is meant to be an RPC. Helpers that policies call, like `is_admin()` or `tenant_id()`, belong in a `private` schema PostgREST does not serve. A definer function that *is* a deliberate RPC stays in the exposed schema and must authorize the caller in its body, as above.
 
 ### R7 — Views need `security_invoker = on`
 
@@ -169,27 +176,70 @@ Materialized views and foreign tables **cannot enforce RLS at all** — keep the
 | Key | Where | Notes |
 |---|---|---|
 | anon / `sb_publishable_…` | **public**, ships in the browser | selects the `anon` role; not a secret, not a credential |
-| service_role / `sb_secret_…` | **server only** | carries `BYPASSRLS` — *no policy can constrain it* |
+| service_role / `sb_secret_…` | **server only** | carries `BYPASSRLS` — *no policy can constrain it*, unless the request also carries a user token (below) |
 
 Never in `VITE_*` / `NEXT_PUBLIC_*` — that prefix ships it to the browser. Supabase rejects secret keys sent with a browser `User-Agent`, but that is a safety net for accidents, **not a control**: any other UA defeats it.
 
 New-format keys are opaque tokens, not JWTs, and must go in the `apikey` header rather than `Authorization: Bearer`. Migrating changes nothing about your RLS posture — the win is revocable, rotatable secret keys.
 
+**A secret key does not bypass RLS when a user token rides along.** Supabase: *"A secret key bypasses RLS only when the request carries no user access token."* A server client created with the secret key that forwards the caller's `Authorization: Bearer <user JWT>` runs as that user, under their policies. That is useful for acting on a user's behalf, but it surprises code that expects admin reads. Keep one client per purpose.
+
 ### R10 — RLS enabled with zero policies is safe; RLS disabled is not
 
 Zero policies = default deny. **RLS not enabled at all** = wide open to anyone with the public key *for whatever the API roles have been granted, in a schema PostgREST exposes*. On a legacy project that is typically everything. These two states look similar in a dashboard and are opposites. Supabase lints them very differently: `0008` INFO vs `0013` **ERROR**.
 
-Projects created before 30 May 2026 do **not** have the safer default of not auto-exposing `public` tables. Verify rather than assume.
+Projects created before 30 May 2026 auto-expose new `public` tables until Supabase's 30 October 2026 migration, and keep every grant made before then. Verify rather than assume; the auditor's `R12` shows the default privileges in force.
 
 ### R11 — `TRUNCATE` ignores RLS entirely
 
-RLS governs rows. `TRUNCATE` is a whole-table operation and **no policy applies to it** — a role holding `TRUNCATE` can wipe every tenant's data regardless of how good your isolation is. Never grant it to `anon` or `authenticated`.
+RLS governs rows. `TRUNCATE` is a whole-table operation and **no policy applies to it**. PostgREST and pg_graphql have no `TRUNCATE` verb, and `anon`/`authenticated` cannot log in, so the privilege is reachable only through a `SECURITY INVOKER` function that truncates, or one that runs dynamic SQL. That makes it defence in depth rather than an open door. Legacy default privileges grant it on every new table, so revoke it:
 
 ```sql
 revoke truncate on all tables in schema public from anon, authenticated;
 ```
 
-Same reasoning applies to `REFERENCES`: foreign-key and unique-constraint checks run outside RLS, so they can reveal whether an invisible row exists.
+**Constraints see rows RLS hides.** Primary-key, unique and foreign-key checks run without RLS, so an `INSERT` that fails with a unique violation reveals that an invisible row with that value exists. Revoking `REFERENCES` does nothing about this. Scope unique constraints per tenant (`unique (tenant_id, email)`) and avoid meaningful values in globally unique columns.
+
+### R12 — Enable RLS in the migration that creates the table
+
+On a project that still has the legacy default privileges, every new table in `public` is granted to `anon` and `authenticated` the moment it is created. If the migration creates the table and a later one enables RLS, the table is open in between. Put `alter table ... enable row level security` in the same migration as `create table`, and treat default privileges as part of the attack surface: the auditor's `R12` lists them.
+
+```sql
+-- the per-schema grants Supabase's legacy defaults add for the API roles
+alter default privileges in schema public revoke all on tables from anon, authenticated;
+alter default privileges in schema public revoke all on functions from anon, authenticated;
+-- PostgreSQL's own EXECUTE-for-PUBLIC default on functions is GLOBAL:
+-- a per-schema `revoke ... from public` has no effect on it
+alter default privileges revoke execute on functions from public;
+```
+
+Default privileges belong to the role that creates the objects. The statements above apply to objects the current role creates; repeat them with `for role <name>` for every other role that creates objects in exposed schemas (that requires membership in the role). Existing objects keep their grants, so this protects only what comes next.
+
+### R13 — `authenticated` is not "trusted"
+
+Anyone can become `authenticated` when signup is open, and **anonymous sign-ins also arrive as `authenticated`**. With email confirmation off, the email claim is unverified. So:
+
+- Every `to authenticated` policy needs an ownership or membership predicate. `to authenticated using (true)` means "anyone who signs up", and Splinter's always-true lint does not flag it for `SELECT`.
+- If anonymous users must be excluded, add a restrictive policy: `using ((select (auth.jwt() ->> 'is_anonymous')::boolean) is false)`.
+- Never authorize on the `email` claim or its domain.
+- A **custom access token hook** must be revoked from the API roles (`revoke execute ... from authenticated, anon, public`). Otherwise it is an RPC that returns the claims it would issue for any user ID you pass it. The auditor flags likely hooks as `R13-auth-hook-callable`. Never build the hook's claims from data the user can write.
+- Claims are fixed until the token refreshes. Demoting an admin in `app_metadata` leaves their current token working. For permissions that must revoke immediately, look them up in a table inside the policy.
+
+### R14 — Storage, Realtime and Edge Functions have their own gates
+
+PostgREST is not the only door. Each of these needs its own check; details and verification steps are in `references/beyond-the-data-api.md`.
+
+- **Storage.** A **public bucket serves every object to anyone with its URL; no policy is consulted on download.** Per-user files go in a private bucket with policies that pin `bucket_id` *and* an owner or path predicate. Signed URLs are bearer tokens that outlive any policy change. The auditor lists public buckets (`R14-public-bucket`).
+- **Realtime.** Broadcast and Presence are open on public channels to anyone with the publishable key. Private channels need policies on `realtime.messages` **and** "Allow public access" turned off in Realtime settings. `postgres_changes` applies the table's RLS, but not to `DELETE` events.
+- **Edge Functions.** `verify_jwt` does not prove a signed-in user: it accepts the legacy anon key (itself a JWT) and also the publishable and secret keys. A function that uses a secret-key client bypasses every policy, so it must authorize the caller in its handler. CORS does not restrict non-browser clients.
+
+### R15 — `UPDATE`, upsert and `RETURNING` need a `SELECT` policy
+
+An `UPDATE` through the API with no matching `SELECT` policy silently changes zero rows. `Prefer: return=representation` and upserts (`ON CONFLICT DO UPDATE`) must also pass `SELECT` policies, and fail with `42501` when they don't. The tempting fix, `for select using (true)`, turns a write bug into a data leak. Add a `SELECT` policy scoped exactly like the write policy instead.
+
+### R16 — RLS is per row; sensitive columns need their own boundary
+
+A user allowed to read a row reads **every column** of it. A `profiles` table readable by teammates leaks email, phone and billing IDs along with the display name. Splinter's sensitive-columns lint only fires when RLS is off. Revoke the table-level `SELECT` and grant only the safe columns, or split the table into a public part and a private part with a stricter policy. Column grants are enforced before RLS (see the layer order above).
 
 ## Server-side vs browser: the three access patterns
 
@@ -242,17 +292,20 @@ maintained against the platform, ~29 rules. It covers RLS-disabled tables, `USIN
 definer views, mutable `search_path`, `user_metadata` in policies, exposed materialized
 views, browser-callable definer functions, and sensitive-looking column names.
 
-**Plus four rules Splinter does not have:**
+**Plus rules Splinter does not have:**
 
 | | |
 |---|---|
-| `R4` | delete-and-reinsert defeating a column-level `UPDATE` revoke |
+| `R4` | delete-and-reinsert defeating a column-level `UPDATE` revoke, including column-level `INSERT` |
+| `R13` | an Auth hook left executable by `anon`/`authenticated` in an exposed schema |
+| `R1` | permissive policies covering ALL commands, or policies applying `TO PUBLIC`, including on `storage.objects` and `realtime.messages` |
+| `R2` | RLS tables with no `RESTRICTIVE` policy, or one that covers reads but not writes |
 | `R11` | `TRUNCATE`, which no policy applies to |
-| `R1` | policies covering ALL commands, or applying `TO PUBLIC` |
-| `R2` | RLS tables with no `RESTRICTIVE` policy pinning tenancy |
+| `R12` | default privileges that expose every future table or function |
+| `R14` | public Storage buckets |
 
-Findings from Splinter are prefixed `splinter:`. Pass `--no-splinter` to run only the
-four. Earlier versions reimplemented seven Splinter rules by hand; those were removed —
+Findings from Splinter are prefixed `splinter:`. Pass `--no-splinter` to run only this
+skill's own rules. Earlier versions reimplemented seven Splinter rules by hand; those were removed —
 an unmaintained duplicate that is subtly wrong is worse than no check, and two of them
 were (the `USING (true)` check missed `1=1` and every whitespace variant).
 
@@ -274,7 +327,9 @@ uv run "$AUDIT" --db-url "$DATABASE_URL" --json
 uv run "$AUDIT" --db-url "$DATABASE_URL" --schema public --schema api
 ```
 
-With no `--schema`, it audits whatever PostgREST actually exposes (`pgrst.db_schemas`), not just `public` — a project serving an `api` schema would otherwise be audited on the wrong objects and report a clean bill of health.
+With no `--schema`, it reads the exposed schemas from the `pgrst.db_schemas` setting on the `authenticator` role. When that setting is absent, which is normal for the local CLI and for projects configured from the dashboard, it **exits 2 and asks for `--schema`** rather than guessing. An earlier version silently fell back to `public`, so a project serving an `api` schema was audited on the wrong objects and got a clean report. Take the list from Dashboard → Data API → Exposed schemas, or `[api].schemas` in `supabase/config.toml`.
+
+**Audit only projects you control.** The auditor needs the project's database URL, including the `postgres` password, which only the project's owners hold. Treat that as the proof of ownership: if you do not have it, you are not authorized to audit the project. The auditor is read-only either way.
 
 **Neither replaces a negative test suite.** Lints check configuration; only tests check reality. Assert 401/403/empty on every table, view and RPC using (a) the publishable key alone and (b) a *second tenant's* JWT.
 
@@ -295,8 +350,8 @@ What this skill adds around it:
 
 | | |
 |---|---|
-| Four rules Splinter lacks | `R1` (policies with no `FOR`/`TO`), `R2` (no `RESTRICTIVE` policy), `R4` (delete-and-reinsert), `R11` (`TRUNCATE`) |
-| `pgrst.db_schemas` is set first | without it, several of Splinter's API-exposure lints silently fall back to `public` only — upstream's README warns about this |
+| Rules Splinter lacks | `R1`, `R2`, `R4`, `R11`, `R12`, `R13`, `R14` (see the table above) |
+| `pgrst.db_schemas` is set first | from the `authenticator` role setting or `--schema`; without it, several of Splinter's API-exposure lints silently fall back to `public` only — upstream's README warns about this |
 | One read-only transaction | server-enforced, not merely asserted |
 | Filtering and formatting | `EXTERNAL` + `SECURITY` findings only, `--json` for CI, `--no-splinter` to skip |
 
@@ -312,6 +367,7 @@ with Supabase before publishing this skill more widely. See `vendor/README.md`.
 
 - `references/trigger-guard-pattern.md` — full column-authorization trigger, with tests
 - `references/threat-checklist.md` — pre-merge review checklist
+- `references/beyond-the-data-api.md` — Storage, Realtime and Edge Functions: configuration, fixes, verification
 - [Splinter](https://github.com/supabase/splinter) — Supabase's linter, bundled here · [its rule docs](https://supabase.com/docs/guides/database/database-advisors)
 - [Postgres RLS](https://www.postgresql.org/docs/current/ddl-rowsecurity.html) · [CREATE POLICY](https://www.postgresql.org/docs/current/sql-createpolicy.html) · [Privileges](https://www.postgresql.org/docs/current/ddl-priv.html)
 - [Supabase: Hardening the Data API](https://supabase.com/docs/guides/database/hardening-data-api) · [Column Level Security](https://supabase.com/docs/guides/database/postgres/column-level-security)

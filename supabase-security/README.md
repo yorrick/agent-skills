@@ -22,13 +22,14 @@ The three enforcement layers and — the part that causes most confusion — **t
 and only a trigger sees everything at once. Getting that order wrong is what makes an
 admin policy silently unreachable behind a revoked column.
 
-Ten rules, a column-authorization trigger pattern with a test matrix, and a pre-merge
-checklist.
+Sixteen rules, a column-authorization trigger pattern with a test matrix, a pre-merge
+checklist, and a reference for the services that sit beside PostgREST: Storage buckets,
+Realtime channels and Edge Functions, each of which has its own access gate.
 
 ## The audit script
 
 ```bash
-uv run scripts/audit_rls.py --db-url "$DATABASE_URL"
+uv run scripts/audit_rls.py --db-url "$DATABASE_URL" --schema public
 uv run scripts/audit_rls.py --db-url "$DATABASE_URL" --json          # for CI
 uv run scripts/audit_rls.py --db-url "$DATABASE_URL" --no-splinter   # own rules only
 ```
@@ -43,19 +44,22 @@ a pure-SQL linter (~29 rules) that powers the dashboard's Security Advisor and t
 explicitly for project linting; it is vendored here **unmodified** at
 `vendor/splinter.sql`, pinned to the commit in `vendor/SPLINTER_VERSION`.
 
-This script runs it and adds **four rules Splinter does not have**:
+This script runs it and adds **rules Splinter does not have**:
 
 | | |
 |---|---|
-| `R1` | policies covering ALL commands, or applying `TO PUBLIC` |
-| `R2` | RLS tables with no `RESTRICTIVE` policy pinning tenancy |
+| `R1` | permissive policies covering ALL commands, or policies applying `TO PUBLIC` (including Storage and Realtime policies) |
+| `R2` | RLS tables with no `RESTRICTIVE` policy, or one that covers reads but not writes |
 | `R4` | delete-and-reinsert defeating a column-level `UPDATE` revoke |
 | `R11` | `TRUNCATE`, which no RLS policy applies to |
+| `R12` | default privileges that expose every future table or function |
+| `R13` | an Auth hook left executable by the API roles |
+| `R14` | public Storage buckets |
 
 It also sets `pgrst.db_schemas` before running, so Splinter audits every schema PostgREST
-actually exposes. Without that, several of its API-exposure lints silently fall back to
-`public` only — upstream's README warns about this, and it is easy to get a clean report
-on a project that serves an `api` schema.
+actually exposes. The list comes from the `authenticator` role setting or from `--schema`;
+when neither is available the script exits 2 instead of guessing `public`, because a
+guessed list gives a clean report on a project that serves an `api` schema.
 
 Findings are prefixed `splinter:` where they come from Splinter. You can always run it
 standalone: `psql -f vendor/splinter.sql "$DATABASE_URL"`.

@@ -593,3 +593,34 @@ Can you add a note in the README saying that we used artificial intelligence ben
 ---
 
 Okay, yeah, I know that I'm using subscriptions but we'll have to assume that the the subscription kind of costs if we we want are proportional to the token prices we cannot really do better than that anyway.
+
+---
+
+maybe check GLM against Deep Seek and then I want you to work autonomously, make your work validated by Codex Astra until you have a PR that is ready to move.
+
+---
+
+<task-notification>
+<task-id>a16eedcf1e2c6979c</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-yorrickjansen-work-agent-skills--claude-worktrees-jev-model-routing/43bce55b-7aa7-4002-97d7-3963c1eebb96/tasks/a16eedcf1e2c6979c.output</output-file>
+<status>completed</status>
+<summary>Agent "Compare GLM vs DeepSeek on coding" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>I have enough verified data (all from directly-fetched pages or their explicit search snippets, not any AI CLI).
+
+| Benchmark | GLM 5.3 Flash | DeepSeek V4.1 Flash | Source |
+|---|---|---|---|
+| AA Intelligence Index | 42 (max reasoning) | 39 (max reasoning); 25 (non-reasoning) | artificialanalysis.ai/models/glm-5-3-flash; .../deepseek-v4-1-flash; .../deepseek-v4-1-flash-non-reasoning |
+| AA Terminal-Bench 4.0 | 33% | 27% | artificialanalysis.ai/models/comparisons/deepseek-v4-1-flash-vs-glm-5-3-flash |
+| AA SciCode | 52% | 52% | same comparison page |
+| AA AutomationBench-AA | 60% | 69% | same comparison page |
+| AA cost per Intelligence Index task | $0.25 | $0.27 (max) / $0.15 (non-reasoning) | model pages above |
+| AA price per 1M tokens (in/out) | $0.15 / $0.50 | $0.30 / $1.20 | same comparison page |
+| Vendor-reported Terminal-Bench 2.1 | 84.3 | 90.6 (vs Opus-5 89.1, GLM-5.3 88.2) | huggingface.co/zai-org/GLM-5.3-Flash; DeepSeek's own V4.1-Flash paper (arxiv.org/pdf/2609.19969), as cited in search snippets |
+| Vendor-reported DeepSWE v1.1 | 63.4* | 74.2 | same two sources |
+| LiveCodeBench, SWE-bench Verified (AA or independent) | not listed | not listed | Artificial Analysis' current Intelligence Index v4.3.2 does not include LiveCodeBench or SWE-bench; no independent SWE-bench Verified score was found for either model |
+
+Data: on Artificial Analysis's own suite, GLM 5.3 Flash edges out DeepSeek V4.1 Flash on Terminal-Bench 4.0 (33 vs 27) and ties on SciCode (52 vs 52), while DeepSeek wins on AutomationBench-AA (69 vs 60) and on the vendors' self-reported Terminal-Bench 2.1 and DeepSWE numbers (90.6/74.2 vs 84.3/63.4); GLM is cheaper on both per-token price ($0.15/$0.50 vs $0.30/$1.20) and AA's cost-per-task metric. No single source shows one model clearly ahead on coding overall — it splits by benchmark and reasoning effort, so I'd call it a wash with GLM cheaper. On reasoning effort, only DeepSeek shows an AA-published effort split (Intelligence Index 39 "max" vs 25 "non-reasoning," with cost-per-task 0.27 vs 0.15); AA's GLM 5.3 Flash pages show no low/high/max breakdown, and the AA comparison page for GLM explicitly states it found none. SWE-bench Verified and LiveCodeBench numbers were not found for either model in AA's current index or the sources checked, so I've reported "not listed" rather than estimate them.</result>
+<usage><subagent_tokens>82315</subagent_tokens><tool_uses>16</tool_uses><duration_ms>182074</duration_ms></usage>
+</task-notification>

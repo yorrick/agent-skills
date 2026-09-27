@@ -108,6 +108,17 @@ async function usableModels(client) {
   return usable;
 }
 
+/**
+ * Providers with credentials. config.providers() also lists a provider the user
+ * merely declared in opencode.json, so a switch additionally needs the provider
+ * in provider.list()'s `connected` (verified: OpenRouter drops out without a
+ * login). That call takes about 300 ms, so it runs alongside the Jev call.
+ */
+async function connectedProviders(client) {
+  const { data } = await client.provider.list();
+  return new Set(data?.connected ?? []);
+}
+
 export default async function jevRouter({ client } = {}) {
   let tiers;
   try {
@@ -156,11 +167,17 @@ export default async function jevRouter({ client } = {}) {
         // message is not even sent to Jev.
         const usable = await usableModels(client);
         if (!tiers.some((tier) => usable.has(tier.model_id))) return;
-        const decision = await askRouter(prompt);
+        const [decision, connected] = await Promise.all([
+          askRouter(prompt),
+          connectedProviders(client).catch(() => new Set()),
+        ]);
         const id = decision && nextPartId(output.parts);
         if (!id) return;
         // A decision without a model keeps the message where it is, with a note.
-        if (decision.model_id && !usable.has(decision.model_id)) return;
+        if (decision.model_id) {
+          const provider = decision.model_id.split('/')[0];
+          if (!usable.has(decision.model_id) || !connected.has(provider)) return;
+        }
         if (decision.model_id) {
           const slash = decision.model_id.indexOf('/');
           output.message.agent = decision.agent;

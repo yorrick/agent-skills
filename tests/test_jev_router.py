@@ -437,6 +437,7 @@ def opencode(
     mode: str = "tui",
     user_config: dict | None = None,
     providers: list[dict] | None = None,
+    connected: list[str] | None = None,
 ) -> dict:
     node = shutil.which("node")
     assert node, "node is required to exercise the opencode hook"
@@ -449,6 +450,8 @@ def opencode(
     }
     if providers is not None:
         env["JEV_TEST_PROVIDERS"] = json.dumps(providers)
+    if connected is not None:
+        env["JEV_TEST_CONNECTED"] = json.dumps(connected)
     result = subprocess.run(
         [node, str(OPENCODE_HARNESS), agent, prompt, mode],
         cwd=REPO,
@@ -469,6 +472,15 @@ def test_opencode_registers_a_helper_agent_per_size_and_the_jev_command(home: Pa
         assert helper["model"] == tier["model_id"]
         assert (helper["mode"], helper["hidden"]) == ("subagent", True)
     assert "$ARGUMENTS" in config["command"]["jev"]["template"]
+
+
+def test_opencode_never_switches_to_a_provider_declared_but_not_logged_in(home: Path, jev: FakeJev) -> None:
+    """`provider.openrouter = {}` in opencode.json puts OpenRouter in config.providers()
+    without credentials; only provider.list()'s `connected` tells the difference."""
+    switch_on(home, jev)
+    message = opencode(home, jev, connected=[])["output"]
+    assert message["message"]["model"]["modelID"] == "deepseek/deepseek-v4.1-flash"
+    assert len(message["parts"]) == 1
 
 
 @pytest.mark.parametrize(

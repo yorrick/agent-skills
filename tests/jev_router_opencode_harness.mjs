@@ -17,13 +17,18 @@ process.argv[1] = mode === 'run' ? '/opt/opencode/src/index.js' : '/opt/opencode
 const repoRoot = process.cwd();
 const entry = path.join(repoRoot, '.opencode', 'plugins', 'agent-skills.js');
 const module = await import(pathToFileURL(entry).href);
-// opencode's client, reduced to the one call the router makes: the connected
-// providers and their models (JSON in JEV_TEST_PROVIDERS; default: OpenRouter
-// with GLM 5.3 flash, as on the user's machine).
+// opencode's client, reduced to the two calls the router makes: the configured
+// providers with their models (JEV_TEST_PROVIDERS) and the ids of providers that
+// have credentials (JEV_TEST_CONNECTED). Defaults match the user's machine:
+// OpenRouter, logged in, with GLM 5.3 flash.
 const providers = JSON.parse(
   process.env.JEV_TEST_PROVIDERS ?? '[{"id":"openrouter","models":{"z-ai/glm-5.3-flash":{}}}]',
 );
-const client = { config: { providers: async () => ({ data: { providers } }) } };
+const connected = JSON.parse(process.env.JEV_TEST_CONNECTED ?? '["openrouter"]');
+const client = {
+  config: { providers: async () => ({ data: { providers } }) },
+  provider: { list: async () => ({ data: { connected } }) },
+};
 const hooks = await module.AgentSkillsPlugin({ client, directory: repoRoot });
 
 // The user's own opencode config, as the config hook receives it (JSON, optional).

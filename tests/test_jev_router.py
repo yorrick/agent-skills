@@ -44,6 +44,7 @@ class FakeJev:
         self.status = 200
         self.delay = 0.0
         self.usage: dict = {"cost": 0.00002}
+        self.model = "openai/gpt-6-luna"
         self.requests: list[dict] = []
         fake = self
 
@@ -54,7 +55,7 @@ class FakeJev:
                 content = fake.answer if isinstance(fake.answer, str) else json.dumps(fake.answer)
                 body = json.dumps(
                     {
-                        "model": "openai/gpt-6-luna",
+                        "model": fake.model,
                         "choices": [{"message": {"content": content}}],
                         "usage": fake.usage,
                     }
@@ -255,7 +256,6 @@ def test_unusable_answers_are_ignored_but_still_cost_money(home: Path, jev: Fake
 @pytest.mark.parametrize("body", [{"usage": [{"cost": 0.02}], "model": ["x"]}, {"usage": "free"}, [], "text"])
 def test_odd_response_shapes_never_break_the_hook(body: object) -> None:
     assert jev_router.cost_of(body) is None
-    assert jev_router.answered_by(body) is None
     tiers = jev_router.TIERS["claude"]
     with pytest.raises(jev_router.BadAnswer):
         jev_router.parse_verdict(body, tiers)
@@ -267,17 +267,18 @@ def test_the_timeout_can_be_lowered_but_not_raised_past_the_outer_cap() -> None:
     assert jev_router.timeout_of({"timeout_seconds": 30}) == 6
 
 
-def test_the_log_never_keeps_what_jev_said(home: Path, jev: FakeJev) -> None:
+@pytest.mark.parametrize("routed", [True, False])
+def test_the_log_never_keeps_what_jev_said(home: Path, jev: FakeJev, routed: bool) -> None:
+    """Neither the reply text nor any other string field of the response is logged."""
     switch_on(home, jev)
-    jev.answer = "You asked me to rename SECRET-PROJECT-X, which is a tiny job."
+    jev.model = "customer/SECRET-PROJECT-X"
+    jev.answer = (
+        {"size": "tiny", "confidence": 90, "follow_up": False}
+        if routed
+        else "You asked me to rename SECRET-PROJECT-X, which is a tiny job."
+    )
     hook(home, jev, prompt="rename SECRET-PROJECT-X")
     assert "SECRET" not in (home / "log.jsonl").read_text()
-
-
-def test_only_a_model_slug_is_logged_as_the_answering_model() -> None:
-    assert jev_router.answered_by({"model": "openai/gpt-6-luna"}) == "openai/gpt-6-luna"
-    assert jev_router.answered_by({"model": "~anthropic/claude-fable-latest"}) == "~anthropic/claude-fable-latest"
-    assert jev_router.answered_by({"model": "please rename SECRET-PROJECT-X to Y"}) is None
 
 
 def test_status_counts_an_answered_call_that_reported_no_cost(home: Path, jev: FakeJev) -> None:

@@ -208,16 +208,6 @@ def cost_of(body: object) -> float | None:
     return cost if isinstance(cost, int | float) and not isinstance(cost, bool) else None
 
 
-MODEL_SLUG = re.compile(r"[\w.~-]{1,60}/[\w.:~-]{1,80}")
-
-
-def answered_by(body: object) -> str | None:
-    """The model OpenRouter says answered Jev's sizing question, if it looks like a
-    model slug. Anything else could be echoed message text, which the log never keeps."""
-    model = body.get("model") if isinstance(body, dict) else None
-    return model if isinstance(model, str) and MODEL_SLUG.fullmatch(model) else None
-
-
 def timeout_of(config: dict) -> float:
     """The Jev deadline. It can only be lowered: each harness stops the whole hook
     at 8 s, and startup plus logging need the rest, so a longer wait would be cut
@@ -370,7 +360,9 @@ def route(harness: str, stdin: str) -> str:
         event.update(outcome="error", error=error_label(exc))
     event["latency_ms"] = round((time.monotonic() - started) * 1000)
     if body is not None:
-        event.update(answered=True, cost=cost_of(body), answered_by=answered_by(body))
+        # Reason: nothing from the response body is logged except its cost; any
+        # string field could carry echoed message text.
+        event.update(answered=True, cost=cost_of(body))
     if verdict is not None:
         tier = decide(verdict, tiers)
         event.update(outcome=outcome_of(verdict, tier), size=verdict.size, confidence=verdict.confidence)

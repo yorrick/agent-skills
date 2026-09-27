@@ -83,7 +83,11 @@ touch those runs, so it routes only when a person is typing, failing closed:
   runs `src/index.js`. `opencode run --attach` sends its message to a server a TUI
   started, so the message must also name its agent: the TUI always does, and
   `opencode run` only with an explicit `--agent`. A TUI attached to `opencode serve`
-  is not routed, which again fails closed.
+  is not routed, which again fails closed. Known gap: `opencode run --attach` to a
+  live TUI with an explicit `--agent` is routed. It runs in the TUI's process through
+  the same internal event path, and its hook input differs only in what the caller
+  chose to pass (verified: argv and stack traces are identical), so no plugin can
+  tell it from typing. The user's review commands never attach.
 
 Headless text is never sent to Jev either. Every tier names a model of its own
 harness, and a test enforces it, so a helper's work is still that harness's work.

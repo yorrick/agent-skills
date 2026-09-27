@@ -37,7 +37,10 @@ thinking level.
   `codex exec` and `opencode run` are reviews and automation that pin their own model and
   thinking level, so the router neither changes them nor sends their text to Jev. When
   it cannot tell, it treats the session as headless: a Codex session you start with
-  approvals bypassed looks like `codex exec`, so it is not routed.
+  approvals bypassed looks like `codex exec`, so it is not routed. One gap remains:
+  `opencode run --attach` to your running TUI with an explicit `--agent` runs inside the
+  TUI and looks exactly like typing there, so it is routed. Nothing in opencode's hook
+  tells the two apart (verified), and your review commands do not attach.
 - **Block a message.** If Jev is slow (over 6 seconds) or anything fails, the message goes
   through as if the router were not there.
 

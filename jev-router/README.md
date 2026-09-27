@@ -60,6 +60,7 @@ Codex asks you to trust the plugin's hook the first time it starts after the ins
 - `uv` on the `PATH`. The hook runs `skills/jev/scripts/jev_router.py`, which uses only
   the standard library.
 - State lives in `~/.config/jev-router/`: `config.json` holds the switch, the key file
-  path and `timeout_seconds`, and `log.jsonl` holds one line per message.
+  path and `timeout_seconds` (6 by default; keep it under 7, because each harness stops
+  the whole hook at 8 s), and `log.jsonl` holds one line per message.
 - The size-to-model table is `skills/jev/scripts/tiers.json`. The Claude Code helpers are
   `agents/*.md`, and a test keeps them in step with the table.

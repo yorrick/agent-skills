@@ -202,7 +202,8 @@ def test_codex_gets_three_sizes_and_spawns_with_a_model(home: Path, jev: FakeJev
     switch_on(home, jev)
     jev.answer = {"size": "everyday", "confidence": 90, "follow_up": False}
     context = json.loads(hook(home, jev, "codex"))["hookSpecificOutput"]["additionalContext"]
-    assert 'spawn_agent with model "gpt-6-luna"' in context
+    # A full-history fork inherits the parent's model, so the override needs fork_turns "none".
+    assert 'spawn_agent with fork_turns "none", model "gpt-6-luna"' in context
     assert "Done by GPT-6 Luna" in context
     system = jev.requests[0]["messages"][0]["content"]
     assert "- tiny:" not in system
@@ -231,13 +232,36 @@ def test_slow_jev_is_abandoned_at_the_deadline(home: Path, jev: FakeJev) -> None
 
 @pytest.mark.parametrize(
     "answer",
-    ["I think this is small.", '{"size": "medium", "confidence": 90}', '{"size": "tiny", "confidence": 250}'],
+    [
+        "I think this is small.",
+        '{"size": "medium", "confidence": 90, "follow_up": false}',
+        '{"size": "tiny", "confidence": 250, "follow_up": false}',
+        '{"size": "tiny", "confidence": "high", "follow_up": false}',
+        '{"size": "tiny", "confidence": true, "follow_up": false}',
+        '{"size": "tiny", "confidence": 90}',
+        '{"size": "tiny", "confidence": 90, "follow_up": "no"}',
+    ],
 )
-def test_unusable_answers_are_ignored(home: Path, jev: FakeJev, answer: str) -> None:
+def test_unusable_answers_are_ignored_but_still_cost_money(home: Path, jev: FakeJev, answer: str) -> None:
     switch_on(home, jev)
     jev.answer = answer
     assert hook(home, jev) == ""
-    assert log(home)[-1]["outcome"] == "error"
+    event = log(home)[-1]
+    assert event["outcome"] == "error" and event["cost"] == 0.00002
+
+
+def test_the_log_never_keeps_what_jev_said(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev)
+    jev.answer = "You asked me to rename SECRET-PROJECT-X, which is a tiny job."
+    hook(home, jev, prompt="rename SECRET-PROJECT-X")
+    assert "SECRET" not in (home / "log.jsonl").read_text()
+
+
+def test_confidence_just_under_sixty_is_not_rounded_up(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev)
+    jev.answer = {"size": "tiny", "confidence": 59.6, "follow_up": False}
+    assert "59.6% sure" in hook(home, jev)
+    assert log(home)[-1]["outcome"] == "unsure"
 
 
 def test_http_errors_are_ignored(home: Path, jev: FakeJev) -> None:
@@ -266,13 +290,13 @@ def test_garbage_on_stdin_is_ignored(home: Path, jev: FakeJev) -> None:
 def test_status_counts_sizes_and_cost(home: Path, jev: FakeJev) -> None:
     switch_on(home, jev)
     for answer in (
-        {"size": "tiny", "confidence": 90},
+        {"size": "tiny", "confidence": 90, "follow_up": False},
         {"size": "tiny", "confidence": 90, "follow_up": True},
-        {"size": "hardest", "confidence": 40},
+        {"size": "hardest", "confidence": 40, "follow_up": False},
     ):
         jev.answer = answer
         hook(home, jev)
-    jev.delay, jev.answer = 5, {"size": "tiny", "confidence": 90}
+    jev.delay, jev.answer = 5, {"size": "tiny", "confidence": 90, "follow_up": False}
     switch_on(home, jev, timeout_seconds=0.3)
     hook(home, jev)
     text = run(home, jev, "status").stdout
@@ -368,6 +392,22 @@ def test_opencode_carries_on_when_the_router_cannot_run(home: Path, jev: FakeJev
     switch_on(home, jev)
     message = opencode(home, jev, path="/nonexistent")["output"]
     assert message["message"]["agent"] == "build" and len(message["parts"]) == 1
+
+
+def test_a_broken_jev_router_install_does_not_take_opencode_down(tmp_path: Path) -> None:
+    """The entry loads every plugin; a bad tiers.json must only disable the router."""
+    shutil.copytree(REPO / ".opencode", tmp_path / ".opencode")
+    shutil.copytree(REPO / "task-status", tmp_path / "task-status")
+    shutil.copytree(PLUGIN, tmp_path / "jev-router")
+    (tmp_path / "jev-router" / "skills" / "jev" / "scripts" / "tiers.json").write_text("{")
+    node = shutil.which("node")
+    assert node
+    result = subprocess.run(
+        [node, str(REPO / "tests" / "opencode_entry_harness.mjs")], cwd=tmp_path, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    paths = json.loads(result.stdout)["config"]["skills"]["paths"]
+    assert any(p.endswith("task-status/skills") for p in paths)
 
 
 # --- the helpers match the tiers -----------------------------------------------------

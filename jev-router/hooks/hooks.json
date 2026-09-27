@@ -6,7 +6,7 @@
           {
             "type": "command",
             "command": "uv run --quiet --script \"${CLAUDE_PLUGIN_ROOT}/skills/jev/scripts/jev_router.py\" hook claude",
-            "timeout": 15
+            "timeout": 8
           }
         ]
       }

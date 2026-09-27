@@ -152,10 +152,8 @@ def read_key(key_file: str | None) -> str | None:
 @dataclass(frozen=True)
 class Verdict:
     size: str
-    confidence: int
+    confidence: float
     follow_up: bool
-    cost: float | None
-    answered_by: str | None
 
 
 def jev_instructions(tiers: tuple[Tier, ...]) -> str:
@@ -174,29 +172,51 @@ def jev_instructions(tiers: tuple[Tier, ...]) -> str:
     )
 
 
+class BadAnswer(ValueError):
+    """Jev answered, but not with a usable verdict.
+
+    The messages are fixed strings on purpose: Jev's text can echo the user's
+    message, and whatever an error says ends up in the log.
+    """
+
+
+class NoKey(RuntimeError):
+    pass
+
+
 def parse_verdict(body: dict, tiers: tuple[Tier, ...]) -> Verdict:
-    content = body["choices"][0]["message"]["content"]
-    found = re.search(r"\{.*\}", content, re.S)
-    if not found:
-        raise ValueError(f"Jev did not answer with JSON: {content[:80]!r}")
-    answer = json.loads(found.group(0))
-    size = answer.get("size")
+    """Accept only a complete verdict; anything doubtful means "carry on"."""
+    try:
+        content = body["choices"][0]["message"]["content"]
+        answer = json.loads(re.search(r"\{.*\}", content, re.S).group(0))  # type: ignore[union-attr]
+    except (KeyError, IndexError, TypeError, AttributeError, json.JSONDecodeError):
+        raise BadAnswer("no JSON verdict") from None
+    size, confidence, follow_up = answer.get("size"), answer.get("confidence"), answer.get("follow_up")
     if size not in {t.size for t in tiers}:
-        raise ValueError(f"Jev picked an unknown size: {size!r}")
-    confidence = round(float(answer["confidence"]))
-    if not 0 <= confidence <= 100:
-        raise ValueError(f"Jev's confidence is out of range: {confidence}")
-    usage = body.get("usage") or {}
-    return Verdict(
-        size=size,
-        confidence=confidence,
-        follow_up=answer.get("follow_up") is True,
-        cost=usage.get("cost"),
-        answered_by=body.get("model"),
-    )
+        raise BadAnswer("unknown size")
+    if isinstance(confidence, bool) or not isinstance(confidence, int | float) or not 0 <= confidence <= 100:
+        raise BadAnswer("confidence is not a number from 0 to 100")
+    if not isinstance(follow_up, bool):
+        raise BadAnswer("follow_up is not true or false")
+    return Verdict(size=size, confidence=confidence, follow_up=follow_up)
 
 
-def ask_jev(message: str, tiers: tuple[Tier, ...], key: str, timeout: float) -> Verdict:
+def cost_of(body: dict) -> float | None:
+    """What OpenRouter billed for the call, kept even when the answer is unusable."""
+    cost = (body.get("usage") or {}).get("cost")
+    return cost if isinstance(cost, int | float) and not isinstance(cost, bool) else None
+
+
+def error_label(exc: Exception) -> str:
+    """A log-safe description: never the text of a response."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"HTTP {exc.code}"
+    if isinstance(exc, BadAnswer | NoKey):
+        return f"{type(exc).__name__}: {exc}"
+    return type(exc).__name__
+
+
+def ask_jev(message: str, tiers: tuple[Tier, ...], key: str, timeout: float) -> dict:
     """One call to Jev, abandoned at `timeout` seconds of wall-clock time.
 
     urlopen's own timeout bounds each socket operation, not the whole exchange, so a
@@ -234,7 +254,7 @@ def ask_jev(message: str, tiers: tuple[Tier, ...], key: str, timeout: float) -> 
         raise TimeoutError(f"Jev took longer than {timeout:g}s")
     if error is not None:
         raise error
-    return parse_verdict(outcome["body"], tiers)
+    return outcome["body"]
 
 
 def decide(verdict: Verdict, tiers: tuple[Tier, ...]) -> Tier | None:
@@ -254,7 +274,7 @@ def outcome_of(verdict: Verdict, tier: Tier | None) -> str:
 
 
 def handoff(harness: str, tier: Tier, verdict: Verdict) -> str:
-    sized = f"Jev router: Jev's size for this message is {tier.size} ({verdict.confidence}% sure)."
+    sized = f"Jev router: Jev's size for this message is {tier.size} ({verdict.confidence:g}% sure)."
     sign_off = f"Done by {tier.model}"
     keep = (
         f"Handle it yourself instead if you are already running on {tier.model}, or if the message "
@@ -268,8 +288,11 @@ def handoff(harness: str, tier: Tier, verdict: Verdict) -> str:
         )
     if harness == "codex":
         return (
-            f'{sized} Call spawn_agent with model "{tier.model_id}", a short task_name, and a message '
-            "holding the user's request plus any context from this conversation it needs, and tell it "
+            # Reason: a full-history fork inherits the parent's model, so the
+            # override only applies with fork_turns "none"; the message carries
+            # the context instead.
+            f'{sized} Call spawn_agent with fork_turns "none", model "{tier.model_id}", a short task_name, '
+            "and a message holding the user's request plus any context from this conversation it needs; tell it "
             f"to end its reply with the line '{sign_off}'. Wait for it, then give the user its result, "
             f"keeping that line. {keep}"
         )
@@ -285,7 +308,7 @@ def keep_note(verdict: Verdict) -> str:
     why = (
         "it is a follow-up reply that needs this conversation"
         if verdict.follow_up
-        else f"Jev is only {verdict.confidence}% sure of its size"
+        else f"Jev is only {verdict.confidence:g}% sure of its size"
     )
     return f"Jev router: handle this message yourself ({why}). No helper does this work, so add no 'Done by' line."
 
@@ -311,26 +334,23 @@ def route(harness: str, stdin: str) -> str:
     tiers = TIERS[harness]
     event: dict = {"harness": harness}
     started = time.monotonic()
-    verdict = tier = None
+    body = verdict = tier = None
     try:
         key = read_key(config.get("key_file"))
         if not key:
-            raise RuntimeError("no OpenRouter API key in the key file")
-        verdict = ask_jev(prompt, tiers, key, float(config.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)))
+            raise NoKey("no OpenRouter API key in the key file")
+        body = ask_jev(prompt, tiers, key, float(config.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)))
+        verdict = parse_verdict(body, tiers)
     except TimeoutError:
         event["outcome"] = "timeout"
     except Exception as exc:  # any failure means "no opinion"
-        event.update(outcome="error", error=f"{type(exc).__name__}: {exc}"[:200])
+        event.update(outcome="error", error=error_label(exc))
     event["latency_ms"] = round((time.monotonic() - started) * 1000)
+    if body is not None:
+        event.update(cost=cost_of(body), answered_by=body.get("model"))
     if verdict is not None:
         tier = decide(verdict, tiers)
-        event.update(
-            outcome=outcome_of(verdict, tier),
-            size=verdict.size,
-            confidence=verdict.confidence,
-            cost=verdict.cost,
-            answered_by=verdict.answered_by,
-        )
+        event.update(outcome=outcome_of(verdict, tier), size=verdict.size, confidence=verdict.confidence)
     record(event)
     return hook_output(harness, tier, verdict) if verdict else ""
 
@@ -381,11 +401,14 @@ def status_text(config: dict, events: list[dict]) -> str:
     since = f" since {messages[0]['ts'][:10]}" if messages else ""
     lines.append(f"\nMessages Jev sized{since}: {len(sized)}")
     if sized:
-        lines.append(f"  {'size':<10}{'messages':>9}{'sent to helper':>16}")
+        lines.append(f"  {'size':<10}{'messages':>9}{'routed':>8}")
         for size in JOBS:
             picked = [e for e in sized if e["size"] == size]
             routed = sum(e["outcome"] == "routed" for e in picked)
-            lines.append(f"  {size:<10}{len(picked):>9}{routed:>16}")
+            lines.append(f"  {size:<10}{len(picked):>9}{routed:>8}")
+        # Reason: in Claude Code and Codex the hook can only advise; the session
+        # keeps a routed job when the helper would run on its own model.
+        lines.append("  Routed means the helper was offered the job; the session keeps it if already on that model.")
     count = {k: sum(e.get("outcome") == k for e in messages) for k in ("follow_up", "unsure", "timeout", "error")}
     lines.append(
         f"Kept in the session: {count['follow_up']} follow-up replies, {count['unsure']} under "
@@ -422,23 +445,28 @@ def cmd_classify(harness: str, messages: list[str]) -> int:
     for n, message in enumerate(messages, 1):
         started = time.monotonic()
         event: dict = {"harness": "classify"}
+        body = None
         try:
-            verdict = ask_jev(message, tiers, key, timeout)
+            body = ask_jev(message, tiers, key, timeout)
+            verdict = parse_verdict(body, tiers)
         except Exception as exc:
             took = time.monotonic() - started
             event.update(outcome="timeout" if isinstance(exc, TimeoutError) else "error")
+            if body is not None:
+                event["cost"] = cost_of(body)
             record(event)
-            print(f"| {n} | {message} | {type(exc).__name__} | | | carries on without Jev | {took:.1f}s | |")
+            print(f"| {n} | {message} | {error_label(exc)} | | | carries on without Jev | {took:.1f}s | |")
             continue
         took = time.monotonic() - started
         tier = decide(verdict, tiers)
-        event.update(size=verdict.size, confidence=verdict.confidence, cost=verdict.cost)
+        cost = cost_of(body)
+        event.update(size=verdict.size, confidence=verdict.confidence, cost=cost)
         record(event)
         does = f"hands to {tier.model}" if tier else "keeps it in the session"
-        cost = f"${verdict.cost:.5f}" if verdict.cost is not None else "?"
         print(
-            f"| {n} | {message} | {verdict.size} | {verdict.confidence}% | "
-            f"{'yes' if verdict.follow_up else 'no'} | {does} | {took:.1f}s | {cost} |"
+            f"| {n} | {message} | {verdict.size} | {verdict.confidence:g}% | "
+            f"{'yes' if verdict.follow_up else 'no'} | {does} | {took:.1f}s | "
+            f"{f'${cost:.5f}' if cost is not None else '?'} |"
         )
     return 0
 

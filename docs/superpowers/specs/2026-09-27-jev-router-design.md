@@ -66,8 +66,16 @@ delegating would add a hop and save nothing.
   cost is never reported back, and `status` says so.
 - **Never in the way.** Off, a timeout, an HTTP error, unparseable JSON, an
   unknown size, a missing key, or bad stdin all print nothing and exit 0. The
-  opencode module catches everything, because opencode drops a message whose
-  hook throws.
+  opencode module catches everything, including a broken `tiers.json` at load,
+  because opencode drops a message whose hook throws. Each harness also stops
+  the whole hook at 8 s, which covers `uv` startup and logging as well as Jev.
+- **Strict verdicts.** A verdict counts only with a known size, a numeric
+  confidence from 0 to 100 (59.6 is not rounded up to 60), and an explicit
+  boolean `follow_up`. Anything else is an error, and the router carries on.
+  OpenRouter's billed cost is logged even when the answer is unusable.
+- **Codex spawns with `fork_turns "none"`.** A full-history fork inherits the
+  parent's model and ignores the override, so the hand-off asks for a fresh
+  agent and puts the needed context in its message.
 - **What is not sent.** Prompts starting with `/` or `$` are skipped, because
   they are commands or skill calls such as `/jev off`. So are messages from any
   opencode agent other than `build`, because moving a plan-mode message onto a
@@ -86,7 +94,12 @@ delegating would add a hop and save nothing.
   onto a `mode: "subagent", hidden: true` agent (verified), so the helpers stay
   out of the Tab list of primary agents.
 - **The log keeps no message text.** It records the outcome, size, confidence,
-  cost, latency and harness.
+  cost, latency and harness. Error entries use fixed labels such as
+  `HTTP 500` or `BadAnswer: unknown size`, never Jev's reply, which could echo
+  the message.
+- **"Routed" means offered.** In Claude Code and Codex the hook can only
+  advise, and the session keeps a job whose helper runs on its own model.
+  `status` says so rather than claiming the helper did the work.
 - **Privacy.** While the router is on, message text reaches OpenRouter, TypeSafe,
   and whichever model Jev picks to answer the sizing question. Probes saw that
   question answered by `openai/gpt-6-luna`, `deepseek/deepseek-v4.1-flash`,

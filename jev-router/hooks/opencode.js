@@ -22,9 +22,9 @@ import { fileURLToPath } from 'node:url';
 const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const scripts = path.join(pluginRoot, 'skills', 'jev', 'scripts');
 const ROUTER = ['uv', 'run', '--quiet', '--script', path.join(scripts, 'jev_router.py'), 'hook', 'opencode'];
-// Reason: the script abandons Jev at its own deadline. This only guards against
-// the script itself hanging, with the same 15 s the other harnesses' hook configs allow.
-const HARD_LIMIT_MS = 15_000;
+// Reason: the script abandons Jev at 6 s; this caps the whole run, uv startup and
+// logging included, at the same 8 s the other harnesses' hook configs allow.
+const HARD_LIMIT_MS = 8_000;
 // Reason: only the default coding agent's messages are routed. Moving a plan-mode
 // message onto a helper would lift plan mode's read-only limits.
 const ROUTABLE_AGENT = 'build';
@@ -83,7 +83,13 @@ function nextPartId(parts) {
 }
 
 export default async function jevRouter() {
-  const tiers = readTiers();
+  let tiers;
+  try {
+    tiers = readTiers();
+  } catch {
+    // A broken install must not take the other plugins' skills down with it.
+    return {};
+  }
 
   return {
     config: async (config) => {

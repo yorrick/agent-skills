@@ -104,8 +104,12 @@ def plugin_manifest(meta: dict, *, harness: str) -> dict:
             manifest["skills"] = "./skills/"
         if (root / "commands").is_dir():
             manifest["commands"] = "./commands/"
-        if (root / "hooks").is_dir():
-            manifest["hooks"] = "./hooks/"
+        # Reason: Codex reads `hooks` as a FILE; "./hooks/" fails at runtime with
+        # "failed to read plugin hooks config ...: Is a directory" and no hook runs.
+        # The file is Codex-specific because hooks/hooks.json is written for Claude
+        # Code: it may use events Codex lacks, or shell out to `claude`.
+        if (root / "hooks" / "codex.json").is_file():
+            manifest["hooks"] = "./hooks/codex.json"
     return manifest
 
 

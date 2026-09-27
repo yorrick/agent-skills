@@ -33,7 +33,11 @@ matching what OpenAI's own manifests do rather than relying on fallback behaviou
 │   ├── references/               ← optional, shared
 │   └── agents/openai.yaml        ← optional Codex interface and policy
 ├── commands/                     ← optional, shared
-├── hooks/                        ← optional, shared
+├── agents/                       ← optional, Claude Code subagents
+├── hooks/                        ← optional, one file per harness:
+│   ├── hooks.json                ←   Claude Code
+│   ├── codex.json                ←   Codex (the manifest names this file; a directory does not load)
+│   └── opencode.js               ←   opencode, merged by the entry below
 ├── .claude-plugin/plugin.json    ← generated
 └── .codex-plugin/plugin.json     ← generated
 ```
@@ -43,9 +47,9 @@ a legacy path) and `.agents/plugins/marketplace.json` (Codex canonical). Both ge
 
 opencode has no manifest. Its install surface is `package.json` (generated) plus
 `.opencode/plugins/agent-skills.js` (hand-written), a plugin entry that discovers every
-`plugin.toml` directory at load time and registers its `skills/` and `commands/` with
-opencode's config. The same file also works as a project plugin when opencode runs
-inside a checkout of this repository.
+`plugin.toml` directory at load time, registers its `skills/` and `commands/` with
+opencode's config, and merges the hooks from any `hooks/opencode.js`. The same file also
+works as a project plugin when opencode runs inside a checkout of this repository.
 
 ## Code quality
 

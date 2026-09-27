@@ -21,6 +21,10 @@ HARNESS = Path(__file__).resolve().parent / "opencode_entry_harness.mjs"
 PLUGIN_DIRS = sorted(p.parent for p in REPO.glob("*/plugin.toml"))
 SKILL_DIRS = sorted(d / "skills" for d in PLUGIN_DIRS if (d / "skills").is_dir())
 COMMAND_FILES = sorted(f for d in PLUGIN_DIRS for f in (d / "commands").glob("*.md"))
+# Commands a plugin registers from its hooks/opencode.js rather than a commands/
+# file. jev-router does this because a commands/jev.md would clash with its `jev`
+# skill in Claude Code, where commands and skills share one namespace.
+HOOK_MODULE_COMMANDS = {"jev"}
 
 
 @pytest.fixture(scope="module")
@@ -54,7 +58,7 @@ def test_every_registered_skill_path_contains_a_skill(entry_output: dict) -> Non
 
 def test_registers_exactly_the_plugin_commands(entry_output: dict) -> None:
     commands = entry_output["config"]["command"]
-    assert sorted(commands) == sorted(f.stem for f in COMMAND_FILES)
+    assert sorted(commands) == sorted({f.stem for f in COMMAND_FILES} | HOOK_MODULE_COMMANDS)
 
 
 def test_command_templates_are_usable(entry_output: dict) -> None:

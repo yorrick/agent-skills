@@ -7,6 +7,5 @@
   },
   "repository": "https://github.com/yorrick/agent-skills",
   "license": "MIT",
-  "skills": "./skills/",
-  "hooks": "./hooks/"
+  "skills": "./skills/"
 }

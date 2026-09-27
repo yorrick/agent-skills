@@ -1,0 +1,19 @@
+{
+  "name": "jev-router",
+  "description": "Asks Jev (via OpenRouter) how big each message is and sends small jobs to a smaller, cheaper model. Off until you turn it on with /jev on.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Yorrick Jansen"
+  },
+  "repository": "https://github.com/yorrick/agent-skills",
+  "license": "MIT",
+  "keywords": [
+    "routing",
+    "models",
+    "cost",
+    "openrouter",
+    "jev"
+  ],
+  "skills": "./skills/",
+  "hooks": "./hooks/codex.json"
+}

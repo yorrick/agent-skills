@@ -13,16 +13,22 @@
  * The same file also works as a project plugin when opencode is run from a
  * checkout of this repository, because the package root is derived from this
  * file's own location.
+ *
+ * A plugin that needs opencode hooks ships them as code in hooks/opencode.js,
+ * next to hooks/hooks.json (Claude Code) and hooks/codex.json (Codex). Its
+ * default export takes the plugin input and returns hooks; this entry merges
+ * them, running each hook in plugin order after its own config work.
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(dirname, '..', '..');
 const PLUGIN_MARKER = 'plugin.toml';
 const PLUGIN_ROOT = '${CLAUDE_PLUGIN_ROOT}';
+const HOOK_MODULE = path.join('hooks', 'opencode.js');
 
 function pluginDirectories() {
   return fs
@@ -48,7 +54,30 @@ function parseCommandFile(source) {
   return { body: source.slice(match[0].length), description };
 }
 
-export const AgentSkillsPlugin = async () => {
+async function loadPluginHooks(directories, input) {
+  const hookSets = [];
+  for (const dir of directories) {
+    const file = path.join(dir, HOOK_MODULE);
+    if (!fs.existsSync(file)) continue;
+    const module = await import(pathToFileURL(file).href);
+    hookSets.push(await module.default(input));
+  }
+  return hookSets;
+}
+
+/** One hook per name: each plugin's version runs in turn on the same arguments. */
+function mergeHooks(hookSets) {
+  const merged = {};
+  for (const name of new Set(hookSets.flatMap((hooks) => Object.keys(hooks)))) {
+    const handlers = hookSets.map((hooks) => hooks[name]).filter(Boolean);
+    merged[name] = async (...args) => {
+      for (const handler of handlers) await handler(...args);
+    };
+  }
+  return merged;
+}
+
+export const AgentSkillsPlugin = async (input) => {
   let directories;
 
   const allDirectories = () => (directories ??= pluginDirectories());
@@ -80,10 +109,14 @@ export const AgentSkillsPlugin = async () => {
     }
   };
 
+  const { config: pluginConfig, ...pluginHooks } = mergeHooks(await loadPluginHooks(allDirectories(), input));
+
   return {
+    ...pluginHooks,
     config: async (config) => {
       registerSkills(config);
       registerCommands(config);
+      await pluginConfig?.(config);
     },
   };
 };

@@ -1,0 +1,27 @@
+{
+  "jobs": {
+    "tiny": "a lookup, a rename, a one-line answer",
+    "everyday": "a normal email, post or short document",
+    "large": "a multi-step build, research, a full report",
+    "hardest": "strategy, or anything where a wrong call is expensive"
+  },
+  "harnesses": {
+    "claude": [
+      {"size": "tiny", "model": "Claude Haiku 4.5", "model_id": "claude-haiku-4-5-20251001", "helper": "jev-router:tiny"},
+      {"size": "everyday", "model": "Claude Sonnet 5", "model_id": "claude-sonnet-5", "helper": "jev-router:everyday"},
+      {"size": "large", "model": "Claude Opus 5.5", "model_id": "claude-opus-5-5", "helper": "jev-router:large"},
+      {"size": "hardest", "model": "Claude Fable 5.1", "model_id": "claude-fable-5-1", "helper": "jev-router:hardest"}
+    ],
+    "codex": [
+      {"size": "everyday", "also": ["tiny"], "model": "GPT-6 Luna", "model_id": "gpt-6-luna", "helper": "spawn_agent(model=gpt-6-luna)"},
+      {"size": "large", "model": "GPT-6 Sol", "model_id": "gpt-6-sol", "helper": "spawn_agent(model=gpt-6-sol)"},
+      {"size": "hardest", "model": "GPT-6 Astra", "model_id": "gpt-6-astra", "helper": "spawn_agent(model=gpt-6-astra)"}
+    ],
+    "opencode": [
+      {"size": "tiny", "model": "Claude Haiku 4.5", "model_id": "openrouter/anthropic/claude-haiku-4.5", "helper": "jev-tiny"},
+      {"size": "everyday", "model": "Claude Sonnet 5", "model_id": "openrouter/anthropic/claude-sonnet-5", "helper": "jev-everyday"},
+      {"size": "large", "model": "Claude Opus 5.5", "model_id": "openrouter/anthropic/claude-opus-5.5", "helper": "jev-large"},
+      {"size": "hardest", "model": "Claude Fable 5.1", "model_id": "openrouter/anthropic/claude-fable-5.1", "helper": "jev-hardest"}
+    ]
+  }
+}

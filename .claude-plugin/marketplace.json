@@ -35,6 +35,15 @@
       }
     },
     {
+      "name": "jev-router",
+      "source": "./jev-router",
+      "description": "Asks Jev (via OpenRouter) how big each message is and sends small jobs to a smaller, cheaper model. Off until you turn it on with /jev on.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Yorrick Jansen"
+      }
+    },
+    {
       "name": "pr-review",
       "source": "./pr-review",
       "description": "Multi-provider interactive PR code review. Runs Claude Code, Gemini CLI, and Codex CLI in parallel, merges findings, then lets you vet each issue before posting to GitHub.",

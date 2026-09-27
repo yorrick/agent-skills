@@ -805,3 +805,30 @@ So a plugin cannot tell "typed in this TUI" from "sent via `opencode run --attac
 <status>completed</status>
 <summary>Background command "Run Codex GPT-6 Astra max review round three" completed (exit code 0)</summary>
 </task-notification>
+
+---
+
+<task-notification>
+<task-id>a8cf97192740db515</task-id>
+<tool-use-id>toolu_01GRbxsCWhLGqxGo9dYd3ySc</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-yorrickjansen-work-agent-skills--claude-worktrees-jev-model-routing/43bce55b-7aa7-4002-97d7-3963c1eebb96/tasks/a8cf97192740db515.output</output-file>
+<status>completed</status>
+<summary>Agent "Probe opencode client provider availability" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>The single reliable call inside `chat.message` is `await ctx.client.config.providers()`. Its `data.providers` array only contains providers that are actually connected (credentials present) and each entry's `.models` is an object keyed by model ID with the full catalog — so:
+
+```js
+const { data } = await ctx.client.config.providers()
+const entry = data.providers.find(p =&gt; p.id === "openrouter")
+const usable = !!entry &amp;&amp; Object.prototype.hasOwnProperty.call(entry.models ?? {}, "z-ai/glm-5.3-flash")
+```
+
+`entry` absent means the provider has no credentials in the running instance; present-but-missing-model means the model isn't in that provider's catalog. Latency ~8-19ms, no deadlock/error observed even from inside `chat.message`.
+
+Verified empirically two ways:
+- Real environment: `entry` found, 384 models, `z-ai/glm-5.3-flash` present.
+- Negative control: ran `XDG_DATA_HOME=&lt;empty dir&gt;` (no `auth.json`, so no stored OpenRouter credentials) — `config.providers().data.providers` no longer contained an `openrouter` entry at all (found: false). `provider.list()`'s `data.connected` (plain string array) also dropped "openrouter" in that run, confirming the distinction; `provider.list()`'s `data.all` still listed "openrouter" (with its full model catalog) regardless of connection, since `all` is the static known-provider list, not a usable check — so `all` alone is unsuitable and `config.providers()` is the reliable single call. `provider.list()` took ~300-320ms vs `config.providers()`'s ~8-19ms. No call errored or hung from inside the hook.
+
+No repo files were modified; only the throwaway scratch project and `XDG_DATA_HOME` env var were used, and the empty XDG dir was deleted afterward.</result>
+<usage><subagent_tokens>92078</subagent_tokens><tool_uses>24</tool_uses><duration_ms>216424</duration_ms></usage>
+</task-notification>

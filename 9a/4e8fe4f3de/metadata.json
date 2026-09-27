@@ -1,0 +1,33 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "9a4e8fe4f3de",
+  "strategy": "manual-commit",
+  "branch": "worktree-jev-model-routing",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "README.md",
+    "docs/superpowers/specs/2026-09-27-jev-router-design.md",
+    "jev-router/README.md",
+    "jev-router/hooks/opencode.js",
+    "jev-router/skills/jev/SKILL.md",
+    "jev-router/skills/jev/scripts/jev_router.py",
+    "jev-router/skills/jev/scripts/tiers.json",
+    "tests/jev_router_opencode_harness.mjs",
+    "tests/test_jev_router.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/9a/4e8fe4f3de/0/metadata.json",
+      "transcript": "/9a/4e8fe4f3de/0/full.jsonl",
+      "content_hash": "/9a/4e8fe4f3de/0/content_hash.txt",
+      "prompt": "/9a/4e8fe4f3de/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 374,
+    "cache_creation_tokens": 705874,
+    "cache_read_tokens": 47102701,
+    "output_tokens": 247274,
+    "api_call_count": 172
+  }
+}

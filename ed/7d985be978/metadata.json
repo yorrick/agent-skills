@@ -1,0 +1,36 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "ed7d985be978",
+  "strategy": "manual-commit",
+  "branch": "worktree-jev-model-routing",
+  "checkpoints_count": 0,
+  "files_touched": [
+    ".opencode/plugins/agent-skills.js",
+    "jev-router/hooks/codex.json",
+    "jev-router/hooks/hooks.json",
+    "jev-router/hooks/opencode.js",
+    "jev-router/plugin.toml",
+    "jev-router/skills/jev/SKILL.md",
+    "jev-router/skills/jev/scripts/jev_router.py",
+    "jev-router/skills/jev/scripts/tiers.json",
+    "scripts/sync_manifests.py",
+    "tests/jev_router_opencode_harness.mjs",
+    "tests/test_jev_router.py",
+    "tests/test_opencode_entry.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/ed/7d985be978/0/metadata.json",
+      "transcript": "/ed/7d985be978/0/full.jsonl",
+      "content_hash": "/ed/7d985be978/0/content_hash.txt",
+      "prompt": "/ed/7d985be978/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 104,
+    "cache_creation_tokens": 201339,
+    "cache_read_tokens": 7576957,
+    "output_tokens": 113094,
+    "api_call_count": 51
+  }
+}

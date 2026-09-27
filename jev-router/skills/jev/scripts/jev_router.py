@@ -292,11 +292,15 @@ def handoff(harness: str, tier: Tier, verdict: Verdict) -> str:
     sized = f"Jev router: Jev's size for this message is {tier.size} ({verdict.confidence:g}% sure)."
     sign_off = f"Done by {tier.label}"
     # Reason: neither hook can see the session's thinking level, but the model can
-    # (verified for Claude, including after a mid-session /effort). A model that is
-    # not certain hands off, so a job never runs at the wrong level.
+    # (verified for Claude, including after a mid-session /effort). An earlier
+    # "only if you are certain" made a matching Opus-high session hand a large job
+    # to an Opus-high helper anyway, so the model is told to check first. A model
+    # that cannot tell hands off, so a job never runs at the wrong level.
     keep = (
-        f"Handle it yourself instead only if you are certain you are already running on {tier.label}, "
-        "or if the message only makes sense with this conversation's history."
+        "First check your own model and thinking level, which your instructions state. If you are "
+        f"running on exactly {tier.label}, handle it yourself instead, because handing off would change "
+        "nothing; if you cannot tell, hand it off. Also handle it yourself if the message only makes "
+        "sense with this conversation's history."
     )
     if harness == "claude":
         return (
@@ -345,6 +349,7 @@ def hook_output(harness: str, tier: Tier | None, verdict: Verdict) -> str:
 
 
 INTERACTIVE_CODEX_SOURCES = {"cli", "vscode"}
+SYSTEM_TURN_PREFIXES = ("<task-notification>",)
 
 
 def interactive(harness: str, payload: dict) -> bool:
@@ -383,8 +388,10 @@ def route(harness: str, stdin: str) -> str:
         return ""
     prompt = str(payload.get("prompt") or "").strip()
     # Reason: slash commands and skill invocations (including `/jev off`) are
-    # instructions to the harness, not jobs to size.
-    if not prompt or prompt[0] in "/$":
+    # instructions to the harness, not jobs to size. So is a background task's
+    # completion notice, which Claude Code delivers through this same hook
+    # (verified: a subagent's own prompt never fires it, but its notice does).
+    if not prompt or prompt[0] in "/$" or prompt.startswith(SYSTEM_TURN_PREFIXES):
         return ""
     tiers = TIERS[harness]
     event: dict = {"harness": harness}

@@ -209,9 +209,10 @@ def test_follow_up_replies_stay_in_the_session_without_a_sign_off(home: Path, je
     assert log(home)[-1]["outcome"] == "follow_up"
 
 
-def test_commands_and_skill_calls_are_not_sent_to_jev(home: Path, jev: FakeJev) -> None:
+def test_commands_skill_calls_and_task_notices_are_not_sent_to_jev(home: Path, jev: FakeJev) -> None:
     switch_on(home, jev)
-    for prompt in ("/jev off", "$jev status", "   "):
+    notice = "<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n</task-notification>"
+    for prompt in ("/jev off", "$jev status", "   ", notice):
         assert hook(home, jev, prompt=prompt) == ""
     assert jev.requests == []
 
@@ -234,7 +235,7 @@ def test_codex_spawns_with_the_model_and_thinking_level(home: Path, jev: FakeJev
     # A full-history fork inherits the parent's model, so the override needs fork_turns "none".
     assert 'spawn_agent with fork_turns "none", model "gpt-6-luna", reasoning_effort "max"' in context
     assert "Done by GPT-6 Luna at max thinking" in context
-    assert "only if you are certain you are already running on GPT-6 Luna at max thinking" in context
+    assert "If you are running on exactly GPT-6 Luna at max thinking, handle it yourself" in context
 
 
 def test_claude_hands_off_unless_the_session_is_certain_it_matches(home: Path, jev: FakeJev) -> None:
@@ -242,7 +243,8 @@ def test_claude_hands_off_unless_the_session_is_certain_it_matches(home: Path, j
     jev.answer = {"size": "large", "confidence": 90, "follow_up": False}
     context = json.loads(hook(home, jev))["hookSpecificOutput"]["additionalContext"]
     assert "`jev-router:large` subagent, which runs on Claude Opus 5.5 at high thinking" in context
-    assert "only if you are certain you are already running on Claude Opus 5.5 at high thinking" in context
+    assert "If you are running on exactly Claude Opus 5.5 at high thinking, handle it yourself" in context
+    assert "if you cannot tell, hand it off" in context
 
 
 def test_opencode_gets_a_switch_it_can_apply(home: Path, jev: FakeJev) -> None:

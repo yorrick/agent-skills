@@ -1,0 +1,27 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "f981c4328e92",
+  "strategy": "manual-commit",
+  "branch": "worktree-jev-model-routing",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "jev-router/hooks/opencode.js",
+    "jev-router/skills/jev/scripts/jev_router.py",
+    "tests/test_jev_router.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/f9/81c4328e92/0/metadata.json",
+      "transcript": "/f9/81c4328e92/0/full.jsonl",
+      "content_hash": "/f9/81c4328e92/0/content_hash.txt",
+      "prompt": "/f9/81c4328e92/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 136,
+    "cache_creation_tokens": 233982,
+    "cache_read_tokens": 10966692,
+    "output_tokens": 135310,
+    "api_call_count": 65
+  }
+}

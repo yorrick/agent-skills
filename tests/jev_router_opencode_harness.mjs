@@ -25,9 +25,13 @@ const providers = JSON.parse(
   process.env.JEV_TEST_PROVIDERS ?? '[{"id":"openrouter","models":{"z-ai/glm-5.3-flash":{}}}]',
 );
 const connected = JSON.parse(process.env.JEV_TEST_CONNECTED ?? '["openrouter"]');
+// A stalled opencode server: provider.list() answers only after this many ms.
+const stall = Number(process.env.JEV_TEST_PROVIDER_STALL_MS ?? 0);
 const client = {
   config: { providers: async () => ({ data: { providers } }) },
-  provider: { list: async () => ({ data: { connected } }) },
+  provider: {
+    list: () => new Promise((resolve) => setTimeout(() => resolve({ data: { connected } }), stall)),
+  },
 };
 const hooks = await module.AgentSkillsPlugin({ client, directory: repoRoot });
 
@@ -52,4 +56,8 @@ const output = {
 const input = mode === 'tui' ? { sessionID: ids.session, agent } : { sessionID: ids.session };
 await hooks['chat.message'](input, output);
 
-process.stdout.write(JSON.stringify({ agent: config.agent, command: config.command, output }));
+// Reason: exit as soon as the hook returns; a stalled provider.list() left pending
+// must not keep the process alive past what the test measures.
+process.stdout.write(JSON.stringify({ agent: config.agent, command: config.command, output }), () =>
+  process.exit(0),
+);

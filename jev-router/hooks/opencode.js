@@ -22,8 +22,9 @@ import { fileURLToPath } from 'node:url';
 const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const scripts = path.join(pluginRoot, 'skills', 'jev', 'scripts');
 const ROUTER = ['uv', 'run', '--quiet', '--script', path.join(scripts, 'jev_router.py'), 'hook', 'opencode'];
-// Reason: the script abandons Jev at 6 s; this caps the whole run, uv startup and
-// logging included, at the same 8 s the other harnesses' hook configs allow.
+// Reason: the script abandons Jev at 6 s; this caps the whole decision (uv
+// startup, logging and opencode's own client calls included) at the same 8 s the
+// other harnesses' hook configs allow.
 const HARD_LIMIT_MS = 8_000;
 // Reason: only the default coding agent's messages are routed. Moving a plan-mode
 // message onto a helper would lift plan mode's read-only limits.
@@ -119,6 +120,36 @@ async function connectedProviders(client) {
   return new Set(data?.connected ?? []);
 }
 
+/**
+ * What to do with one message, worked out without touching it: the router's
+ * decision if opencode can apply it, or null.
+ *
+ * The router's own OpenRouter key is separate from opencode's logins, so Jev can
+ * answer while opencode cannot run the tier's model, and switching then would
+ * break a working session. With no usable tier the message is not even sent to
+ * Jev.
+ */
+async function decide(client, tiers, prompt) {
+  const usable = await usableModels(client);
+  if (!tiers.some((tier) => usable.has(tier.model_id))) return null;
+  const [decision, connected] = await Promise.all([
+    askRouter(prompt),
+    connectedProviders(client).catch(() => new Set()),
+  ]);
+  if (!decision?.model_id) return decision;
+  const provider = decision.model_id.split('/')[0];
+  return usable.has(decision.model_id) && connected.has(provider) ? decision : null;
+}
+
+/** The promise's value, or null once `ms` have passed or if it fails. */
+function within(ms, promise) {
+  let timer;
+  const expired = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(null), ms);
+  });
+  return Promise.race([promise.catch(() => null), expired]).finally(() => clearTimeout(timer));
+}
+
 export default async function jevRouter({ client } = {}) {
   let tiers;
   try {
@@ -161,23 +192,13 @@ export default async function jevRouter({ client } = {}) {
           .filter((part) => part.type === 'text' && !part.synthetic)
           .map((part) => part.text)
           .join('\n');
-        // Reason: the router's own OpenRouter key is separate from opencode's
-        // logins, so Jev can answer while opencode cannot run the tier's model;
-        // switching then would break a working session. With no usable tier the
-        // message is not even sent to Jev.
-        const usable = await usableModels(client);
-        if (!tiers.some((tier) => usable.has(tier.model_id))) return;
-        const [decision, connected] = await Promise.all([
-          askRouter(prompt),
-          connectedProviders(client).catch(() => new Set()),
-        ]);
+        // Reason: one deadline covers the whole decision, opencode's own client
+        // calls included, and the message is only changed after it is known, so a
+        // late answer can never switch a message that has already gone ahead.
+        const decision = await within(HARD_LIMIT_MS, decide(client, tiers, prompt));
         const id = decision && nextPartId(output.parts);
         if (!id) return;
         // A decision without a model keeps the message where it is, with a note.
-        if (decision.model_id) {
-          const provider = decision.model_id.split('/')[0];
-          if (!usable.has(decision.model_id) || !connected.has(provider)) return;
-        }
         if (decision.model_id) {
           const slash = decision.model_id.indexOf('/');
           output.message.agent = decision.agent;

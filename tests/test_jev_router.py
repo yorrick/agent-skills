@@ -438,6 +438,7 @@ def opencode(
     user_config: dict | None = None,
     providers: list[dict] | None = None,
     connected: list[str] | None = None,
+    provider_stall_ms: int = 0,
 ) -> dict:
     node = shutil.which("node")
     assert node, "node is required to exercise the opencode hook"
@@ -452,6 +453,7 @@ def opencode(
         env["JEV_TEST_PROVIDERS"] = json.dumps(providers)
     if connected is not None:
         env["JEV_TEST_CONNECTED"] = json.dumps(connected)
+    env["JEV_TEST_PROVIDER_STALL_MS"] = str(provider_stall_ms)
     result = subprocess.run(
         [node, str(OPENCODE_HARNESS), agent, prompt, mode],
         cwd=REPO,
@@ -472,6 +474,17 @@ def test_opencode_registers_a_helper_agent_per_size_and_the_jev_command(home: Pa
         assert helper["model"] == tier["model_id"]
         assert (helper["mode"], helper["hidden"]) == ("subagent", True)
     assert "$ARGUMENTS" in config["command"]["jev"]["template"]
+
+
+def test_a_stalled_opencode_server_cannot_hold_the_message(home: Path, jev: FakeJev) -> None:
+    """One 8 s deadline covers opencode's own client calls too, and a late answer
+    changes nothing: the message goes ahead unrouted."""
+    switch_on(home, jev)
+    started = time.monotonic()
+    message = opencode(home, jev, provider_stall_ms=60_000)["output"]
+    assert time.monotonic() - started < 11
+    assert message["message"]["model"]["modelID"] == "deepseek/deepseek-v4.1-flash"
+    assert len(message["parts"]) == 1
 
 
 def test_opencode_never_switches_to_a_provider_declared_but_not_logged_in(home: Path, jev: FakeJev) -> None:

@@ -43,6 +43,7 @@ class FakeJev:
         self.answer: dict | str = {"size": "tiny", "confidence": 97, "follow_up": False}
         self.status = 200
         self.delay = 0.0
+        self.usage: dict = {"cost": 0.00002}
         self.requests: list[dict] = []
         fake = self
 
@@ -55,7 +56,7 @@ class FakeJev:
                     {
                         "model": "openai/gpt-6-luna",
                         "choices": [{"message": {"content": content}}],
-                        "usage": {"cost": 0.00002},
+                        "usage": fake.usage,
                     }
                 ).encode()
                 self.send_response(fake.status)
@@ -271,6 +272,20 @@ def test_the_log_never_keeps_what_jev_said(home: Path, jev: FakeJev) -> None:
     jev.answer = "You asked me to rename SECRET-PROJECT-X, which is a tiny job."
     hook(home, jev, prompt="rename SECRET-PROJECT-X")
     assert "SECRET" not in (home / "log.jsonl").read_text()
+
+
+def test_only_a_model_slug_is_logged_as_the_answering_model() -> None:
+    assert jev_router.answered_by({"model": "openai/gpt-6-luna"}) == "openai/gpt-6-luna"
+    assert jev_router.answered_by({"model": "~anthropic/claude-fable-latest"}) == "~anthropic/claude-fable-latest"
+    assert jev_router.answered_by({"model": "please rename SECRET-PROJECT-X to Y"}) is None
+
+
+def test_status_counts_an_answered_call_that_reported_no_cost(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev)
+    jev.usage = {}
+    assert "jev-router:tiny" in hook(home, jev)
+    text = run(home, jev, "status").stdout
+    assert "$0.0000 over 1 answered calls, 1 of which reported no cost." in text
 
 
 def test_confidence_just_under_sixty_is_not_rounded_up(home: Path, jev: FakeJev) -> None:

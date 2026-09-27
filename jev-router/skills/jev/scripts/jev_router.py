@@ -208,10 +208,14 @@ def cost_of(body: object) -> float | None:
     return cost if isinstance(cost, int | float) and not isinstance(cost, bool) else None
 
 
+MODEL_SLUG = re.compile(r"[\w.~-]{1,60}/[\w.:~-]{1,80}")
+
+
 def answered_by(body: object) -> str | None:
-    """The model OpenRouter says answered Jev's sizing question."""
+    """The model OpenRouter says answered Jev's sizing question, if it looks like a
+    model slug. Anything else could be echoed message text, which the log never keeps."""
     model = body.get("model") if isinstance(body, dict) else None
-    return model if isinstance(model, str) else None
+    return model if isinstance(model, str) and MODEL_SLUG.fullmatch(model) else None
 
 
 def timeout_of(config: dict) -> float:
@@ -366,7 +370,7 @@ def route(harness: str, stdin: str) -> str:
         event.update(outcome="error", error=error_label(exc))
     event["latency_ms"] = round((time.monotonic() - started) * 1000)
     if body is not None:
-        event.update(cost=cost_of(body), answered_by=answered_by(body))
+        event.update(answered=True, cost=cost_of(body), answered_by=answered_by(body))
     if verdict is not None:
         tier = decide(verdict, tiers)
         event.update(outcome=outcome_of(verdict, tier), size=verdict.size, confidence=verdict.confidence)
@@ -433,12 +437,15 @@ def status_text(config: dict, events: list[dict]) -> str:
         f"Kept in the session: {count['follow_up']} follow-up replies, {count['unsure']} under "
         f"{MIN_CONFIDENCE}% sure. Carried on without Jev: {count['timeout']} timed out, {count['error']} errors."
     )
-    answered = [e for e in events if isinstance(e.get("cost"), int | float)]
+    answered = [e for e in events if e.get("answered")]
+    priced = [e["cost"] for e in answered if isinstance(e.get("cost"), int | float)]
     manual = sum(e.get("harness") == "classify" for e in answered)
+    unpriced = len(answered) - len(priced)
     abandoned = sum(e.get("outcome") == "timeout" for e in events)
     lines.append(
-        f"\nJev has cost ${sum(e['cost'] for e in answered):.4f} over {len(answered)} answered calls"
+        f"\nJev has cost ${sum(priced):.4f} over {len(answered)} answered calls"
         + (f" ({manual} of them from classify)" if manual else "")
+        + (f", {unpriced} of which reported no cost" if unpriced else "")
         + (f", plus {abandoned} timed-out calls whose cost was never reported" if abandoned else "")
         + "."
     )
@@ -472,14 +479,14 @@ def cmd_classify(harness: str, messages: list[str]) -> int:
             took = time.monotonic() - started
             event.update(outcome="timeout" if isinstance(exc, TimeoutError) else "error")
             if body is not None:
-                event["cost"] = cost_of(body)
+                event.update(answered=True, cost=cost_of(body))
             record(event)
             print(f"| {n} | {message} | {error_label(exc)} | | | carries on without Jev | {took:.1f}s | |")
             continue
         took = time.monotonic() - started
         tier = decide(verdict, tiers)
         cost = cost_of(body)
-        event.update(size=verdict.size, confidence=verdict.confidence, cost=cost)
+        event.update(answered=True, size=verdict.size, confidence=verdict.confidence, cost=cost)
         record(event)
         does = f"hands to {tier.model}" if tier else "keeps it in the session"
         print(

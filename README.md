@@ -193,6 +193,30 @@ claude plugin install visual-design-review@yorrick
 codex plugin add visual-design-review@yorrick
 ```
 
+### jev-router
+
+Sends small jobs to a smaller, cheaper model. While it is on, every message goes to
+[Jev](https://openrouter.ai/typesafe/jev-router) on OpenRouter with one question: what
+is the smallest model that can do this job well? When Jev is at least 60% sure, the job
+goes to a helper on that size's model, which signs off with `Done by <model>`. It never
+blocks a message: if Jev is slow (over 6 s) or anything fails, the message goes through
+as if the router were not there.
+
+Claude Code and Codex cannot switch the main model per message, so there the main model
+hands the job to a helper subagent and relays its result. opencode can, so there the
+message itself moves onto the helper's model. See
+[`jev-router/README.md`](jev-router/README.md).
+
+It is off until you turn it on with `/jev on` (`$jev on` in Codex), and `/jev status`
+shows how many messages went to each size and what Jev has cost. While it is on, your
+messages go to OpenRouter, TypeSafe and the model Jev asks, so keep it off for private
+work.
+
+```fish
+claude plugin install jev-router@yorrick
+codex plugin add jev-router@yorrick
+```
+
 ### supabase-security
 
 Access-control rules for Supabase projects exposed directly to a browser via PostgREST:

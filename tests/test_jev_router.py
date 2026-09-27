@@ -166,7 +166,8 @@ def test_sixty_percent_is_sure_enough_and_below_is_kept(home: Path, jev: FakeJev
     assert "jev-router:large" in hook(home, jev)
     jev.answer = {"size": "large", "confidence": 59, "follow_up": False}
     context = json.loads(hook(home, jev))["hookSpecificOutput"]["additionalContext"]
-    assert "handle this message yourself" in context and "59% sure" in context
+    assert "not routing this message" in context and "59% sure" in context
+    assert "Carry on with it as you normally would" in context
     assert "jev-router:" not in context
     assert [e["outcome"] for e in log(home)] == ["routed", "unsure"]
 
@@ -248,6 +249,21 @@ def test_unusable_answers_are_ignored_but_still_cost_money(home: Path, jev: Fake
     assert hook(home, jev) == ""
     event = log(home)[-1]
     assert event["outcome"] == "error" and event["cost"] == 0.00002
+
+
+@pytest.mark.parametrize("body", [{"usage": [{"cost": 0.02}], "model": ["x"]}, {"usage": "free"}, [], "text"])
+def test_odd_response_shapes_never_break_the_hook(body: object) -> None:
+    assert jev_router.cost_of(body) is None
+    assert jev_router.answered_by(body) is None
+    tiers = jev_router.TIERS["claude"]
+    with pytest.raises(jev_router.BadAnswer):
+        jev_router.parse_verdict(body, tiers)
+
+
+def test_the_timeout_can_be_lowered_but_not_raised_past_the_outer_cap() -> None:
+    assert jev_router.timeout_of({}) == 6
+    assert jev_router.timeout_of({"timeout_seconds": 0.5}) == 0.5
+    assert jev_router.timeout_of({"timeout_seconds": 30}) == 6
 
 
 def test_the_log_never_keeps_what_jev_said(home: Path, jev: FakeJev) -> None:

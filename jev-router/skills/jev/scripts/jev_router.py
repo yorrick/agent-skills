@@ -201,10 +201,24 @@ def parse_verdict(body: dict, tiers: tuple[Tier, ...]) -> Verdict:
     return Verdict(size=size, confidence=confidence, follow_up=follow_up)
 
 
-def cost_of(body: dict) -> float | None:
+def cost_of(body: object) -> float | None:
     """What OpenRouter billed for the call, kept even when the answer is unusable."""
-    cost = (body.get("usage") or {}).get("cost")
+    usage = body.get("usage") if isinstance(body, dict) else None
+    cost = usage.get("cost") if isinstance(usage, dict) else None
     return cost if isinstance(cost, int | float) and not isinstance(cost, bool) else None
+
+
+def answered_by(body: object) -> str | None:
+    """The model OpenRouter says answered Jev's sizing question."""
+    model = body.get("model") if isinstance(body, dict) else None
+    return model if isinstance(model, str) else None
+
+
+def timeout_of(config: dict) -> float:
+    """The Jev deadline. It can only be lowered: each harness stops the whole hook
+    at 8 s, and startup plus logging need the rest, so a longer wait would be cut
+    off before the timeout is even recorded."""
+    return min(float(config.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)), DEFAULT_TIMEOUT_SECONDS)
 
 
 def error_label(exc: Exception) -> str:
@@ -310,7 +324,12 @@ def keep_note(verdict: Verdict) -> str:
         if verdict.follow_up
         else f"Jev is only {verdict.confidence:g}% sure of its size"
     )
-    return f"Jev router: handle this message yourself ({why}). No helper does this work, so add no 'Done by' line."
+    # Reason: the note is about Jev's hand-off and the sign-off only; it must not
+    # override what the user asked for (e.g. "yes, ask an agent to review it").
+    return (
+        f"Jev router: not routing this message ({why}). Carry on with it as you normally would. "
+        "No Jev helper does this work, so add no 'Done by' line."
+    )
 
 
 def hook_output(harness: str, tier: Tier | None, verdict: Verdict) -> str:
@@ -339,7 +358,7 @@ def route(harness: str, stdin: str) -> str:
         key = read_key(config.get("key_file"))
         if not key:
             raise NoKey("no OpenRouter API key in the key file")
-        body = ask_jev(prompt, tiers, key, float(config.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)))
+        body = ask_jev(prompt, tiers, key, timeout_of(config))
         verdict = parse_verdict(body, tiers)
     except TimeoutError:
         event["outcome"] = "timeout"
@@ -347,7 +366,7 @@ def route(harness: str, stdin: str) -> str:
         event.update(outcome="error", error=error_label(exc))
     event["latency_ms"] = round((time.monotonic() - started) * 1000)
     if body is not None:
-        event.update(cost=cost_of(body), answered_by=body.get("model"))
+        event.update(cost=cost_of(body), answered_by=answered_by(body))
     if verdict is not None:
         tier = decide(verdict, tiers)
         event.update(outcome=outcome_of(verdict, tier), size=verdict.size, confidence=verdict.confidence)
@@ -439,7 +458,7 @@ def cmd_classify(harness: str, messages: list[str]) -> int:
         print("No OpenRouter key: run `on --key-file <path>` once, then `off` if you want it off.", file=sys.stderr)
         return 1
     tiers = TIERS[harness]
-    timeout = float(config.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS))
+    timeout = timeout_of(config)
     print("| # | message | Jev picked | sure | follow-up | router does | Jev took | cost |")
     print("|---|---|---|---|---|---|---|---|")
     for n, message in enumerate(messages, 1):

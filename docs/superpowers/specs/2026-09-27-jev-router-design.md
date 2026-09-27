@@ -61,8 +61,9 @@ delegating would add a hop and save nothing.
 - **Deadline.** Across 26 measured calls, Jev answered in 0.8 to 8.4 s, with a
   median of about 3.5 s. It routes its own sizing question to whichever model it
   picks. The cap is 6 s of wall-clock time, enforced with a thread because
-  `urlopen`'s timeout only bounds each socket read. It can be changed with
-  `timeout_seconds` in `config.json`. A timed-out call may still be billed; its
+  `urlopen`'s timeout only bounds each socket read. `timeout_seconds` in
+  `config.json` can only lower it, because the harnesses stop the whole hook at
+  8 s and startup plus logging need the rest. A timed-out call may still be billed; its
   cost is never reported back, and `status` says so.
 - **Never in the way.** Off, a timeout, an HTTP error, unparseable JSON, an
   unknown size, a missing key, or bad stdin all print nothing and exit 0. The

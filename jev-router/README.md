@@ -35,7 +35,9 @@ thinking level.
   helper is still that harness's work. A test fails if a tier names another harness's model.
 - **Touch headless runs.** Only sessions where you are typing are routed. `claude -p`,
   `codex exec` and `opencode run` are reviews and automation that pin their own model and
-  thinking level, so the router neither changes them nor sends their text to Jev.
+  thinking level, so the router neither changes them nor sends their text to Jev. When
+  it cannot tell, it treats the session as headless: a Codex session you start with
+  approvals bypassed looks like `codex exec`, so it is not routed.
 - **Block a message.** If Jev is slow (over 6 seconds) or anything fails, the message goes
   through as if the router were not there.
 

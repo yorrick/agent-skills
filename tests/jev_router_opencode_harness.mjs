@@ -3,15 +3,17 @@
 // and prints the resulting config and message as JSON.
 //
 // Usage (cwd = repository root):
-//   node jev_router_opencode_harness.mjs <agent> <prompt> <tui|run>
-// The last argument stands in for how opencode was started: the TUI runs sessions
-// in src/cli/tui/worker.js, while `opencode run` runs src/index.js.
+//   node jev_router_opencode_harness.mjs <agent> <prompt> <tui|run|attached>
+// The last argument stands in for how the message reached opencode:
+//   tui       the TUI: its server runs in src/cli/tui/worker.js and it names the agent
+//   run       `opencode run`: its own server in src/index.js, no agent named
+//   attached  `opencode run --attach` to a TUI's server: the worker, no agent named
 
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const [agent, prompt, mode] = process.argv.slice(2);
-process.argv[1] = mode === 'tui' ? '/opt/opencode/src/cli/tui/worker.js' : '/opt/opencode/src/index.js';
+process.argv[1] = mode === 'run' ? '/opt/opencode/src/index.js' : '/opt/opencode/src/cli/tui/worker.js';
 const repoRoot = process.cwd();
 const entry = path.join(repoRoot, '.opencode', 'plugins', 'agent-skills.js');
 const module = await import(pathToFileURL(entry).href);
@@ -33,6 +35,8 @@ const output = {
     { id: 'prt_0e2fd8341001ZqBA4dLFgwQqAM', messageID: ids.message, sessionID: ids.session, type: 'text', text: prompt },
   ],
 };
-await hooks['chat.message']({ sessionID: ids.session }, output);
+// Verified: the TUI's chat.message input names the agent; `opencode run` omits it.
+const input = mode === 'tui' ? { sessionID: ids.session, agent } : { sessionID: ids.session };
+await hooks['chat.message'](input, output);
 
 process.stdout.write(JSON.stringify({ agent: config.agent, command: config.command, output }));

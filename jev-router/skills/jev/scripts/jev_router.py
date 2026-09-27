@@ -357,8 +357,15 @@ def interactive(harness: str, payload: dict) -> bool:
         # Verified: "1" in the TUI, "0" under `claude -p`, set by Claude Code itself.
         return os.environ.get("CLAUDE_CODE_SESSION_ATTENDED") == "1"
     if harness == "codex":
-        # Verified on real sessions: the transcript's first line records the front
-        # end, "exec" for `codex exec`, "cli" or "vscode" when a person is typing.
+        # Two signals, both required. The transcript's first line records the front
+        # end that started the session ("exec" for `codex exec`, "cli" or "vscode"
+        # when a person types), but `codex exec resume` appends to an interactive
+        # transcript without changing it; `codex exec` always runs with approvals
+        # bypassed, which the hook sees as permission_mode (verified). A person who
+        # also bypasses approvals is treated as headless: routing is lost, never
+        # a review.
+        if payload.get("permission_mode") == "bypassPermissions":
+            return False
         with Path(payload["transcript_path"]).open() as transcript:
             meta = json.loads(transcript.readline())
         return meta["payload"]["source"] in INTERACTIVE_CODEX_SOURCES
@@ -458,7 +465,10 @@ def status_text(config: dict, events: list[dict]) -> str:
             lines.append(f"  {size:<10}{len(picked):>9}{routed:>8}")
         # Reason: in Claude Code and Codex the hook can only advise; the session
         # keeps a routed job when the helper would run on its own model.
-        lines.append("  Routed means the helper was offered the job; the session keeps it if already on that model.")
+        lines.append(
+            "  Routed means the helper was offered the job; the session keeps it only if it is certain it "
+            "already runs that model at that thinking level."
+        )
     count = {k: sum(e.get("outcome") == k for e in messages) for k in ("follow_up", "unsure", "timeout", "error")}
     lines.append(
         f"Kept in the session: {count['follow_up']} follow-up replies, {count['unsure']} under "

@@ -75,8 +75,15 @@ touch those runs, so it routes only when a person is typing, failing closed:
   `claude -p`, set by Claude Code itself.
 - Codex: the transcript's first line records `source`, which is `exec` for
   `codex exec` and `cli` or `vscode` for a person (checked on 35 real sessions).
-- opencode: the TUI runs sessions in `src/cli/tui/worker.js`, while `opencode run`
-  runs `src/index.js`.
+  `codex exec resume` appends to an interactive transcript without changing that
+  line, so the hook also requires `permission_mode` to differ from
+  `bypassPermissions`, which is what every `codex exec` reports. A person who
+  bypasses approvals is therefore not routed; that loses routing, never a review.
+- opencode: the TUI runs its server in `src/cli/tui/worker.js`, while `opencode run`
+  runs `src/index.js`. `opencode run --attach` sends its message to a server a TUI
+  started, so the message must also name its agent: the TUI always does, and
+  `opencode run` only with an explicit `--agent`. A TUI attached to `opencode serve`
+  is not routed, which again fails closed.
 
 Headless text is never sent to Jev either. Every tier names a model of its own
 harness, and a test enforces it, so a helper's work is still that harness's work.
@@ -137,7 +144,8 @@ harness, and a test enforces it, so a helper's work is still that harness's work
   `HTTP 500` or `BadAnswer: unknown size`, never Jev's reply, which could echo
   the message.
 - **"Routed" means offered.** In Claude Code and Codex the hook can only
-  advise, and the session keeps a job whose helper runs on its own model.
+  advise, and the session keeps a job only when it is certain it already runs
+  the helper's model at the helper's thinking level.
   `status` says so rather than claiming the helper did the work.
 - **Privacy.** While the router is on, message text reaches OpenRouter, TypeSafe,
   and whichever model Jev picks to answer the sizing question. Probes saw that

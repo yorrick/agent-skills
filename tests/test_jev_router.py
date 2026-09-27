@@ -118,6 +118,7 @@ def hook(
     prompt: str = "rename foo to bar",
     attended: str | None = "1",
     source: str | None = "cli",
+    permission_mode: str = "default",
 ) -> str:
     """One message through the hook. `source` is what the Codex transcript's first
     line records: "cli" or "vscode" when a person types, "exec" under `codex exec`;
@@ -125,7 +126,12 @@ def hook(
     transcript = home.parent / "codex-transcript.jsonl"
     if source is not None:
         transcript.write_text(json.dumps({"type": "session_meta", "payload": {"source": source}}) + "\n")
-    payload = {"prompt": prompt, "session_id": "s", "transcript_path": str(transcript)}
+    payload = {
+        "prompt": prompt,
+        "session_id": "s",
+        "transcript_path": str(transcript),
+        "permission_mode": permission_mode,
+    }
     result = run(home, jev, "hook", harness, stdin=json.dumps(payload), attended=attended)
     assert result.returncode == 0, result.stderr
     return result.stdout
@@ -263,6 +269,14 @@ def test_headless_codex_is_never_routed_or_sent_to_jev(home: Path, jev: FakeJev,
     switch_on(home, jev)
     (home.parent / "codex-transcript.jsonl").unlink(missing_ok=True)
     assert hook(home, jev, "codex", source=source) == ""
+    assert jev.requests == []
+
+
+def test_codex_exec_resuming_an_interactive_session_is_headless(home: Path, jev: FakeJev) -> None:
+    """`codex exec resume` keeps the interactive transcript's "cli" header, but every
+    `codex exec` runs with approvals bypassed, which the hook sees."""
+    switch_on(home, jev)
+    assert hook(home, jev, "codex", source="cli", permission_mode="bypassPermissions") == ""
     assert jev.requests == []
 
 
@@ -469,10 +483,12 @@ def test_opencode_moves_a_routed_message_onto_the_helper_model_and_level(home: P
     assert "Done by GLM 5.3 flash at high thinking" in note["text"]
 
 
-def test_opencode_run_is_never_routed_or_sent_to_jev(home: Path, jev: FakeJev) -> None:
-    """`opencode run` is how reviews call DeepSeek with a pinned model and variant."""
+@pytest.mark.parametrize("mode", ["run", "attached"])
+def test_opencode_run_is_never_routed_or_sent_to_jev(home: Path, jev: FakeJev, mode: str) -> None:
+    """`opencode run` is how reviews call DeepSeek with a pinned model and variant,
+    including `--attach` to a server that a TUI started."""
     switch_on(home, jev)
-    message = opencode(home, jev, mode="run")["output"]
+    message = opencode(home, jev, mode=mode)["output"]
     assert message["message"]["model"]["modelID"] == "deepseek/deepseek-v4.1-flash"
     assert len(message["parts"]) == 1 and jev.requests == []
 

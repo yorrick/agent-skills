@@ -28,9 +28,12 @@ const HARD_LIMIT_MS = 8_000;
 // Reason: only the default coding agent's messages are routed. Moving a plan-mode
 // message onto a helper would lift plan mode's read-only limits.
 const ROUTABLE_AGENT = 'build';
-// Reason: route only when a person is typing. The TUI runs its sessions in this
-// worker script, while `opencode run` (reviews, automation) runs src/index.js with
-// its own pinned model and variant (verified). Anything else fails closed.
+// Reason: route only when a person is typing, and require two signals. The TUI
+// runs its server in this worker script, while a plain `opencode run` (reviews,
+// automation) runs src/index.js with its own pinned model and variant. But
+// `opencode run --attach` sends its message to a server a TUI started, so the
+// message must also name its agent: the TUI always does, `opencode run` only with
+// an explicit --agent (both verified). Anything else fails closed.
 const TUI_WORKER = /cli[\\/]tui[\\/]worker\.js$/;
 const BASE62 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
 
@@ -115,9 +118,9 @@ export default async function jevRouter() {
       };
     },
 
-    'chat.message': async (_input, output) => {
+    'chat.message': async (input, output) => {
       try {
-        if (!TUI_WORKER.test(process.argv[1] ?? '')) return;
+        if (!TUI_WORKER.test(process.argv[1] ?? '') || input?.agent === undefined) return;
         if ((output.message.agent ?? ROUTABLE_AGENT) !== ROUTABLE_AGENT) return;
         const prompt = output.parts
           .filter((part) => part.type === 'text' && !part.synthetic)

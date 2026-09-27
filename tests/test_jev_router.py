@@ -429,7 +429,13 @@ OPENCODE_HARNESS = Path(__file__).resolve().parent / "jev_router_opencode_harnes
 
 
 def opencode(
-    home: Path, jev: FakeJev, agent: str = "build", prompt: str = "rename foo", path: str = "", mode: str = "tui"
+    home: Path,
+    jev: FakeJev,
+    agent: str = "build",
+    prompt: str = "rename foo",
+    path: str = "",
+    mode: str = "tui",
+    user_config: dict | None = None,
 ) -> dict:
     node = shutil.which("node")
     assert node, "node is required to exercise the opencode hook"
@@ -438,6 +444,7 @@ def opencode(
         "JEV_ROUTER_HOME": str(home),
         "JEV_ROUTER_API_URL": jev.url,
         "PATH": path or os.environ["PATH"],
+        "JEV_TEST_OPENCODE_CONFIG": json.dumps(user_config or {}),
     }
     result = subprocess.run(
         [node, str(OPENCODE_HARNESS), agent, prompt, mode],
@@ -459,6 +466,17 @@ def test_opencode_registers_a_helper_agent_per_size_and_the_jev_command(home: Pa
         assert helper["model"] == tier["model_id"]
         assert (helper["mode"], helper["hidden"]) == ("subagent", True)
     assert "$ARGUMENTS" in config["command"]["jev"]["template"]
+
+
+def test_opencode_helpers_keep_every_restriction_on_the_build_agent(home: Path, jev: FakeJev) -> None:
+    """Routing moves a message off `build`, so a helper must not lift a limit the
+    user put on build, such as denying bash."""
+    build = {"permission": {"edit": "deny", "bash": "deny"}, "tools": {"webfetch": False}, "steps": 7}
+    config = opencode(home, jev, user_config={"agent": {"build": build}})
+    for tier in json.loads(TIERS_FILE.read_text())["harnesses"]["opencode"]:
+        helper = config["agent"][tier["helper"]]
+        assert {k: helper[k] for k in build} == build
+        assert helper["model"] == tier["model_id"] and helper["mode"] == "subagent"
 
 
 def test_opencode_keeps_a_follow_up_on_the_session_model_with_a_note(home: Path, jev: FakeJev) -> None:

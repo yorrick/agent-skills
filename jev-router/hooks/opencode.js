@@ -102,9 +102,13 @@ export default async function jevRouter() {
     config: async (config) => {
       config.agent = config.agent ?? {};
       for (const tier of tiers) {
-        // Reason: chat.message can move a message onto a hidden subagent (verified),
-        // so the helpers stay out of the Tab list of primary agents.
+        // Reason: a helper is the user's build agent on another model. It copies
+        // build's own settings (permission, tools, prompt, steps) so routing never
+        // lifts a restriction the user put on build. chat.message can move a
+        // message onto a hidden subagent (verified), so helpers stay out of the
+        // Tab list of primary agents.
         config.agent[tier.helper] ??= {
+          ...(config.agent[ROUTABLE_AGENT] ?? {}),
           mode: 'subagent',
           hidden: true,
           model: tier.model_id,

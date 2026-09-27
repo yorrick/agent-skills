@@ -19,7 +19,8 @@ const entry = path.join(repoRoot, '.opencode', 'plugins', 'agent-skills.js');
 const module = await import(pathToFileURL(entry).href);
 const hooks = await module.AgentSkillsPlugin({ client: {}, directory: repoRoot });
 
-const config = {};
+// The user's own opencode config, as the config hook receives it (JSON, optional).
+const config = JSON.parse(process.env.JEV_TEST_OPENCODE_CONFIG ?? '{}');
 await hooks.config(config);
 
 const ids = { message: 'msg_0e2fd833d001IPZdi1mHT14U08', session: 'ses_f1d027cf5ffefUQtzA1W61Ange' };

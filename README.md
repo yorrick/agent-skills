@@ -1,4 +1,4 @@
-# Yorrick's Claude Code Plugins
+# Yorrick's Agent Plugins
 
 A collection of agent plugins by Yorrick Jansen (Claude Code, Codex, and opencode).
 

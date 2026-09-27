@@ -1,0 +1,23 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "e4325a755b4d",
+  "strategy": "manual-commit",
+  "branch": "worktree-jev-model-routing",
+  "checkpoints_count": 1,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/e4/325a755b4d/0/metadata.json",
+      "transcript": "/e4/325a755b4d/0/full.jsonl",
+      "content_hash": "/e4/325a755b4d/0/content_hash.txt",
+      "prompt": "/e4/325a755b4d/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 212,
+    "cache_creation_tokens": 289208,
+    "cache_read_tokens": 21439729,
+    "output_tokens": 169684,
+    "api_call_count": 101
+  }
+}

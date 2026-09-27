@@ -28,6 +28,10 @@ const HARD_LIMIT_MS = 8_000;
 // Reason: only the default coding agent's messages are routed. Moving a plan-mode
 // message onto a helper would lift plan mode's read-only limits.
 const ROUTABLE_AGENT = 'build';
+// Reason: route only when a person is typing. The TUI runs its sessions in this
+// worker script, while `opencode run` (reviews, automation) runs src/index.js with
+// its own pinned model and variant (verified). Anything else fails closed.
+const TUI_WORKER = /cli[\\/]tui[\\/]worker\.js$/;
 const BASE62 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
 
 function readTiers() {
@@ -101,7 +105,7 @@ export default async function jevRouter() {
           mode: 'subagent',
           hidden: true,
           model: tier.model_id,
-          description: `Jev router helper for ${tier.size} jobs (${tier.jobs}). Runs on ${tier.model}.`,
+          description: `Jev router helper for ${tier.size} jobs (${tier.jobs}). Runs on ${tier.model} at ${tier.effort} thinking.`,
         };
       }
       config.command = config.command ?? {};
@@ -113,6 +117,7 @@ export default async function jevRouter() {
 
     'chat.message': async (_input, output) => {
       try {
+        if (!TUI_WORKER.test(process.argv[1] ?? '')) return;
         if ((output.message.agent ?? ROUTABLE_AGENT) !== ROUTABLE_AGENT) return;
         const prompt = output.parts
           .filter((part) => part.type === 'text' && !part.synthetic)
@@ -125,9 +130,12 @@ export default async function jevRouter() {
         if (decision.model_id) {
           const slash = decision.model_id.indexOf('/');
           output.message.agent = decision.agent;
+          // Reason: the thinking level lives on the message's model as `variant`
+          // (verified: a top-level message.variant is ignored).
           output.message.model = {
             providerID: decision.model_id.slice(0, slash),
             modelID: decision.model_id.slice(slash + 1),
+            ...(decision.variant ? { variant: decision.variant } : {}),
           };
         }
         output.parts.push({

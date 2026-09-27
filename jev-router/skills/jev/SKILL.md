@@ -18,10 +18,10 @@ Show the user the script's output as it is. It already carries the privacy remin
 
 ## What the router does
 
-One switch, in `~/.config/jev-router/`, covers Claude Code, Codex and opencode. While it is on, each message is sent to Jev with one question: what is the smallest model that can do this job well? When Jev is at least 60% sure, and the message is not a short reply that only makes sense inside the conversation, the job goes to the helper for that size, and the helper's reply ends with a `Done by <model>` line. If Jev is slow (over 6 seconds) or anything fails, the message goes through as if the router were not there.
+One switch, in `~/.config/jev-router/`, covers Claude Code, Codex and opencode. While it is on, each message the user types is sent to Jev with one question: what is the smallest model that can do this job well? Each size maps to a model and a thinking level inside the same harness (the table is `scripts/tiers.json`). When Jev is at least 60% sure, and the message is not a short reply that only makes sense inside the conversation, the job goes to the helper for that size, and the reply ends with a line such as `Done by Claude Opus 5.5 at low thinking`. Headless runs (`claude -p`, `codex exec`, `opencode run`) are never routed. If Jev is slow (over 6 seconds) or anything fails, the message goes through as if the router were not there.
 
-| Harness | How a job reaches the smaller model |
+| Harness | How a job reaches its model and thinking level |
 |---|---|
-| Claude Code | The main model is told to hand the job to the `jev-router:<size>` subagent. The main model still reads the message and relays the result. |
-| Codex | The main model is told to `spawn_agent` on the size's model. Same relay cost as Claude Code. |
-| opencode | The message itself moves onto the `jev-<size>` agent and its model, so there is no relay. |
+| Claude Code | The main model is told to hand the job to the `jev-router:<size>` subagent, unless it is certain it already runs that model at that level. It still reads the message and relays the result. |
+| Codex | The main model is told to `spawn_agent` with the size's model and `reasoning_effort`, with the same exception and relay cost. |
+| opencode | The message itself moves onto the `jev-<size>` agent, model and thinking level, so there is no relay. |

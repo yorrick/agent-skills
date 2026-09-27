@@ -44,24 +44,30 @@ HARNESSES = ("claude", "codex", "opencode")
 
 @dataclass(frozen=True)
 class Tier:
-    """One size Jev can pick, and the model that takes jobs of that size."""
+    """One size Jev can pick, and the model and thinking level that take it."""
 
     size: str
     jobs: str
     model: str
     model_id: str
+    effort: str | None
     helper: str
+
+    @property
+    def label(self) -> str:
+        """How the tier reads to a person, e.g. 'Claude Opus 5.5 at low thinking'."""
+        return f"{self.model} at {self.effort} thinking" if self.effort else self.model
 
 
 def load_tiers() -> tuple[dict[str, str], dict[str, tuple[Tier, ...]]]:
     """Read tiers.json, which the opencode hook reads too.
 
-    Each harness gets one size per model it actually has, smallest first. Codex has
-    three current models for four sizes, so its smallest also takes the everyday
-    jobs (`also`): tiny and everyday are both single-shot writing, while the step
-    from everyday to large (a multi-step build) is where capability starts to
-    matter. A Codex plugin cannot ship agent definitions, but spawn_agent takes a
-    model directly, so a Codex helper is defined at the moment it is spawned.
+    Each size maps to a model AND a thinking level, chosen from Artificial
+    Analysis's Intelligence Index and cost per task: a setting that another one
+    beats on both is left out. Every model belongs to the harness it is listed
+    under, because the router only ever routes inside one harness. A Codex plugin
+    cannot ship agent definitions, but spawn_agent takes a model and a reasoning
+    effort directly, so a Codex helper is defined at the moment it is spawned.
     """
     data = json.loads((Path(__file__).with_name("tiers.json")).read_text())
     jobs: dict[str, str] = data["jobs"]
@@ -69,9 +75,10 @@ def load_tiers() -> tuple[dict[str, str], dict[str, tuple[Tier, ...]]]:
         harness: tuple(
             Tier(
                 size=t["size"],
-                jobs="; or ".join(jobs[s] for s in (*t.get("also", ()), t["size"])),
+                jobs=jobs[t["size"]],
                 model=t["model"],
                 model_id=t["model_id"],
+                effort=t["effort"],
                 helper=t["helper"],
             )
             for t in entries
@@ -283,14 +290,17 @@ def outcome_of(verdict: Verdict, tier: Tier | None) -> str:
 
 def handoff(harness: str, tier: Tier, verdict: Verdict) -> str:
     sized = f"Jev router: Jev's size for this message is {tier.size} ({verdict.confidence:g}% sure)."
-    sign_off = f"Done by {tier.model}"
+    sign_off = f"Done by {tier.label}"
+    # Reason: neither hook can see the session's thinking level, but the model can
+    # (verified for Claude, including after a mid-session /effort). A model that is
+    # not certain hands off, so a job never runs at the wrong level.
     keep = (
-        f"Handle it yourself instead if you are already running on {tier.model}, or if the message "
-        "only makes sense with this conversation's history."
+        f"Handle it yourself instead only if you are certain you are already running on {tier.label}, "
+        "or if the message only makes sense with this conversation's history."
     )
     if harness == "claude":
         return (
-            f"{sized} Hand it to the `{tier.helper}` subagent, which runs on {tier.model}: give it the "
+            f"{sized} Hand it to the `{tier.helper}` subagent, which runs on {tier.label}: give it the "
             "user's request plus any context from this conversation it needs, then give the user its "
             f"result, keeping its closing '{sign_off}' line. {keep}"
         )
@@ -299,14 +309,14 @@ def handoff(harness: str, tier: Tier, verdict: Verdict) -> str:
             # Reason: a full-history fork inherits the parent's model, so the
             # override only applies with fork_turns "none"; the message carries
             # the context instead.
-            f'{sized} Call spawn_agent with fork_turns "none", model "{tier.model_id}", a short task_name, '
-            "and a message holding the user's request plus any context from this conversation it needs; tell it "
-            f"to end its reply with the line '{sign_off}'. Wait for it, then give the user its result, "
-            f"keeping that line. {keep}"
+            f'{sized} Call spawn_agent with fork_turns "none", model "{tier.model_id}", reasoning_effort '
+            f'"{tier.effort}", a short task_name, and a message holding the user\'s request plus any context '
+            f"from this conversation it needs; tell it to end its reply with the line '{sign_off}'. Wait for "
+            f"it, then give the user its result, keeping that line. {keep}"
         )
-    # opencode moves this message onto the tier's model itself, so there is no
-    # hand-off to make: the model that is already answering only signs off.
-    return f"{sized} This reply runs on {tier.model}. End it with the line '{sign_off}'."
+    # opencode moves this message onto the tier's model and thinking level itself,
+    # so there is no hand-off to make: the model already answering only signs off.
+    return f"{sized} This reply runs on {tier.label}. End it with the line '{sign_off}'."
 
 
 def keep_note(verdict: Verdict) -> str:
@@ -329,9 +339,31 @@ def keep_note(verdict: Verdict) -> str:
 def hook_output(harness: str, tier: Tier | None, verdict: Verdict) -> str:
     context = handoff(harness, tier, verdict) if tier else keep_note(verdict)
     if harness == "opencode":
-        switch = {"model_id": tier.model_id, "agent": tier.helper} if tier else {}
+        switch = {"model_id": tier.model_id, "variant": tier.effort, "agent": tier.helper} if tier else {}
         return json.dumps({**switch, "context": context})
     return json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": context}})
+
+
+INTERACTIVE_CODEX_SOURCES = {"cli", "vscode"}
+
+
+def interactive(harness: str, payload: dict) -> bool:
+    """Whether a person is typing in this session. Headless runs (`claude -p`,
+    `codex exec`, `opencode run`) are reviews and automation that pin their own
+    model and thinking level, so the router never touches them, and never sends
+    their text to Jev. Every check fails closed: an unknown signal means headless.
+    """
+    if harness == "claude":
+        # Verified: "1" in the TUI, "0" under `claude -p`, set by Claude Code itself.
+        return os.environ.get("CLAUDE_CODE_SESSION_ATTENDED") == "1"
+    if harness == "codex":
+        # Verified on real sessions: the transcript's first line records the front
+        # end, "exec" for `codex exec`, "cli" or "vscode" when a person is typing.
+        with Path(payload["transcript_path"]).open() as transcript:
+            meta = json.loads(transcript.readline())
+        return meta["payload"]["source"] in INTERACTIVE_CODEX_SOURCES
+    # opencode: hooks/opencode.js only calls the router from the TUI.
+    return True
 
 
 def route(harness: str, stdin: str) -> str:
@@ -339,7 +371,10 @@ def route(harness: str, stdin: str) -> str:
     config = load_config()
     if not config.get("enabled"):
         return ""
-    prompt = str(json.loads(stdin).get("prompt") or "").strip()
+    payload = json.loads(stdin)
+    if not interactive(harness, payload):
+        return ""
+    prompt = str(payload.get("prompt") or "").strip()
     # Reason: slash commands and skill invocations (including `/jev off`) are
     # instructions to the harness, not jobs to size.
     if not prompt or prompt[0] in "/$":
@@ -480,7 +515,7 @@ def cmd_classify(harness: str, messages: list[str]) -> int:
         cost = cost_of(body)
         event.update(answered=True, size=verdict.size, confidence=verdict.confidence, cost=cost)
         record(event)
-        does = f"hands to {tier.model}" if tier else "keeps it in the session"
+        does = f"hands to {tier.label}" if tier else "keeps it in the session"
         print(
             f"| {n} | {message} | {verdict.size} | {verdict.confidence:g}% | "
             f"{'yes' if verdict.follow_up else 'no'} | {does} | {took:.1f}s | "

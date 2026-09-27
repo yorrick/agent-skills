@@ -2,12 +2,16 @@
 // config hook, then runs chat.message on one user message the way opencode does,
 // and prints the resulting config and message as JSON.
 //
-// Usage (cwd = repository root): node jev_router_opencode_harness.mjs <agent> <prompt>
+// Usage (cwd = repository root):
+//   node jev_router_opencode_harness.mjs <agent> <prompt> <tui|run>
+// The last argument stands in for how opencode was started: the TUI runs sessions
+// in src/cli/tui/worker.js, while `opencode run` runs src/index.js.
 
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const [agent, prompt] = process.argv.slice(2);
+const [agent, prompt, mode] = process.argv.slice(2);
+process.argv[1] = mode === 'tui' ? '/opt/opencode/src/cli/tui/worker.js' : '/opt/opencode/src/index.js';
 const repoRoot = process.cwd();
 const entry = path.join(repoRoot, '.opencode', 'plugins', 'agent-skills.js');
 const module = await import(pathToFileURL(entry).href);

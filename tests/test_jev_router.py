@@ -91,8 +91,14 @@ def home(tmp_path: Path) -> Path:
     return tmp_path / "state"
 
 
-def run(home: Path, jev: FakeJev, *args: str, stdin: str = "") -> subprocess.CompletedProcess[str]:
+def run(
+    home: Path, jev: FakeJev, *args: str, stdin: str = "", attended: str | None = "1"
+) -> subprocess.CompletedProcess[str]:
+    """Run the script as a harness would. `attended` is what Claude Code sets in
+    CLAUDE_CODE_SESSION_ATTENDED: "1" in the TUI, "0" under `claude -p`."""
     env = {"JEV_ROUTER_HOME": str(home), "JEV_ROUTER_API_URL": jev.url, "PATH": "/usr/bin:/bin"}
+    if attended is not None:
+        env["CLAUDE_CODE_SESSION_ATTENDED"] = attended
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args], input=stdin, env=env, capture_output=True, text=True, timeout=30
     )
@@ -105,8 +111,22 @@ def switch_on(home: Path, jev: FakeJev, **extra: object) -> None:
         (home / "config.json").write_text(json.dumps({**config, **extra}))
 
 
-def hook(home: Path, jev: FakeJev, harness: str = "claude", prompt: str = "rename foo to bar") -> str:
-    result = run(home, jev, "hook", harness, stdin=json.dumps({"prompt": prompt, "session_id": "s"}))
+def hook(
+    home: Path,
+    jev: FakeJev,
+    harness: str = "claude",
+    prompt: str = "rename foo to bar",
+    attended: str | None = "1",
+    source: str | None = "cli",
+) -> str:
+    """One message through the hook. `source` is what the Codex transcript's first
+    line records: "cli" or "vscode" when a person types, "exec" under `codex exec`;
+    None means the transcript does not exist."""
+    transcript = home.parent / "codex-transcript.jsonl"
+    if source is not None:
+        transcript.write_text(json.dumps({"type": "session_meta", "payload": {"source": source}}) + "\n")
+    payload = {"prompt": prompt, "session_id": "s", "transcript_path": str(transcript)}
+    result = run(home, jev, "hook", harness, stdin=json.dumps(payload), attended=attended)
     assert result.returncode == 0, result.stderr
     return result.stdout
 
@@ -201,24 +221,54 @@ def test_jev_sees_the_sizes_and_a_truncated_message(home: Path, jev: FakeJev) ->
     assert len(user["content"]) == jev_router.MAX_MESSAGE_CHARS
 
 
-def test_codex_gets_three_sizes_and_spawns_with_a_model(home: Path, jev: FakeJev) -> None:
+def test_codex_spawns_with_the_model_and_thinking_level(home: Path, jev: FakeJev) -> None:
     switch_on(home, jev)
     jev.answer = {"size": "everyday", "confidence": 90, "follow_up": False}
     context = json.loads(hook(home, jev, "codex"))["hookSpecificOutput"]["additionalContext"]
     # A full-history fork inherits the parent's model, so the override needs fork_turns "none".
-    assert 'spawn_agent with fork_turns "none", model "gpt-6-luna"' in context
-    assert "Done by GPT-6 Luna" in context
-    system = jev.requests[0]["messages"][0]["content"]
-    assert "- tiny:" not in system
-    assert "- everyday: a lookup, a rename, a one-line answer; or a normal email" in system
+    assert 'spawn_agent with fork_turns "none", model "gpt-6-luna", reasoning_effort "max"' in context
+    assert "Done by GPT-6 Luna at max thinking" in context
+    assert "only if you are certain you are already running on GPT-6 Luna at max thinking" in context
+
+
+def test_claude_hands_off_unless_the_session_is_certain_it_matches(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev)
+    jev.answer = {"size": "large", "confidence": 90, "follow_up": False}
+    context = json.loads(hook(home, jev))["hookSpecificOutput"]["additionalContext"]
+    assert "`jev-router:large` subagent, which runs on Claude Opus 5.5 at high thinking" in context
+    assert "only if you are certain you are already running on Claude Opus 5.5 at high thinking" in context
 
 
 def test_opencode_gets_a_switch_it_can_apply(home: Path, jev: FakeJev) -> None:
     switch_on(home, jev)
+    jev.answer = {"size": "hardest", "confidence": 90, "follow_up": False}
     out = json.loads(hook(home, jev, "opencode"))
-    assert out["agent"] == "jev-tiny"
-    assert out["model_id"] == "openrouter/anthropic/claude-haiku-4.5"
-    assert "Done by Claude Haiku 4.5" in out["context"]
+    assert (out["agent"], out["model_id"], out["variant"]) == ("jev-hardest", "openrouter/z-ai/glm-5.3-flash", "max")
+    assert "Done by GLM 5.3 flash at max thinking" in out["context"]
+
+
+# --- interactive sessions only ---------------------------------------------------------
+
+
+@pytest.mark.parametrize("attended", ["0", None])
+def test_headless_claude_is_never_routed_or_sent_to_jev(home: Path, jev: FakeJev, attended: str | None) -> None:
+    """`claude -p` sets CLAUDE_CODE_SESSION_ATTENDED=0: a review pins its own model."""
+    switch_on(home, jev)
+    assert hook(home, jev, attended=attended) == ""
+    assert jev.requests == [] and log(home) == []
+
+
+@pytest.mark.parametrize("source", ["exec", "mcp", None])
+def test_headless_codex_is_never_routed_or_sent_to_jev(home: Path, jev: FakeJev, source: str | None) -> None:
+    switch_on(home, jev)
+    (home.parent / "codex-transcript.jsonl").unlink(missing_ok=True)
+    assert hook(home, jev, "codex", source=source) == ""
+    assert jev.requests == []
+
+
+def test_codex_from_the_ide_is_interactive(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev)
+    assert "spawn_agent" in hook(home, jev, "codex", source="vscode")
 
 
 # --- never in the way ----------------------------------------------------------------
@@ -362,7 +412,9 @@ def test_status_when_nothing_happened_yet(home: Path, jev: FakeJev) -> None:
 OPENCODE_HARNESS = Path(__file__).resolve().parent / "jev_router_opencode_harness.mjs"
 
 
-def opencode(home: Path, jev: FakeJev, agent: str = "build", prompt: str = "rename foo", path: str = "") -> dict:
+def opencode(
+    home: Path, jev: FakeJev, agent: str = "build", prompt: str = "rename foo", path: str = "", mode: str = "tui"
+) -> dict:
     node = shutil.which("node")
     assert node, "node is required to exercise the opencode hook"
     env = {
@@ -372,7 +424,12 @@ def opencode(home: Path, jev: FakeJev, agent: str = "build", prompt: str = "rena
         "PATH": path or os.environ["PATH"],
     }
     result = subprocess.run(
-        [node, str(OPENCODE_HARNESS), agent, prompt], cwd=REPO, env=env, capture_output=True, text=True, timeout=60
+        [node, str(OPENCODE_HARNESS), agent, prompt, mode],
+        cwd=REPO,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
@@ -397,15 +454,27 @@ def test_opencode_keeps_a_follow_up_on_the_session_model_with_a_note(home: Path,
     assert "add no 'Done by' line" in message["parts"][1]["text"]
 
 
-def test_opencode_moves_a_routed_message_onto_the_helper_and_its_model(home: Path, jev: FakeJev) -> None:
+def test_opencode_moves_a_routed_message_onto_the_helper_model_and_level(home: Path, jev: FakeJev) -> None:
     switch_on(home, jev)
     message = opencode(home, jev)["output"]
     assert message["message"]["agent"] == "jev-tiny"
-    assert message["message"]["model"] == {"providerID": "openrouter", "modelID": "anthropic/claude-haiku-4.5"}
+    assert message["message"]["model"] == {
+        "providerID": "openrouter",
+        "modelID": "z-ai/glm-5.3-flash",
+        "variant": "high",
+    }
     user, note = message["parts"]
     assert re.fullmatch(r"prt_0e2fd8341002[0-9A-Za-z]{14}", note["id"])
     assert note["synthetic"] is True and note["messageID"] == user["messageID"]
-    assert "Done by Claude Haiku 4.5" in note["text"]
+    assert "Done by GLM 5.3 flash at high thinking" in note["text"]
+
+
+def test_opencode_run_is_never_routed_or_sent_to_jev(home: Path, jev: FakeJev) -> None:
+    """`opencode run` is how reviews call DeepSeek with a pinned model and variant."""
+    switch_on(home, jev)
+    message = opencode(home, jev, mode="run")["output"]
+    assert message["message"]["model"]["modelID"] == "deepseek/deepseek-v4.1-flash"
+    assert len(message["parts"]) == 1 and jev.requests == []
 
 
 def test_opencode_leaves_the_message_alone_when_off(home: Path, jev: FakeJev) -> None:
@@ -459,12 +528,34 @@ def test_each_claude_tier_has_a_helper_agent_on_its_model() -> None:
         agent = PLUGIN / "agents" / f"{tier['helper'].split(':', 1)[1]}.md"
         meta = _frontmatter(agent)
         assert meta["model"] == tier["model_id"]
-        assert agent.read_text().rstrip().endswith(f"Done by {tier['model']}"), agent
+        assert meta.get("effort") == tier["effort"], agent
+        label = f"{tier['model']} at {tier['effort']} thinking" if tier["effort"] else tier["model"]
+        assert agent.read_text().rstrip().endswith(f"Done by {label}"), agent
 
 
-def test_tiers_run_smallest_first_and_cover_every_size() -> None:
+def test_every_harness_has_every_size_smallest_first() -> None:
     data = json.loads(TIERS_FILE.read_text())
-    order = list(data["jobs"])
     for harness, tiers in data["harnesses"].items():
-        covered = [s for t in tiers for s in (*t.get("also", []), t["size"])]
-        assert covered == order, f"{harness} must cover every size once, smallest first"
+        assert [t["size"] for t in tiers] == list(data["jobs"]), harness
+
+
+# The router only ever routes inside one harness: a Claude Code session never hands
+# work to a GPT model and vice versa, which keeps the user's cross-AI review rules
+# (Codex reviews Claude, Claude reviews Codex) meaningful. Each harness also only
+# gets thinking levels its models accept. Haiku 4.5 has none.
+HARNESS_MODELS = {
+    "claude": ({"claude-haiku-4-5-20251001", "claude-opus-5-5"}, {None, "low", "medium", "high", "xhigh", "max"}),
+    "codex": ({"gpt-6-luna", "gpt-6-sol", "gpt-6-astra"}, {"low", "medium", "high", "xhigh", "max"}),
+    "opencode": ({"openrouter/z-ai/glm-5.3-flash", "openrouter/deepseek/deepseek-v4.1-flash"}, {"low", "high", "max"}),
+}
+
+
+def test_every_tier_stays_inside_its_harness_with_a_level_its_model_accepts() -> None:
+    data = json.loads(TIERS_FILE.read_text())
+    assert set(data["harnesses"]) == set(HARNESS_MODELS)
+    for harness, tiers in data["harnesses"].items():
+        models, efforts = HARNESS_MODELS[harness]
+        for tier in tiers:
+            assert tier["model_id"] in models, f"{harness} {tier['size']} names {tier['model_id']}"
+            assert tier["effort"] in efforts, f"{harness} {tier['size']} uses effort {tier['effort']}"
+            assert (tier["effort"] is None) == (tier["model_id"] == "claude-haiku-4-5-20251001")

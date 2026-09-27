@@ -165,14 +165,18 @@ def test_sixty_percent_is_sure_enough_and_below_is_kept(home: Path, jev: FakeJev
     jev.answer = {"size": "large", "confidence": 60, "follow_up": False}
     assert "jev-router:large" in hook(home, jev)
     jev.answer = {"size": "large", "confidence": 59, "follow_up": False}
-    assert hook(home, jev) == ""
+    context = json.loads(hook(home, jev))["hookSpecificOutput"]["additionalContext"]
+    assert "handle this message yourself" in context and "59% sure" in context
+    assert "jev-router:" not in context
     assert [e["outcome"] for e in log(home)] == ["routed", "unsure"]
 
 
-def test_follow_up_replies_stay_in_the_session(home: Path, jev: FakeJev) -> None:
+def test_follow_up_replies_stay_in_the_session_without_a_sign_off(home: Path, jev: FakeJev) -> None:
     switch_on(home, jev)
     jev.answer = {"size": "tiny", "confidence": 99, "follow_up": True}
-    assert hook(home, jev, prompt="yes do that but make it shorter") == ""
+    context = json.loads(hook(home, jev, prompt="yes do that but make it shorter"))["hookSpecificOutput"]
+    assert "follow-up" in context["additionalContext"]
+    assert "add no 'Done by' line" in context["additionalContext"]
     assert log(home)[-1]["outcome"] == "follow_up"
 
 
@@ -322,8 +326,19 @@ def test_opencode_registers_a_helper_agent_per_size_and_the_jev_command(home: Pa
     tiers = json.loads(TIERS_FILE.read_text())["harnesses"]["opencode"]
     config = opencode(home, jev)
     for tier in tiers:
-        assert config["agent"][tier["helper"]]["model"] == tier["model_id"]
+        helper = config["agent"][tier["helper"]]
+        assert helper["model"] == tier["model_id"]
+        assert (helper["mode"], helper["hidden"]) == ("subagent", True)
     assert "$ARGUMENTS" in config["command"]["jev"]["template"]
+
+
+def test_opencode_keeps_a_follow_up_on_the_session_model_with_a_note(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev)
+    jev.answer = {"size": "tiny", "confidence": 99, "follow_up": True}
+    message = opencode(home, jev, prompt="yes but shorter")["output"]
+    assert message["message"]["agent"] == "build"
+    assert message["message"]["model"]["modelID"] == "deepseek/deepseek-v4.1-flash"
+    assert "add no 'Done by' line" in message["parts"][1]["text"]
 
 
 def test_opencode_moves_a_routed_message_onto_the_helper_and_its_model(home: Path, jev: FakeJev) -> None:

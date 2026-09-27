@@ -77,6 +77,14 @@ delegating would add a hop and save nothing.
   (`JEV_ROUTER_HOME` overrides it). The key is read only from the shell file
   given to `on --key-file`. The harness processes do not export
   `OPENROUTER_API_KEY`, and a second source would be an unapproved fallback.
+- **A kept job gets a note.** When Jev answers but the job stays in the session
+  (a follow-up, or under 60% sure), the model is told to handle it itself and to
+  add no "Done by" line. In the opencode end-to-end run, the session's DeepSeek
+  model otherwise copied the previous turn's "Done by Claude Sonnet 5" line and
+  misattributed its own answer. A timeout or an error still adds nothing.
+- **opencode helpers are hidden subagents.** `chat.message` can move a message
+  onto a `mode: "subagent", hidden: true` agent (verified), so the helpers stay
+  out of the Tab list of primary agents.
 - **The log keeps no message text.** It records the outcome, size, confidence,
   cost, latency and harness.
 - **Privacy.** While the router is on, message text reaches OpenRouter, TypeSafe,

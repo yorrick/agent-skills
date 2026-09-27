@@ -254,7 +254,7 @@ def outcome_of(verdict: Verdict, tier: Tier | None) -> str:
 
 
 def handoff(harness: str, tier: Tier, verdict: Verdict) -> str:
-    sized = f"Jev router: Jev sized this message as a {tier.size} job ({verdict.confidence}% sure)."
+    sized = f"Jev router: Jev's size for this message is {tier.size} ({verdict.confidence}% sure)."
     sign_off = f"Done by {tier.model}"
     keep = (
         f"Handle it yourself instead if you are already running on {tier.model}, or if the message "
@@ -278,10 +278,23 @@ def handoff(harness: str, tier: Tier, verdict: Verdict) -> str:
     return f"{sized} This reply runs on {tier.model}. End it with the line '{sign_off}'."
 
 
-def hook_output(harness: str, tier: Tier, verdict: Verdict) -> str:
-    context = handoff(harness, tier, verdict)
+def keep_note(verdict: Verdict) -> str:
+    """Told when the router deliberately keeps a job. Without it, the session's own
+    model copies the 'Done by' line from earlier helper replies and misattributes
+    its answer (seen in opencode, where DeepSeek signed off as Claude Sonnet 5)."""
+    why = (
+        "it is a follow-up reply that needs this conversation"
+        if verdict.follow_up
+        else f"Jev is only {verdict.confidence}% sure of its size"
+    )
+    return f"Jev router: handle this message yourself ({why}). No helper does this work, so add no 'Done by' line."
+
+
+def hook_output(harness: str, tier: Tier | None, verdict: Verdict) -> str:
+    context = handoff(harness, tier, verdict) if tier else keep_note(verdict)
     if harness == "opencode":
-        return json.dumps({"size": tier.size, "model_id": tier.model_id, "agent": tier.helper, "context": context})
+        switch = {"model_id": tier.model_id, "agent": tier.helper} if tier else {}
+        return json.dumps({**switch, "context": context})
     return json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": context}})
 
 
@@ -319,7 +332,7 @@ def route(harness: str, stdin: str) -> str:
             answered_by=verdict.answered_by,
         )
     record(event)
-    return hook_output(harness, tier, verdict) if tier and verdict else ""
+    return hook_output(harness, tier, verdict) if verdict else ""
 
 
 # --- commands --------------------------------------------------------------------

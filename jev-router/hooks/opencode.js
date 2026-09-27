@@ -89,8 +89,11 @@ export default async function jevRouter() {
     config: async (config) => {
       config.agent = config.agent ?? {};
       for (const tier of tiers) {
+        // Reason: chat.message can move a message onto a hidden subagent (verified),
+        // so the helpers stay out of the Tab list of primary agents.
         config.agent[tier.helper] ??= {
-          mode: 'all',
+          mode: 'subagent',
+          hidden: true,
           model: tier.model_id,
           description: `Jev router helper for ${tier.size} jobs (${tier.jobs}). Runs on ${tier.model}.`,
         };
@@ -112,12 +115,15 @@ export default async function jevRouter() {
         const decision = await askRouter(prompt);
         const id = decision && nextPartId(output.parts);
         if (!id) return;
-        const slash = decision.model_id.indexOf('/');
-        output.message.agent = decision.agent;
-        output.message.model = {
-          providerID: decision.model_id.slice(0, slash),
-          modelID: decision.model_id.slice(slash + 1),
-        };
+        // A decision without a model keeps the message where it is, with a note.
+        if (decision.model_id) {
+          const slash = decision.model_id.indexOf('/');
+          output.message.agent = decision.agent;
+          output.message.model = {
+            providerID: decision.model_id.slice(0, slash),
+            modelID: decision.model_id.slice(slash + 1),
+          };
+        }
         output.parts.push({
           id,
           sessionID: output.message.sessionID,

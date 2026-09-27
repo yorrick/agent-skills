@@ -436,6 +436,7 @@ def opencode(
     path: str = "",
     mode: str = "tui",
     user_config: dict | None = None,
+    providers: list[dict] | None = None,
 ) -> dict:
     node = shutil.which("node")
     assert node, "node is required to exercise the opencode hook"
@@ -446,6 +447,8 @@ def opencode(
         "PATH": path or os.environ["PATH"],
         "JEV_TEST_OPENCODE_CONFIG": json.dumps(user_config or {}),
     }
+    if providers is not None:
+        env["JEV_TEST_PROVIDERS"] = json.dumps(providers)
     result = subprocess.run(
         [node, str(OPENCODE_HARNESS), agent, prompt, mode],
         cwd=REPO,
@@ -468,14 +471,32 @@ def test_opencode_registers_a_helper_agent_per_size_and_the_jev_command(home: Pa
     assert "$ARGUMENTS" in config["command"]["jev"]["template"]
 
 
+@pytest.mark.parametrize(
+    "providers",
+    [
+        [],  # opencode has no OpenRouter login, though the router has its own key
+        [{"id": "openrouter", "models": {"deepseek/deepseek-v4.1-flash": {}}}],  # tier model missing
+    ],
+)
+def test_opencode_never_switches_to_a_model_it_cannot_run(home: Path, jev: FakeJev, providers: list[dict]) -> None:
+    switch_on(home, jev)
+    message = opencode(home, jev, providers=providers)["output"]
+    assert message["message"]["model"]["modelID"] == "deepseek/deepseek-v4.1-flash"
+    assert len(message["parts"]) == 1 and jev.requests == []
+
+
 def test_opencode_helpers_keep_every_restriction_on_the_build_agent(home: Path, jev: FakeJev) -> None:
     """Routing moves a message off `build`, so a helper must not lift a limit the
     user put on build, such as denying bash."""
-    build = {"permission": {"edit": "deny", "bash": "deny"}, "tools": {"webfetch": False}, "steps": 7}
-    config = opencode(home, jev, user_config={"agent": {"build": build}})
+    limits = {"permission": {"edit": "deny", "bash": "deny"}, "tools": {"webfetch": False}, "steps": 7}
+    # Model-specific settings must not follow: a reasoning budget next to the
+    # tier's effort is an invalid OpenRouter request.
+    model_specific = {"options": {"reasoning": {"max_tokens": 2048}}, "temperature": 0.2, "variant": "low"}
+    config = opencode(home, jev, user_config={"agent": {"build": {**limits, **model_specific}}})
     for tier in json.loads(TIERS_FILE.read_text())["harnesses"]["opencode"]:
         helper = config["agent"][tier["helper"]]
-        assert {k: helper[k] for k in build} == build
+        assert {k: helper[k] for k in limits} == limits
+        assert not set(model_specific) & set(helper)
         assert helper["model"] == tier["model_id"] and helper["mode"] == "subagent"
 
 

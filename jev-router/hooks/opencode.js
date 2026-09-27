@@ -36,6 +36,11 @@ const ROUTABLE_AGENT = 'build';
 // an explicit --agent (both verified). Anything else fails closed.
 const TUI_WORKER = /cli[\\/]tui[\\/]worker\.js$/;
 const BASE62 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+const INHERITED_FROM_BUILD = ['permission', 'tools', 'prompt', 'steps', 'maxSteps'];
+
+function pick(object, keys) {
+  return Object.fromEntries(keys.filter((key) => key in object).map((key) => [key, object[key]]));
+}
 
 function readTiers() {
   const data = JSON.parse(fs.readFileSync(path.join(scripts, 'tiers.json'), 'utf8'));
@@ -89,7 +94,21 @@ function nextPartId(parts) {
   return `prt_${time}${tail}`;
 }
 
-export default async function jevRouter() {
+/**
+ * Every "provider/model" this opencode can run right now. config.providers()
+ * lists only providers with credentials (verified: OpenRouter disappears without
+ * a login), answers in about 10 ms, and is safe to call from chat.message.
+ */
+async function usableModels(client) {
+  const { data } = await client.config.providers();
+  const usable = new Set();
+  for (const provider of data?.providers ?? []) {
+    for (const modelID of Object.keys(provider.models ?? {})) usable.add(`${provider.id}/${modelID}`);
+  }
+  return usable;
+}
+
+export default async function jevRouter({ client } = {}) {
   let tiers;
   try {
     tiers = readTiers();
@@ -103,12 +122,13 @@ export default async function jevRouter() {
       config.agent = config.agent ?? {};
       for (const tier of tiers) {
         // Reason: a helper is the user's build agent on another model. It copies
-        // build's own settings (permission, tools, prompt, steps) so routing never
-        // lifts a restriction the user put on build. chat.message can move a
-        // message onto a hidden subagent (verified), so helpers stay out of the
-        // Tab list of primary agents.
+        // build's restrictions and instructions so routing never lifts a limit the
+        // user put on build, but none of its model-specific settings (options,
+        // temperature, variant), which could clash with the tier's own model and
+        // thinking level. chat.message can move a message onto a hidden subagent
+        // (verified), so helpers stay out of the Tab list of primary agents.
         config.agent[tier.helper] ??= {
-          ...(config.agent[ROUTABLE_AGENT] ?? {}),
+          ...pick(config.agent[ROUTABLE_AGENT] ?? {}, INHERITED_FROM_BUILD),
           mode: 'subagent',
           hidden: true,
           model: tier.model_id,
@@ -130,10 +150,17 @@ export default async function jevRouter() {
           .filter((part) => part.type === 'text' && !part.synthetic)
           .map((part) => part.text)
           .join('\n');
+        // Reason: the router's own OpenRouter key is separate from opencode's
+        // logins, so Jev can answer while opencode cannot run the tier's model;
+        // switching then would break a working session. With no usable tier the
+        // message is not even sent to Jev.
+        const usable = await usableModels(client);
+        if (!tiers.some((tier) => usable.has(tier.model_id))) return;
         const decision = await askRouter(prompt);
         const id = decision && nextPartId(output.parts);
         if (!id) return;
         // A decision without a model keeps the message where it is, with a note.
+        if (decision.model_id && !usable.has(decision.model_id)) return;
         if (decision.model_id) {
           const slash = decision.model_id.indexOf('/');
           output.message.agent = decision.agent;

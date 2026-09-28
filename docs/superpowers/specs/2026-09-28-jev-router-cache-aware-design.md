@@ -12,11 +12,12 @@ The design aims for the simplest thing that reaches that goal: the harness's own
 subagents, one Jev call per message, and a small real-world check.
 
 Success, measured in the fork check (Validation) on the next 20 jobs the router
-selects, with its rule frozen beforehand: delegating costs at least 10% less in total
-than keeping; delegated results are as good (no delegated result fails a test or its
-stated outcome where the kept one passes, and a blind judge prefers the kept result no
-more often than the delegated one); and delegating is not slower, with a median
-wall-time ratio (delegate over keep, subagents included) of at most 1.0.
+selects, with its rule frozen beforehand, and with the router's own cost and added
+latency on every message of the check period counted against delegation: delegating
+costs at least 10% less in total than keeping; delegated results are as good (no
+delegated result fails a test or its stated outcome where the kept one passes, and a
+blind judge prefers the kept result no more often than the delegated one); and
+delegating is not slower in total (summed wall time, subagents included).
 
 ## What the study found
 
@@ -75,8 +76,6 @@ Unchanged trigger: UserPromptSubmit in Claude Code and Codex. Changed scope:
 - **Headless runs stay unrouted by default**, detected as in 0.2.0, so a review started
   from another harness is never routed. A headless run the user wants routed, such as
   an eval, opts in with `JEV_ROUTER=on`; `JEV_ROUTER=off` forces routing off in any run.
-- **`JEV_ROUTER_LOG=<path>`** sends one run's log elsewhere, so routed and unrouted eval
-  runs can be compared.
 - Slash commands, skill invocations and task notifications stay excluded.
 
 ### What the router reads
@@ -173,18 +172,27 @@ the jobs the router selects, on the user's own work.
    selected jobs, follow-ups included, with no picking.
 2. **Replay both ways.** A runner restores each snapshot into two full clones, each with
    its ignored setup files copied, its dependencies installed, and an `origin` that is a
-   local bare copy, so a push never leaves the machine. It resumes the transcript copy
-   once per clone (`claude --resume <id> --fork-session -p`), with `JEV_ROUTER=off` and
-   the same message. The delegate side also gets exactly the note the live router would
-   add; the keep side gets nothing. Both are told to stop before any external step (push,
-   pull request, deploy). The two sides run one after the other in random order. For 5
-   of the jobs, both sides run twice more to show how much the numbers move between runs.
+   local bare copy. It saves the transcript copy as a new session of each clone, with
+   its own id, so the user's real session is never resumed, and resumes it headless
+   with `JEV_ROUTER=off` and the same message. The delegate side also gets exactly the
+   note the live router would add; the keep side gets nothing. Replays run inside the
+   harness's own confinement (Claude Code with its sandbox on and edits accepted only
+   inside the clone, Codex with `--sandbox workspace-write`) and without MCP servers, so
+   they write only inside the clone and the harnesses' own state directories, and reach
+   no host but the model APIs they use (their own and a cross-AI reviewer's). Pushes go
+   to the local origin. Both sides are told to stop before opening a pull request,
+   deploying or touching a live service, and are judged on their work up to that point;
+   a job whose outcome is itself such an effect (deploy this, check production) is
+   inconclusive and replaced by the next selected job. The two sides run one after the
+   other in random order.
 3. **Measure** API-equivalent cost, wall time and calls from the transcripts, subagents
    included, pricing every call by its recorded categories (cache reads, cache writes,
-   uncached input, output). Replays start with a cold cache, but the first call re-reads
-   the same prefix on both sides, so it is priced as a cache read, as it usually is live;
-   this leaves the dollar saving unchanged. If the parent kept a job it was told to
-   delegate, the job counts as kept (no saving), and the report counts these overrides.
+   uncached input, output). Right before each side runs, a one-line throwaway fork of the
+   same transcript warms the cache, and a pair is scored only when both sides' first
+   calls read the prefix from cache; otherwise it is rerun. Every run is scored on what
+   it really cost and took, including a parent that kept a job it was told to delegate;
+   the report counts these overrides. The shadow log's Jev cost and latency over every
+   message in the check period are added to the delegate side.
 4. **Judge** quality by criteria fixed in advance: the project's tests pass where they
    exist, the job's stated outcome is met, and a blind review compares the two results
    without knowing which side made them. The blind reviewer is never the harness that

@@ -224,10 +224,15 @@ tune the margins, and then a validation phase with the rule frozen, on new jobs 
    and nothing reaches any other host, GitHub included. A fork's pull request is
    therefore mediated: its `gh` records the request, and a runner outside the forks,
    authorized for the user's GitHub account, creates it in a private throwaway
-   repository made for that fork, which reproduces the source repository's required
-   checks (its CI workflows and branch protection). Both forks' pull requests are
-   created and verified this way (branch, diff, title, body, required checks) before
-   the point is scored, and the repositories are deleted afterwards. Deploys go to stubs
+   repository made for that fork, with the source's branch protection and required
+   check names but GitHub Actions disabled, so no fork-written code runs on GitHub's
+   runners. The runner reproduces each required check itself in an isolated executor
+   (the same kind of sandbox as a helper: no credentials, and network access limited to
+   the package registries the checks need) and publishes the results as commit
+   statuses on the throwaway pull request. A required check that cannot be reproduced
+   safely this way counts as a failure. Both forks' pull requests are created and
+   verified this way (branch, diff, title, body, required checks) before the point is
+   scored, and the repositories are deleted afterwards. Deploys go to stubs
    that record exactly what would be deployed. Any outcome the runner cannot verify
    (a deploy's live behaviour, a check the throwaway repository cannot reproduce)
    counts as a validation failure. A helper that attempts an external write fails the
@@ -279,7 +284,8 @@ passes only if all of these hold:
 - summed over all points, delegating costs at least 10% less than keeping, so a
   losing session cannot cancel the savings unnoticed;
 - the median wall-time ratio over all points, delegate over keep, is at most 1.0;
-- no point is more than 1.5 times slower; a single breach fails the phase.
+- no point is more than 1.5 times slower, checked separately on its warm and its cold
+  variant before they are combined; a single breach in either fails the phase.
 
 ## Out of scope
 

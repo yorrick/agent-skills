@@ -231,9 +231,12 @@ tune the margins, and then a validation phase with the rule frozen, on new jobs 
    repository made for that fork, with the source's branch protection and required
    check names but GitHub Actions disabled, so no fork-written code runs on GitHub's
    runners. Dependencies are fetched only as locked before the fork (the source's
-   lockfiles at the pre-turn snapshot), by a downloader with no credentials that cannot
-   read fork files and runs no install scripts; a point whose checks need any other
-   dependency fails. The runner then reproduces each check itself in an isolated
+   lockfiles at the pre-turn snapshot), by a downloader with no credentials that reads
+   only those frozen lockfiles, writes only to an isolated cache, runs no install
+   scripts, reaches only approved public package registries, and accepts an artifact
+   only if it matches the hash the lockfile pins. A point whose checks need any other
+   dependency, a local-path dependency (`file:` and the like), or a loopback or
+   private-network URL fails. The runner then reproduces each check itself in an isolated
    executor with no network access and no credentials at all, which writes only inside
    its own copy of the fork's clone and a private temporary directory, and cannot read
    the user's real checkout, other repositories or credential-bearing setup files

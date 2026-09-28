@@ -11,7 +11,7 @@ somewhere else.
 Success, measured in the fork experiment (Validation) with a rule frozen beforehand,
 on the jobs the router selects: delegating costs at least 10% less in total than
 keeping; quality does not drop by the criteria fixed in advance; the 95% upper bound on
-the share of sessions with a losing job (costlier, worse or overridden) is at most 15%;
+the share of working days with a losing job (costlier, worse or overridden) is at most 15%;
 delegating is not slower, with a median wall-time ratio (delegate over keep, helpers
 included) of at most 1.0; and no job is more than 1.5 times slower.
 
@@ -197,14 +197,16 @@ It measures what shadow mode cannot: the real cost, speed and quality of delegat
 job the router selects. It runs in two phases: a pilot, whose forks and shadow logs
 tune the margins, and then a validation phase with the rule frozen, on new jobs only.
 
-1. **Enroll sessions at random, then test every selected job in them.** During the
-   validation period, each new interactive Claude Code session is enrolled with a
-   probability fixed in advance, drawn independently by the runner when the session
-   starts (seed and draws recorded), before anything about its jobs is known. The
-   population is sessions with at least one selected job. In an enrolled session,
-   every message the user is about to send goes first to an experiment command that
-   asks the router for its decision without sending it, and every message the router
-   selects is tested, follow-ups and borderline selections included. It is declared in
+1. **Enroll working days at random, then test every selected job in them.** The unit
+   is the working day, because sessions on the same day often share a task. During the
+   validation period, each working day is enrolled with a probability fixed in advance,
+   drawn by the runner at the day's first session (seed and draws recorded), before
+   anything about its jobs is known; every interactive Claude Code session on an
+   enrolled day is enrolled. The population is working days with at least one selected
+   job. In an enrolled session, every message the user is about to send goes first to
+   an experiment command that asks the router for its decision without sending it, and
+   every message the router selects is tested, follow-ups and borderline selections
+   included. It is declared in
    advance that the user always carries on in the control (kept) fork's session and
    working copy, so each selected job is tested from the state the user actually has.
    The experiment therefore validates delegation job by job; it makes no claim about
@@ -217,18 +219,21 @@ tune the margins, and then a validation phase with the rule frozen, on new jobs 
    HEAD, the same staged index, the same contents for every tracked, untracked and
    ignored file the project's setup needs (its declared build and test inputs, such as
    `.env.example`-derived files or installed dependencies). Each fork's `origin` is its
-   own bare clone. A pull request goes to a real throwaway GitHub repository created
-   for that fork and deleted after scoring, so both forks' pull requests are real and
-   are verified (branch, diff, title, body, checks) before the point is scored. Deploys
-   go to stubs that record exactly what would be deployed; a job whose stated outcome
-   depends on a deploy's live behaviour cannot be verified and counts as a validation
-   failure. Each process in a fork has its own
-   egress allowlist: the parent and its helpers reach only their model API, a cross-AI
-   reviewer only its own model API, and nothing reaches any other host. A helper that
-   attempts an external write fails the point.
-   Once a point is scored, the control fork's external steps are carried out against the
-   user's real remote (the push, the pull request) and checked against what its
-   throwaway repository received, before the user carries on from it.
+   own bare clone. Each process in a fork has its own egress allowlist: the parent and
+   its helpers reach only their model API, a cross-AI reviewer only its own model API,
+   and nothing reaches any other host, GitHub included. A fork's pull request is
+   therefore mediated: its `gh` records the request, and a runner outside the forks,
+   authorized for the user's GitHub account, creates it in a private throwaway
+   repository made for that fork, which reproduces the source repository's required
+   checks (its CI workflows and branch protection). Both forks' pull requests are
+   created and verified this way (branch, diff, title, body, required checks) before
+   the point is scored, and the repositories are deleted afterwards. Deploys go to stubs
+   that record exactly what would be deployed. Any outcome the runner cannot verify
+   (a deploy's live behaviour, a check the throwaway repository cannot reproduce)
+   counts as a validation failure. A helper that attempts an external write fails the
+   point. Once a point is scored, the control fork's external steps are carried out
+   against the user's real remote (the push, the pull request) and checked against
+   what its throwaway repository received, before the user carries on from it.
 3. **Run.** Both forks run with `JEV_ROUTER=off`, so the router never fires inside the
    experiment. The same message goes to both; the delegate fork also gets exactly the
    hand-off text the live router would add. The runner checks in its transcript that the
@@ -261,17 +266,16 @@ tune the margins, and then a validation phase with the rule frozen, on new jobs 
    Claude or DeepSeek judges Codex forks.
 
 A validation point counts as a loss when delegating costs more, fails a quality
-criterion, or is overridden. Every selected job in an enrolled session is tested, so a
-session's outcome is fully observed: it counts as a loss if any of its points is. The
-validation phase is fixed in advance at 30 enrolled sessions with at least one selected
-job, taken in enrollment order, and does not stop early or add sessions. It passes only
-if all of these hold:
+criterion, or is overridden. Every selected job on an enrolled day is tested, so a
+day's outcome is fully observed: it counts as a loss if any of its points is. The
+validation phase is fixed in advance at 30 enrolled working days with at least one
+selected job, taken in enrollment order, and does not stop early or add days. It
+passes only if all of these hold:
 
-- at most one session is a loss (the exact one-sided 95% upper bound on the session
-  loss rate is then 14.9%). This bound treats enrolled sessions as independent draws;
-  since sessions on the same day can share a task, the phase also requires a
-  day-clustered bootstrap 95% upper bound on the session loss rate of at most 15%, and
-  the report gives both;
+- at most one day is a loss. Treating enrolled days as independent draws from the
+  user's working days, the exact one-sided 95% upper bound on the share of working
+  days with a losing delegation is then 14.9%. The claim is about days, the unit
+  sampled, and the report states the independence assumption;
 - summed over all points, delegating costs at least 10% less than keeping, so a
   losing session cannot cancel the savings unnoticed;
 - the median wall-time ratio over all points, delegate over keep, is at most 1.0;
@@ -286,7 +290,7 @@ orchestrator, and delegation in opencode.
 ## Open questions
 
 - How often the parent overrides a delegation, and whether that needs its own rule.
-- The session enrollment rule, set from shadow-mode selection rates so that 30
-  sessions with a selected job arrive in a reasonable time.
+- The day enrollment probability, set from shadow-mode selection rates so that 30
+  working days with a selected job arrive in a reasonable time.
 - Whether the model provider's API can be reached from inside the helper sandbox by
   host name alone, or needs its addresses pinned.

@@ -213,8 +213,8 @@ message itself moves onto the helper's model. See
 
 It is off until you turn it on with `/jev on` (`$jev on` in Codex), and `/jev status`
 shows how many messages went to each size and what Jev has cost. While it is on, your
-messages go to OpenRouter, TypeSafe and the model Jev asks, so keep it off for private
-work.
+messages go to OpenRouter and TypeSafe (the company that makes Jev), so keep it off for
+private work.
 
 ```fish
 claude plugin install jev-router@yorrick

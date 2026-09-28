@@ -3,8 +3,9 @@
 Sends each job to the model and thinking level that fit it, which usually means a cheaper
 one. While it is on, every message you type goes to
 [Jev](https://openrouter.ai/typesafe/jev-1.13), TypeSafe's decision model, through
-OpenRouter's Decisions API, with one typed question: what is the smallest model that can do
-this job well? Jev picks one of the sizes below and gives the probability of each.
+OpenRouter's Decisions API, with two typed questions: what is the smallest model that can
+do this job well, and does the message only make sense inside the conversation? Jev picks
+one of the sizes below and gives the probability of each.
 
 | Size | Jobs | Claude Code | Codex | opencode |
 |---|---|---|---|---|
@@ -94,7 +95,7 @@ Codex asks you to trust the plugin's hook the first time it starts after the ins
 - `uv` on the `PATH`. The hook runs `skills/jev/scripts/jev_router.py`, which uses only
   the standard library.
 - State lives in `~/.config/jev-router/`: `config.json` holds the switch, the key file
-  path and `timeout_seconds` (6, and it can only be lowered, because each harness stops
+  path and `timeout_seconds` (2, and it can only be lowered, because each harness stops
   the whole hook at 8 s), and `log.jsonl` holds one line per message.
 - The size table is `skills/jev/scripts/tiers.json`. The Claude Code helpers are
   `agents/*.md`, and a test keeps them in step with the table.

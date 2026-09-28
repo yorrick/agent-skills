@@ -244,7 +244,9 @@ def test_jev_itself_gets_two_typed_questions_and_a_truncated_message(home: Path,
     hook(home, jev, prompt="x" * 10_000)
     [request] = jev.requests
     assert request["model"] == "typesafe/jev-1.13"
-    assert set(request) == {"model", "state", "questions"}
+    assert set(request) == {"model", "state", "questions", "provider"}
+    # The message may reach TypeSafe and no other provider, with no fallback.
+    assert request["provider"] == {"only": ["typesafe"], "allow_fallbacks": False}
     size, follow_up = request["questions"]["size"], request["questions"]["follow_up"]
     assert size["type"] == "choice"
     assert list(size["criteria"]) == ["tiny", "everyday", "large", "hardest"]
@@ -387,11 +389,13 @@ def test_status_counts_an_answered_call_that_reported_no_cost(home: Path, jev: F
     assert "$0.0000 over 1 answered calls, 1 of which reported no cost." in text
 
 
-def test_confidence_just_under_sixty_is_not_rounded_up(home: Path, jev: FakeJev) -> None:
+@pytest.mark.parametrize(("confidence", "shown"), [(59.6, "59.6"), (59.999, "59.999")])
+def test_confidence_just_under_sixty_is_not_rounded_up(home: Path, jev: FakeJev, confidence: float, shown: str) -> None:
     switch_on(home, jev)
-    jev.answer = {"size": "tiny", "confidence": 59.6, "follow_up": False}
-    assert "59.6% sure" in hook(home, jev)
+    jev.answer = {"size": "tiny", "confidence": confidence, "follow_up": False}
+    assert f"{shown}% sure" in hook(home, jev)
     assert log(home)[-1]["outcome"] == "unsure"
+    assert log(home)[-1]["confidence"] == confidence
 
 
 def test_http_errors_are_ignored(home: Path, jev: FakeJev) -> None:

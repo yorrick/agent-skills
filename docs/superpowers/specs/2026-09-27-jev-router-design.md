@@ -164,8 +164,10 @@ harness, and a test enforces it, so a helper's work is still that harness's work
   the helper's model at the helper's thinking level.
   `status` says so rather than claiming the helper did the work.
 - **Privacy.** While the router is on, message text reaches OpenRouter and
-  TypeSafe, and nothing else: every Decisions response names TypeSafe as the
-  provider. `on` and `status` say this.
+  TypeSafe, and nothing else. The request pins the provider to TypeSafe with
+  fallbacks off, so a provider OpenRouter adds later cannot receive it (verified:
+  an unavailable pinned provider gets a 404, not a fallback). `on` and `status`
+  say this.
 
 ## Repository changes
 
@@ -185,6 +187,9 @@ harness, and a test enforces it, so a helper's work is still that harness's work
   follow-ups, each harness's output, status counts, and the helpers matching
   `tiers.json`. Through a node harness it also covers the opencode module
   inside the real entry.
-- Acceptance: ten real messages through `classify`, eight from tiny to hardest
-  plus two follow-ups. Nine were sized as intended and one hit the 6 s cap.
+- Acceptance, 0.2.0: ten real messages through `classify`, eight from tiny to
+  hardest plus two follow-ups. All ten answered in 0.2 to 0.3 s, Jev gave its
+  pick for the eight jobs a 64 to 100% probability, and both follow-ups were
+  caught. (0.1.0,
+  asking the chat router: nine sized as intended, one hit its 6 s cap.)
 - End-to-end runs in each harness with isolated state.

@@ -168,8 +168,13 @@ def read_key(key_file: str | None) -> str | None:
 @dataclass(frozen=True)
 class Verdict:
     size: str
-    confidence: float  # the probability Jev gives its pick, in percent
+    probability: float  # the probability Jev gives its pick, from 0 to 1
     follow_up: bool
+
+    @property
+    def confidence(self) -> float:
+        """The same probability in percent, for people and the log. `:g` shows 0.596 as 59.6."""
+        return self.probability * 100
 
 
 def jev_questions(tiers: tuple[Tier, ...]) -> dict:
@@ -229,13 +234,7 @@ def parse_verdict(body: object, tiers: tuple[Tier, ...]) -> Verdict:
         raise BadAnswer("an answer has the wrong type")
     if size not in {t.size for t in tiers}:
         raise BadAnswer("unknown size")
-    return Verdict(
-        size=size,
-        # Reason: rounded so 0.596 reads 59.6, not 59.599999999999994; never
-        # rounded to a whole number, so 59.6% is still under 60%.
-        confidence=round(probability(picked) * 100, 2),
-        follow_up=probability(follow_up) >= FOLLOW_UP_AT,
-    )
+    return Verdict(size=size, probability=probability(picked), follow_up=probability(follow_up) >= FOLLOW_UP_AT)
 
 
 def cost_of(body: object) -> float | None:
@@ -272,6 +271,10 @@ def ask_jev(message: str, tiers: tuple[Tier, ...], key: str, timeout: float) -> 
             "model": JEV_MODEL,
             "state": {"message": message[:MAX_MESSAGE_CHARS]},
             "questions": jev_questions(tiers),
+            # Reason: the message goes to TypeSafe and nowhere else, even if
+            # OpenRouter adds another provider for Jev later. Verified: OpenRouter
+            # answers 404 rather than fall back when the allowed provider is absent.
+            "provider": {"only": ["typesafe"], "allow_fallbacks": False},
         }
     ).encode()
     request = urllib.request.Request(
@@ -301,7 +304,8 @@ def ask_jev(message: str, tiers: tuple[Tier, ...], key: str, timeout: float) -> 
 
 def decide(verdict: Verdict, tiers: tuple[Tier, ...]) -> Tier | None:
     """The tier to hand the job to, or None when the session should keep it."""
-    if verdict.follow_up or verdict.confidence < MIN_CONFIDENCE:
+    # Reason: compared unrounded, so 0.59999 is still under 60%.
+    if verdict.follow_up or verdict.probability < MIN_CONFIDENCE / 100:
         return None
     return next(t for t in tiers if t.size == verdict.size)
 
@@ -436,12 +440,13 @@ def route(harness: str, stdin: str) -> str:
         event.update(outcome="error", error=error_label(exc))
     event["latency_ms"] = round((time.monotonic() - started) * 1000)
     if body is not None:
-        # Reason: nothing from the response body is logged except its cost; any
-        # string field could carry echoed message text.
+        # Reason: no string from the response is logged: only its cost here, and
+        # below the size and probability of a verdict that passed validation (a
+        # known size name and a number).
         event.update(answered=True, cost=cost_of(body))
     if verdict is not None:
         tier = decide(verdict, tiers)
-        event.update(outcome=outcome_of(verdict, tier), size=verdict.size, confidence=verdict.confidence)
+        event.update(outcome=outcome_of(verdict, tier), size=verdict.size, confidence=round(verdict.confidence, 4))
     record(event)
     return hook_output(harness, tier, verdict) if verdict else ""
 
@@ -557,7 +562,7 @@ def cmd_classify(harness: str, messages: list[str]) -> int:
         took = time.monotonic() - started
         tier = decide(verdict, tiers)
         cost = cost_of(body)
-        event.update(answered=True, size=verdict.size, confidence=verdict.confidence, cost=cost)
+        event.update(answered=True, size=verdict.size, confidence=round(verdict.confidence, 4), cost=cost)
         record(event)
         does = f"hands to {tier.label}" if tier else "keeps it in the session"
         print(

@@ -50,7 +50,7 @@ This script runs it and adds **four rules Splinter does not have**:
 | `R1` | policies covering ALL commands, or applying `TO PUBLIC` |
 | `R2` | RLS tables with no `RESTRICTIVE` policy pinning tenancy |
 | `R4` | delete-and-reinsert defeating a column-level `UPDATE` revoke |
-| `R11` | `TRUNCATE`, which no RLS policy applies to |
+| `R11` | `TRUNCATE`, which no RLS policy applies to, including default privileges that grant it to new tables |
 
 It also sets `pgrst.db_schemas` before running, so Splinter audits every schema PostgREST
 actually exposes. Without that, several of its API-exposure lints silently fall back to

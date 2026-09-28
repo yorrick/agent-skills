@@ -19,7 +19,7 @@ Runs TWO rule sets in one pass:
 2. FOUR RULES SPLINTER DOES NOT HAVE:
 
        R4   delete-and-reinsert defeating a column-level UPDATE revoke
-       R11  TRUNCATE, which no RLS policy applies to
+       R11  TRUNCATE, which no RLS policy applies to, granted or defaulted
        R1   policies covering ALL commands, or applying TO PUBLIC
        R2   RLS tables with no RESTRICTIVE policy pinning tenancy
 
@@ -111,18 +111,57 @@ QUERIES: list[tuple[str, str, str, str]] = [
         "R11-truncate-granted",
         """
         SELECT n.nspname || '.' || c.relname || ' (' || r.rolname || ')',
-               'TRUNCATE granted - NO RLS policy applies to it; this role can wipe '
-                 || 'every tenant''s rows regardless of isolation'
+               CASE WHEN c.relkind = 'f'
+                    THEN 'TRUNCATE granted on a foreign table - no RLS policy applies; this '
+                           || 'role may wipe the remote table if the wrapper allows it '
+                           || '(postgres_fdw: truncatable) and the mapped remote user may truncate it'
+                    ELSE 'TRUNCATE granted - NO RLS policy applies to it; this role can wipe '
+                           || 'every tenant''s rows regardless of isolation'
+               END
           FROM pg_class c
           JOIN pg_namespace n ON n.oid = c.relnamespace
           CROSS JOIN unnest(%(api_roles)s::text[]) AS r(rolname)
-         WHERE c.relkind IN ('r', 'p')
+         WHERE c.relkind IN ('r', 'p', 'f')
            AND n.nspname = ANY(%(schemas)s)
            AND has_table_privilege(r.rolname, c.oid, 'TRUNCATE')
         """,
         # Reason: RLS governs rows; TRUNCATE is a whole-table operation and no
         # policy is consulted. Perfect tenant isolation does not survive it.
+        # Foreign tables ('f') are included, worded conditionally: whether they
+        # can be truncated depends on the wrapper (postgres_fdw: truncatable).
         "The gap RLS cannot cover at all.",
+    ),
+    (
+        "WARN",
+        "R11-truncate-default",
+        """
+        SELECT d.defaclrole::regrole::text || ' defaults in '
+                 || coalesce(n.nspname, 'every schema') || ' (' || r.rolname
+                 || CASE WHEN a.grantee = 0 THEN ' via PUBLIC'
+                         WHEN a.grantee::regrole::text <> r.rolname
+                           THEN ' via ' || a.grantee::regrole::text
+                         ELSE '' END || ')',
+               'default privileges grant TRUNCATE on new tables - every table this role '
+                 || 'creates gets it back, whatever was revoked on the existing ones'
+          FROM pg_default_acl d
+          LEFT JOIN pg_namespace n ON n.oid = d.defaclnamespace
+          CROSS JOIN LATERAL aclexplode(d.defaclacl) AS a
+          CROSS JOIN unnest(%(api_roles)s::text[]) AS r(rolname)
+         WHERE d.defaclobjtype = 'r'
+           AND a.privilege_type = 'TRUNCATE'
+           AND (a.grantee = 0 OR pg_has_role(r.rolname::name, a.grantee, 'USAGE'))
+           AND (d.defaclnamespace = 0 OR n.nspname = ANY(%(schemas)s))
+        """,
+        # Reason: the TRUNCATE grant usually comes from Supabase's default
+        # privileges, not from any migration, so a clean R11 today goes stale
+        # with the next CREATE TABLE. pg_has_role(..., 'USAGE') also catches a
+        # default granted to a group role an API role inherits from, which a
+        # match on the grantee's name would miss. WARN rather than ERROR:
+        # nothing holds the privilege yet. Rows owned by supabase_admin are
+        # reported too, though postgres cannot change them -- they explain why
+        # a new table can still arrive with TRUNCATE, which a CI test on the
+        # grant itself must catch.
+        "Catches the re-grant before the next migration creates a table.",
     ),
     (
         "WARN",

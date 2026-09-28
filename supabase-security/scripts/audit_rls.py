@@ -112,9 +112,9 @@ QUERIES: list[tuple[str, str, str, str]] = [
         """
         SELECT n.nspname || '.' || c.relname || ' (' || r.rolname || ')',
                CASE WHEN c.relkind = 'f'
-                    THEN 'TRUNCATE granted on a foreign table - if its wrapper allows it '
-                           || '(postgres_fdw does unless truncatable is false), this role can '
-                           || 'wipe the remote table, and no RLS policy applies'
+                    THEN 'TRUNCATE granted on a foreign table - no RLS policy applies; this '
+                           || 'role may wipe the remote table if the wrapper allows it '
+                           || '(postgres_fdw: truncatable) and the mapped remote user may truncate it'
                     ELSE 'TRUNCATE granted - NO RLS policy applies to it; this role can wipe '
                            || 'every tenant''s rows regardless of isolation'
                END

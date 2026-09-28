@@ -1,0 +1,33 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "04e5216768ce",
+  "strategy": "manual-commit",
+  "branch": "jev-decisions-api",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "README.md",
+    "docs/superpowers/specs/2026-09-27-jev-router-design.md",
+    "jev-router/README.md",
+    "jev-router/hooks/opencode.js",
+    "jev-router/plugin.toml",
+    "jev-router/skills/jev/SKILL.md",
+    "jev-router/skills/jev/scripts/jev_router.py",
+    "jev-router/skills/jev/scripts/tiers.json",
+    "tests/test_jev_router.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/04/e5216768ce/0/metadata.json",
+      "transcript": "/04/e5216768ce/0/full.jsonl",
+      "content_hash": "/04/e5216768ce/0/content_hash.txt",
+      "prompt": "/04/e5216768ce/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1230,
+    "cache_creation_tokens": 2009381,
+    "cache_read_tokens": 156043323,
+    "output_tokens": 468819,
+    "api_call_count": 515
+  }
+}

@@ -230,11 +230,16 @@ tune the margins, and then a validation phase with the rule frozen, on new jobs 
    authorized for the user's GitHub account, creates it in a private throwaway
    repository made for that fork, with the source's branch protection and required
    check names but GitHub Actions disabled, so no fork-written code runs on GitHub's
-   runners. The runner fetches each check's dependencies beforehand, then reproduces
-   the check itself in an isolated executor with no network access and no credentials
-   at all, and publishes the results as commit statuses on the throwaway pull request.
-   A required check that needs network access or a credential to run counts as a
-   failure. Both forks' pull requests are created and
+   runners. Dependencies are fetched only as locked before the fork (the source's
+   lockfiles at the pre-turn snapshot), by a downloader with no credentials that cannot
+   read fork files and runs no install scripts; a point whose checks need any other
+   dependency fails. The runner then reproduces each check itself in an isolated
+   executor with no network access and no credentials at all, which writes only inside
+   its own copy of the fork's clone and a private temporary directory, and cannot read
+   the user's real checkout, other repositories or credential-bearing setup files
+   (such as `.env` files); a check that needs network access, a credential or such a
+   file fails the point. The results are published as commit statuses on the throwaway
+   pull request. Both forks' pull requests are created and
    verified this way (branch, diff, title, body, required checks) before the point is
    scored, and the repositories are deleted afterwards. Deploys go to stubs
    that record exactly what would be deployed. Any outcome the runner cannot verify

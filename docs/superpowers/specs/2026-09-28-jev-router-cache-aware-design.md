@@ -10,8 +10,9 @@ somewhere else.
 
 Success, measured in the fork experiment (Validation) with a rule frozen beforehand,
 on the jobs the router selects: delegating costs at least 10% less in total than
-keeping; quality does not drop by the criteria fixed in advance; the 95% upper bound on
-the share of working days with a losing job (costlier, worse or overridden) is at most 15%;
+keeping; every delegated result meets the quality criteria fixed in advance; the 95%
+upper bound on the share of working days with a losing job (costlier or overridden)
+is at most 15%;
 delegating is not slower, with a median wall-time ratio (delegate over keep, helpers
 included) of at most 1.0; and no job is more than 1.5 times slower.
 
@@ -282,19 +283,21 @@ tune the margins, and then a validation phase with the rule frozen, on new jobs 
    reviewer is never the harness that did the work: Codex judges Claude Code forks, and
    Claude or DeepSeek judges Codex forks.
 
-A validation point counts as a loss when delegating costs more, fails a quality
-criterion, or is overridden. Every selected job on an enrolled day is tested, so a
+A validation point counts as a loss when delegating costs more or is overridden.
+Quality is not part of that allowance: a delegated result that fails a quality
+criterion fails the whole phase. Every selected job on an enrolled day is tested, so a
 day's outcome is fully observed: it counts as a loss if any of its points is. The
 validation phase is fixed in advance at 30 enrolled working days with at least one
 selected job, taken in enrollment order, and does not stop early or add days. It
 passes only if all of these hold:
 
+- every delegated result meets every quality criterion;
 - at most one day is a loss. Treating enrolled days as independent draws from the
   user's working days, the exact one-sided 95% upper bound on the share of working
   days with a losing delegation is then 14.9%. The claim is about days, the unit
   sampled, and the report states the independence assumption;
 - summed over all points, delegating costs at least 10% less than keeping, so a
-  losing session cannot cancel the savings unnoticed;
+  losing day cannot cancel the savings unnoticed;
 - the median wall-time ratio over all points, delegate over keep, is at most 1.0;
 - no point is more than 1.5 times slower, checked separately on its warm and its cold
   variant before they are combined; a single breach in either fails the phase.

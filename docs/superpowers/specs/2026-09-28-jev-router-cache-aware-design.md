@@ -143,9 +143,10 @@ subagent with a fresh context:
 - **Codex:** `spawn_agent` with the tier's `model` and `reasoning_effort` and
   `fork_turns: "none"`. The default, `all`, copies the whole conversation.
 
-The parent keeps the job only when the work needs the user in the loop, cannot be
-briefed, or needs an MCP server or a live service (the fork check validates code jobs
-only; a later check can widen this). The helper runs with the session's own permissions, like any subagent the user
+The parent delegates only briefable code jobs within the fork check's replay scope
+(reading, editing, tests, local commands, cross-AI reviews). It keeps jobs that need
+the user in the loop, an MCP server, a live service or anything else the replay blocks;
+a later check can widen this. The helper runs with the session's own permissions, like any subagent the user
 already runs. The brief tells it not to commit, push, open pull requests or deploy, and
 to report what is left; the parent reviews the changes and does those steps after the
 relay. When the router does not delegate, it says nothing.

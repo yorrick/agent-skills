@@ -20,6 +20,7 @@ grant, function, view, or trigger. Each line maps to a rule in `SKILL.md`.
 - [ ] `REVOKE` precedes any column `GRANT` — privileges are additive, and a table grant implies every column.
 - [ ] Column `UPDATE` grants are paired with a revoke of `INSERT` **or** `DELETE` — holding both defeats the boundary. (R4)
 - [ ] `TRUNCATE` is not granted to `anon`/`authenticated`. No policy applies to it. (R11)
+- [ ] The default privileges do not grant it either (`alter default privileges ... revoke truncate on tables`), or the next new table gets it back. (R11)
 - [ ] `anon` explicitly revoked where it should not write.
 - [ ] Any admin path does **not** depend on re-granting a column to `authenticated` — that grants it to every user. (R2, "Admins are not a database role")
 

@@ -8,10 +8,12 @@ at the same quality. 0.2.0 cannot do that: it decides once per typed message, ne
 routes a follow-up, and ranks jobs by difficulty. The study below shows the money is
 somewhere else.
 
-Success, measured in the fork experiment (Validation): on the jobs the router selects,
-delegating costs less than keeping, quality does not drop by the criteria fixed in
-advance, and the 95% upper bound on the share of selected jobs where delegating loses
-money or quality is at most 15%.
+Success, measured in the fork experiment (Validation) with a rule frozen beforehand: on
+the jobs the router selects, delegating costs less than keeping; quality does not drop
+by the criteria fixed in advance; the 95% upper bound on the share of selected jobs
+where delegating loses money or quality is at most 15%; and delegating is not slower,
+with a median wall-time ratio (delegate over keep, helpers included) of at most 1.0 and
+no job more than 1.5 times slower.
 
 ## What the study found
 
@@ -53,8 +55,11 @@ the context comparison in point 5 came after that review.
 
 ### Scope
 
-Claude Code and Codex, where a helper is a subagent with its own fresh context.
-opencode is excluded from delegation: its hook moves the message onto another model in
+Claude Code and Codex, where a helper is a subagent with its own fresh context. Claude
+Code can delegate once shadow mode and the fork experiment pass. Codex runs in shadow
+mode only until it has its own labelled, held-out calibration data from its shadow
+logs, because the study's transcripts are all Claude Code. opencode is excluded from
+delegation: its hook moves the message onto another model in
 the same session, which keeps the whole context and so buys none of the fresh-context
 saving. opencode keeps 0.2.0's behaviour until an isolated helper session exists there.
 
@@ -104,9 +109,10 @@ say that the agent's previous reply is sent along with the message.
 
 ### Calibration
 
-Jev's bucket probabilities are not used as they come. A calibration table, fitted on
-the study's labelled turns with half held out for checking, maps Jev's step score to the
-observed distribution of call counts, per harness. The saving is priced over that
+Jev's bucket probabilities are not used as they come. A calibration table maps Jev's
+step score to the observed distribution of call counts, per harness: for Claude Code,
+fitted on the study's labelled turns with half held out for checking; for Codex, fitted
+the same way once its shadow logs hold enough labelled turns. The saving is priced over that
 empirical distribution, not over one representative length per bucket, so the long
 tail (the 31+ bucket averages 93 calls) is priced as it really is. The table ships as a
 data file next to `tiers.json` and is refitted from shadow-mode logs.
@@ -116,9 +122,13 @@ data file next to `tiers.json` and is refitted from shadow-mode logs.
 For the calibrated distribution of the job's length k, the router prices keeping and
 delegating with the study's model, using the session's current context, its model's
 prices and its recent per-call averages, and computes the expected saving
-E[keep(k) - delegate(k)]. It delegates when that is at least $0.25 and at least 15% of
-E[keep(k)]. The margin stands in for what the model leaves out (helper failures,
-re-reading files); the fork experiment sets its final value.
+E[keep(k) - delegate(k)], and the probability that delegating costs more,
+P(delegate(k) > keep(k)). It delegates only when both gates pass: the expected saving is
+at least $0.25 and at least 15% of E[keep(k)], and the probability of losing money is at
+most 20%. The second gate matters because a rare very long job can make the expected
+saving positive while most such jobs lose. The margins stand in for what the model
+leaves out (helper failures, re-reading files); they are tuned on shadow logs and pilot
+forks, then frozen before the validation forks.
 
 The helper is the tier Jev's size picks, inside the same harness (`tiers.json`). The
 saving often comes from the fresh context alone, so a helper on the session's own model
@@ -144,14 +154,19 @@ measure whether a helper does the job well; the fork experiment does.
 
 ## Validation: the fork experiment
 
-It measures what shadow mode cannot: the real cost and quality of delegating a job the
-router selects.
+It measures what shadow mode cannot: the real cost, speed and quality of delegating a
+job the router selects. It runs in two phases: a pilot, whose forks and shadow logs
+tune the margins, and then a validation phase with the rule frozen, on new jobs only.
 
-1. **Sample.** Prospectively, take turns the router selects in real Claude Code and
-   Codex sessions, as they come, including follow-ups and borderline selections.
-2. **Fork.** Fork the session at that point twice (`claude --resume <id>
-   --fork-session`; `codex exec fork <id>`), each fork in its own git worktree at the
-   same commit, so the branches cannot edit each other's files.
+1. **Select before sending.** When the user is about to send a message in a Claude Code
+   session, an experiment command asks the router for its decision on that message
+   without sending it. Only messages the router selects go on, taken as they come,
+   including follow-ups and borderline selections.
+2. **Fork before the turn.** The runner forks the session twice (`claude --resume <id>
+   --fork-session`) before the message is sent anywhere, and checks that both forks'
+   transcripts end at the same entry. It copies the full working state into two
+   worktrees, including uncommitted and untracked files, and checks that both copies
+   hash the same.
 3. **Run.** Send the same message to both. The delegate branch gets the hand-off
    instruction directly, so the result reflects the helper, not Jev's pick. Each side
    runs once; five of the points run three times per side to measure run-to-run
@@ -163,10 +178,10 @@ router selects.
    two results without knowing which branch made them does not prefer the kept one.
 
 A selected point counts as a loss when delegating costs more or fails a quality
-criterion. With no losses among 20 points, the 95% upper bound on the loss rate is
-about 14%, so the success criterion needs at least 20 selected points with no losses,
-or proportionally more if some lose. The margin is then set where delegating wins on
-both cost and quality.
+criterion. With no losses among 20 independent validation points, the 95% upper bound
+on the loss rate is about 14%, so the success criterion needs at least 20 validation
+points with no losses, or proportionally more if some lose. Codex joins the experiment
+once it leaves shadow mode.
 
 ## Out of scope
 

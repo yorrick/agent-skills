@@ -146,22 +146,36 @@ delegate, it says nothing.
 
 The parent hands the brief to `jev-helper`, a command the plugin ships, which runs the
 helper as a separate headless process of the same harness (`claude -p` with the
-helper's model and effort, `JEV_ROUTER=off`) and prints its final report. The helper
-never writes outside the repository, and this is enforced by capabilities, not by
-naming commands: the process runs under an operating-system sandbox (macOS
-`sandbox-exec`, Linux `bwrap`) that allows file writes only inside the worktree and its
-temporary directory, and network connections only to the model provider's API. No
-shell command or script the helper runs can push, open a pull request, deploy or call
-another service, however it is spelled. The brief tells the helper to stop before such
-a step and report what is left; the parent does those steps itself after the relay.
-This holds whatever the message says, so no question about external effects is needed.
+helper's model and effort, `JEV_ROUTER=off`) and prints its final report. The helper's
+boundary is enforced by capabilities, not by naming commands: the process runs under
+an operating-system sandbox (macOS `sandbox-exec`, Linux `bwrap`) with three
+allowlists.
+
+- **Writes:** the worktree's files and a private temporary directory only. Not `.git`:
+  the helper leaves its changes uncommitted, and the parent reviews, commits and pushes
+  them after the relay. (A linked worktree's Git metadata lives outside it, in the main
+  checkout, so letting the helper commit would mean letting it write there.)
+- **Reads:** the worktree, the system and language toolchains it needs, and the
+  harness's own installation and credentials. Not the home directory, other
+  repositories, `~/.ssh`, `~/.config`, the keychain or shell history, so the helper
+  cannot read local secrets and send them out through the model API.
+- **Network and environment:** connections only to the model provider's API, and an
+  environment reduced to an allowlist (`PATH`, `LANG`, a private `HOME`, the harness's
+  own authentication), so exported API keys do not reach it.
+
+No shell command or script the helper runs can push, open a pull request, deploy, call
+another service or read a secret, however it is spelled. The brief tells the helper to
+stop before an external step and report what is left; the parent does those steps
+after the relay. This holds whatever the message says, so no question about external
+effects is needed.
 
 Before any live delegation, a boundary test runs the helper against a fixture that
-tries each kind of escape (writing outside the worktree, `git push`, `curl` to another
-host, a script that does either) and passes only if every attempt fails and in-worktree
-work still succeeds. It runs again whenever the sandbox profile changes. Codex gets the
-same helper runner and boundary test (`codex exec` under the same sandbox) before it
-leaves shadow mode.
+tries each kind of escape (writing outside the worktree or into `.git`, reading
+`~/.ssh` or another repository, reading an exported secret, `git push`, `curl` to
+another host, a script that does any of these) and passes only if every attempt fails
+and in-worktree work still succeeds. It runs again whenever the sandbox profile
+changes. Codex gets the same helper runner and boundary test (`codex exec` under the
+same sandbox) before it leaves shadow mode.
 
 ### Shadow mode
 
@@ -179,26 +193,33 @@ It measures what shadow mode cannot: the real cost, speed and quality of delegat
 job the router selects. It runs in two phases: a pilot, whose forks and shadow logs
 tune the margins, and then a validation phase with the rule frozen, on new jobs only.
 
-1. **Enroll sessions, then test every selected job in them.** During the validation
-   period, each new interactive Claude Code session is enrolled or not by a rule fixed
-   in advance and applied when the session starts, before anything about its jobs is
-   known (the first session of each working day, say, or a fixed probability). In an
-   enrolled session, every message the user is about to send goes first to an
-   experiment command that asks the router for its decision without sending it, and
+1. **Enroll sessions at random, then test every selected job in them.** During the
+   validation period, each new interactive Claude Code session is enrolled with a
+   probability fixed in advance, drawn by the runner when the session starts (seed and
+   draws recorded), before anything about its jobs is known; at most one session is
+   enrolled per calendar day. The population is sessions with at least one selected
+   job. In an enrolled session, every message the user is about to send goes first to
+   an experiment command that asks the router for its decision without sending it, and
    every message the router selects is tested, follow-ups and borderline selections
-   included. The user carries on in the kept fork's session and worktree, so the next
-   selected message is forked from the same state the user actually has.
+   included. The user carries on in the kept fork's session and working copy, so the
+   next selected message is forked from the state the user actually has.
 2. **Fork before the turn.** The runner forks the session twice (`claude --resume <id>
    --fork-session`) before the message is sent anywhere, and checks that both forks'
-   transcripts end at the same entry. It copies the full working state into two
-   worktrees, including uncommitted and untracked files, and checks that both copies
-   hash the same. Each fork runs in an isolated environment that stands in for every
-   external end point: a bare clone as `origin` for pushes, and stub `gh`, deploy and
-   service commands first on `PATH` that record the call and return a realistic
-   success, with all other network access denied. Both forks can therefore finish the
-   job through the same end point, a pull request or deploy included, without either
-   changing what the other sees, and the parent's completion steps after the relay are
-   run and measured. A helper that attempts an external write fails the point.
+   transcripts end at the same entry. Each fork gets a fully independent clone, not a
+   linked worktree, so its Git configuration, objects and remotes are private; the full
+   working state is copied in, including uncommitted and untracked files, and both
+   copies must hash the same. Each fork's `origin` is its own bare clone, and stateful
+   fixtures stand in for the other end points: a local pull-request service that the
+   stub `gh` talks to and that keeps the PR's branch, title and body, and deploy stubs
+   that record exactly what would be deployed. The quality check reads the fixtures'
+   state. A job whose stated outcome the fixtures cannot evaluate (a deploy's live
+   behaviour, say) counts as a validation failure. Each process in a fork has its own
+   egress allowlist: the parent and its helpers reach only their model API, a cross-AI
+   reviewer only its own model API, and nothing reaches any other host. A helper that
+   attempts an external write fails the point.
+   Once a point is scored, the kept fork's recorded external steps are carried out for
+   real (the push, the pull request) and checked against what the fixtures recorded,
+   before the user carries on from it.
 3. **Run.** Both forks run with `JEV_ROUTER=off`, so the router never fires inside the
    experiment. The same message goes to both; the delegate fork also gets exactly the
    hand-off text the live router would add. The runner checks in its transcript that the
@@ -217,9 +238,12 @@ tune the margins, and then a validation phase with the rule frozen, on new jobs 
    recorded a cache read covering the shared prefix (within 1%), and repeats the
    warm-up and the fork if it did not, so both forks start from a verified warm cache.
    Live turns that start cold (a session idle past the cache lifetime) are represented
-   through shadow mode: its logs give the share of selected turns that start cold, and
-   the report adds, for that share, the cost of re-caching the prefix, which falls on
-   the parent's first call in both forks.
+   through shadow mode, whose logs record which selected turns started cold, with their
+   prefix size and model. The report prices a cold variant of each point by replacing,
+   in both forks' first parent call, the prefix's cache-read charge with its
+   cache-write charge (not adding to it), and adds the cold first-call latency measured
+   in shadow logs for the same model and a similar prefix size to both forks. Warm and
+   cold results are reported separately and combined by the observed cold share.
 5. **Judge** quality by criteria fixed before any run: the project's tests pass where
    they exist, the job's stated outcome is met, and a blind review comparing the two
    results without knowing which fork made them does not prefer the kept one. The blind
@@ -234,7 +258,10 @@ job, taken in enrollment order, and does not stop early or add sessions. It pass
 if all of these hold:
 
 - at most one session is a loss (the exact one-sided 95% upper bound on the session
-  loss rate is then 14.9%);
+  loss rate is then 14.9%). This bound assumes enrolled sessions are independent draws
+  from the user's working sessions; random enrollment, fixed before a session's jobs
+  are known, and at most one session per day are what make that assumption
+  defensible, and the report states it;
 - summed over all points, delegating costs at least 10% less than keeping, so a
   losing session cannot cancel the savings unnoticed;
 - the median wall-time ratio over all points, delegate over keep, is at most 1.0;

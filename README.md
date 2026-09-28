@@ -197,12 +197,14 @@ codex plugin add visual-design-review@yorrick
 
 Sends each job to the model and thinking level that fit it, which usually means a
 cheaper one. While it is on, every message you type goes to
-[Jev](https://openrouter.ai/typesafe/jev-router) on OpenRouter with one question: what
-is the smallest model that can do this job well? When Jev is at least 60% sure, the job
+[Jev](https://openrouter.ai/typesafe/jev-1.13), TypeSafe's decision model, on OpenRouter
+with two typed questions: what is the smallest model that can do this job well, and does
+the message only make sense inside the conversation? When Jev gives its pick at least a 60%
+probability, and the message is not such a follow-up, the job
 goes to a helper on that size's model and thinking level, which signs off with
 `Done by <model> at <level> thinking`. It only routes inside the harness you are in,
 never touches headless runs such as `claude -p` reviews, and never blocks a message: if
-Jev is slow (over 6 s) or anything fails, the message goes through as if the router were
+Jev is slow (over 2 s) or anything fails, the message goes through as if the router were
 not there.
 
 Claude Code and Codex cannot switch the main model per message, so there the main model
@@ -212,8 +214,8 @@ message itself moves onto the helper's model. See
 
 It is off until you turn it on with `/jev on` (`$jev on` in Codex), and `/jev status`
 shows how many messages went to each size and what Jev has cost. While it is on, your
-messages go to OpenRouter, TypeSafe and the model Jev asks, so keep it off for private
-work.
+messages go to OpenRouter and TypeSafe (the company that makes Jev), so keep it off for
+private work.
 
 ```fish
 claude plugin install jev-router@yorrick

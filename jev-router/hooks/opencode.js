@@ -22,7 +22,7 @@ import { fileURLToPath } from 'node:url';
 const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const scripts = path.join(pluginRoot, 'skills', 'jev', 'scripts');
 const ROUTER = ['uv', 'run', '--quiet', '--script', path.join(scripts, 'jev_router.py'), 'hook', 'opencode'];
-// Reason: the script abandons Jev at 6 s; this caps the whole decision (uv
+// Reason: the script abandons Jev at 2 s; this caps the whole decision (uv
 // startup, logging and opencode's own client calls included) at the same 8 s the
 // other harnesses' hook configs allow.
 const HARD_LIMIT_MS = 8_000;

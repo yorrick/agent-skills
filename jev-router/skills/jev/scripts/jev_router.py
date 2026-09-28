@@ -32,10 +32,20 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-API_URL = os.environ.get("JEV_ROUTER_API_URL", "https://openrouter.ai/api/v1/chat/completions")
-JEV_MODEL = "typesafe/jev-router"
+# Reason: Jev itself, through OpenRouter's Decisions API. Not `typesafe/jev-router`,
+# OpenRouter's chat router built on Jev: that one forwards the prompt to whichever
+# chat model it picks and returns that model's text, so it took about 3 s and
+# failed with upstream 502/504s, and its "confidence" was that model's own guess.
+# Jev answers a typed question with real probabilities in about 0.3 s.
+API_URL = os.environ.get("JEV_ROUTER_API_URL", "https://openrouter.ai/api/alpha/decisions")
+# Pinned, not `~typesafe/jev-latest`: the 60% threshold is tuned against one version.
+JEV_MODEL = "typesafe/jev-1.13"
 MIN_CONFIDENCE = 60
-DEFAULT_TIMEOUT_SECONDS = 6.0
+# Reason: a follow-up is "more likely than not" a reply that needs the conversation.
+FOLLOW_UP_AT = 0.5
+# Reason: Jev answered in 0.16-0.5 s across 24 probe calls; anything slower is an
+# outage, and the message should not wait on it.
+DEFAULT_TIMEOUT_SECONDS = 2.0
 # Reason: Jev only needs the gist to size a job; a long paste would cost more and
 # answer slower without changing the verdict.
 MAX_MESSAGE_CHARS = 4000
@@ -91,9 +101,8 @@ def load_tiers() -> tuple[dict[str, str], dict[str, tuple[Tier, ...]]]:
 JOBS, TIERS = load_tiers()
 
 PRIVACY = (
-    "While it is on, the text of every message you send also goes to OpenRouter, to TypeSafe "
-    "(the company that makes Jev), and to whichever model Jev picks to answer its sizing "
-    "question. Keep it off for private work."
+    "While it is on, the text of every message you send also goes to OpenRouter and to TypeSafe "
+    "(the company that makes Jev). Keep it off for private work."
 )
 
 
@@ -159,31 +168,50 @@ def read_key(key_file: str | None) -> str | None:
 @dataclass(frozen=True)
 class Verdict:
     size: str
-    confidence: float
+    probability: float  # the probability Jev gives its pick, from 0 to 1
     follow_up: bool
 
+    @property
+    def confidence(self) -> float:
+        """The same probability in percent, unrounded, for the log."""
+        return self.probability * 100
 
-def jev_instructions(tiers: tuple[Tier, ...]) -> str:
-    sizes = "\n".join(f"- {t.size}: {t.jobs}" for t in tiers)
-    choices = " | ".join(f'"{t.size}"' for t in tiers)
-    return (
-        "You size jobs for a model router. Answer one question: what is the SMALLEST model size "
-        "that can do this job well?\n\n"
-        f"Sizes, smallest first:\n{sizes}\n\n"
-        "Also set follow_up to true when the message is a short reply that only makes sense inside "
-        'an ongoing conversation (for example "yes do that but make it shorter"), because you cannot '
-        "see that conversation.\n\n"
-        "Reply with one JSON object and nothing else:\n"
-        f'{{"size": {choices}, "confidence": <integer 0-100, how sure you are of the size>, '
-        '"follow_up": true | false}'
-    )
+    @property
+    def sure(self) -> str:
+        """The percentage as people read it: 0.596 shows as 59.6. A probability
+        under 60% never shows as 60, since it is kept for being under 60%."""
+        text = f"{self.confidence:g}"
+        if self.probability < MIN_CONFIDENCE / 100 <= float(text) / 100:
+            return f"just under {MIN_CONFIDENCE}"
+        return text
+
+
+def jev_questions(tiers: tuple[Tier, ...]) -> dict:
+    """The two typed questions Jev answers about each message, in one call."""
+    return {
+        "size": {
+            "type": "choice",
+            "instructions": "What is the smallest AI model size that can do the job in this message well?",
+            "criteria": {t.size: t.jobs for t in tiers},
+        },
+        "follow_up": {
+            "type": "noul",
+            "instructions": "Does this message only make sense as a reply inside an ongoing conversation?",
+            "criteria": {
+                "true": "It is a short reply that refers to earlier messages, like 'yes do that but make it "
+                "shorter' or 'retry'.",
+                "false": "It is a request that someone who has not seen the conversation could act on.",
+            },
+        },
+    }
 
 
 class BadAnswer(ValueError):
     """Jev answered, but not with a usable verdict.
 
-    The messages are fixed strings on purpose: Jev's text can echo the user's
-    message, and whatever an error says ends up in the log.
+    The messages are fixed strings on purpose: whatever an error says ends up in
+    the log, and the log keeps no string from a response. From a response it keeps
+    only the cost and, once validated, a known size name and a probability.
     """
 
 
@@ -191,21 +219,32 @@ class NoKey(RuntimeError):
     pass
 
 
-def parse_verdict(body: dict, tiers: tuple[Tier, ...]) -> Verdict:
-    """Accept only a complete verdict; anything doubtful means "carry on"."""
+def probability(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float) or not 0 <= value <= 1:
+        raise BadAnswer("a probability is not a number from 0 to 1")
+    return float(value)
+
+
+def parse_verdict(body: object, tiers: tuple[Tier, ...]) -> Verdict:
+    """Accept only a complete verdict; anything doubtful means "carry on".
+
+    How sure Jev is of a size is the probability it gives that size. Jev's own
+    `confidence` field is something else: how concentrated the whole
+    distribution is, rescaled so that an even split reads 0.
+    """
     try:
-        content = body["choices"][0]["message"]["content"]
-        answer = json.loads(re.search(r"\{.*\}", content, re.S).group(0))  # type: ignore[union-attr]
-    except (KeyError, IndexError, TypeError, AttributeError, json.JSONDecodeError):
-        raise BadAnswer("no JSON verdict") from None
-    size, confidence, follow_up = answer.get("size"), answer.get("confidence"), answer.get("follow_up")
+        size_answer = body["answers"]["size"]  # type: ignore[index]
+        follow_answer = body["answers"]["follow_up"]  # type: ignore[index]
+        size = size_answer["choice"]
+        picked = size_answer["probabilities"][size]
+        follow_up = follow_answer["noul"]
+    except (KeyError, IndexError, TypeError):
+        raise BadAnswer("no size or follow-up answer") from None
+    if size_answer.get("type") != "choice" or follow_answer.get("type") != "noul":
+        raise BadAnswer("an answer has the wrong type")
     if size not in {t.size for t in tiers}:
         raise BadAnswer("unknown size")
-    if isinstance(confidence, bool) or not isinstance(confidence, int | float) or not 0 <= confidence <= 100:
-        raise BadAnswer("confidence is not a number from 0 to 100")
-    if not isinstance(follow_up, bool):
-        raise BadAnswer("follow_up is not true or false")
-    return Verdict(size=size, confidence=confidence, follow_up=follow_up)
+    return Verdict(size=size, probability=probability(picked), follow_up=probability(follow_up) >= FOLLOW_UP_AT)
 
 
 def cost_of(body: object) -> float | None:
@@ -240,11 +279,12 @@ def ask_jev(message: str, tiers: tuple[Tier, ...], key: str, timeout: float) -> 
     body = json.dumps(
         {
             "model": JEV_MODEL,
-            "messages": [
-                {"role": "system", "content": jev_instructions(tiers)},
-                {"role": "user", "content": message[:MAX_MESSAGE_CHARS]},
-            ],
-            "usage": {"include": True},
+            "state": {"message": message[:MAX_MESSAGE_CHARS]},
+            "questions": jev_questions(tiers),
+            # Reason: the message goes to TypeSafe and nowhere else, even if
+            # OpenRouter adds another provider for Jev later. Verified: OpenRouter
+            # answers 404 rather than fall back when the allowed provider is absent.
+            "provider": {"only": ["typesafe"], "allow_fallbacks": False},
         }
     ).encode()
     request = urllib.request.Request(
@@ -274,7 +314,8 @@ def ask_jev(message: str, tiers: tuple[Tier, ...], key: str, timeout: float) -> 
 
 def decide(verdict: Verdict, tiers: tuple[Tier, ...]) -> Tier | None:
     """The tier to hand the job to, or None when the session should keep it."""
-    if verdict.follow_up or verdict.confidence < MIN_CONFIDENCE:
+    # Reason: compared unrounded, so 0.59999 is still under 60%.
+    if verdict.follow_up or verdict.probability < MIN_CONFIDENCE / 100:
         return None
     return next(t for t in tiers if t.size == verdict.size)
 
@@ -289,7 +330,7 @@ def outcome_of(verdict: Verdict, tier: Tier | None) -> str:
 
 
 def handoff(harness: str, tier: Tier, verdict: Verdict) -> str:
-    sized = f"Jev router: Jev's size for this message is {tier.size} ({verdict.confidence:g}% sure)."
+    sized = f"Jev router: Jev's size for this message is {tier.size} ({verdict.sure}% sure)."
     sign_off = f"Done by {tier.label}"
     # Reason: neither hook can see the session's thinking level, but the model can
     # (verified for Claude, including after a mid-session /effort). An earlier
@@ -330,7 +371,7 @@ def keep_note(verdict: Verdict) -> str:
     why = (
         "it is a follow-up reply that needs this conversation"
         if verdict.follow_up
-        else f"Jev is only {verdict.confidence:g}% sure of its size"
+        else f"Jev is only {verdict.sure}% sure of its size"
     )
     # Reason: the note is about Jev's hand-off and the sign-off only; it must not
     # override what the user asked for (e.g. "yes, ask an agent to review it").
@@ -409,8 +450,9 @@ def route(harness: str, stdin: str) -> str:
         event.update(outcome="error", error=error_label(exc))
     event["latency_ms"] = round((time.monotonic() - started) * 1000)
     if body is not None:
-        # Reason: nothing from the response body is logged except its cost; any
-        # string field could carry echoed message text.
+        # Reason: no string from the response is logged: only its cost here, and
+        # below the size and probability of a verdict that passed validation (a
+        # known size name and a number).
         event.update(answered=True, cost=cost_of(body))
     if verdict is not None:
         tier = decide(verdict, tiers)
@@ -534,7 +576,7 @@ def cmd_classify(harness: str, messages: list[str]) -> int:
         record(event)
         does = f"hands to {tier.label}" if tier else "keeps it in the session"
         print(
-            f"| {n} | {message} | {verdict.size} | {verdict.confidence:g}% | "
+            f"| {n} | {message} | {verdict.size} | {verdict.sure}% | "
             f"{'yes' if verdict.follow_up else 'no'} | {does} | {took:.1f}s | "
             f"{f'${cost:.5f}' if cost is not None else '?'} |"
         )

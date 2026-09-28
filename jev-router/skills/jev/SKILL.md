@@ -18,7 +18,7 @@ Show the user the script's output as it is. It already carries the privacy remin
 
 ## What the router does
 
-One switch, in `~/.config/jev-router/`, covers Claude Code, Codex and opencode. While it is on, each message the user types is sent to Jev with one question: what is the smallest model that can do this job well? Each size maps to a model and a thinking level inside the same harness (the table is `scripts/tiers.json`). When Jev is at least 60% sure, and the message is not a short reply that only makes sense inside the conversation, the job goes to the helper for that size, and the reply ends with a line such as `Done by Claude Opus 5.5 at low thinking`. Headless runs (`claude -p`, `codex exec`, `opencode run`) are never routed. If Jev is slow (over 6 seconds) or anything fails, the message goes through as if the router were not there.
+One switch, in `~/.config/jev-router/`, covers Claude Code, Codex and opencode. While it is on, each message the user types is sent to Jev with two typed questions: what is the smallest model that can do this job well, and does the message only make sense inside the conversation? Each size maps to a model and a thinking level inside the same harness (the table is `scripts/tiers.json`). When Jev gives its pick at least a 60% probability, and the message is not a short reply that only makes sense inside the conversation, the job goes to the helper for that size, and the reply ends with a line such as `Done by Claude Opus 5.5 at low thinking`. Headless runs (`claude -p`, `codex exec`, `opencode run`) are never routed. If Jev is slow (over 2 seconds) or anything fails, the message goes through as if the router were not there.
 
 | Harness | How a job reaches its model and thinking level |
 |---|---|

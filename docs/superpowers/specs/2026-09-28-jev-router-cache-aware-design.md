@@ -103,10 +103,7 @@ One Decisions API call, provider pinned to TypeSafe, 2 s deadline, with the mess
 (capped at 4,000 characters) and the previous reply as state:
 
 - `steps`, a Score over five buckets (1, 2-3, 4-10, 11-30, 31+ calls), as in the study;
-- `size`, the existing Choice, now used only to pick the helper's model and effort;
-- `external`, a Noul: will the job change anything outside the repository (push, open
-  a pull request, deploy, write to an external service)? Such jobs are not delegated in
-  this version, because the fork experiment cannot validate them (Validation, step 2).
+- `size`, the existing Choice, now used only to pick the helper's model and effort.
 
 The follow-up question is dropped. The privacy notice in `on` and `status` changes to
 say that the agent's previous reply is sent along with the message.
@@ -142,7 +139,12 @@ and effort is a valid choice, and matching models is no reason to keep a job.
 
 When the router delegates: the job, why (expected saving, context size, predicted
 length) and the helper to use. The parent writes a self-contained brief: the goal, the
-files and decisions that matter, and what done looks like. It keeps the job only when
+files and decisions that matter, and what done looks like. Helpers never write outside
+the repository: the brief tells the helper to stop before any push, pull request,
+deploy or write to an external service and report what is left, and the parent does
+those steps itself after the relay. This holds whatever the message says, so no
+question about external effects is needed, and it is what the fork experiment
+validates. It keeps the job only when
 the work needs the user in the loop or cannot be briefed. When the router does not
 delegate, it says nothing.
 
@@ -166,30 +168,37 @@ tune the margins, and then a validation phase with the rule frozen, on new jobs 
    session, an experiment command asks the router for its decision on that message
    without sending it. Only messages the router selects go on, taken as they come,
    including follow-ups and borderline selections. The sampling unit is one selected
-   message; at most two come from the same session.
+   message, and each validation point comes from a different session, so outcomes are
+   independent.
 2. **Fork before the turn.** The runner forks the session twice (`claude --resume <id>
    --fork-session`) before the message is sent anywhere, and checks that both forks'
    transcripts end at the same entry. It copies the full working state into two
    worktrees, including uncommitted and untracked files, and checks that both copies
    hash the same. Both forks run with pushes, pull requests, deploys and other writes
-   outside the repository denied, so neither can change what the other sees.
+   outside the repository denied, and both are told to stop before such steps, so the
+   two forks do the same local work and neither can change what the other sees. A
+   helper that tries such a write fails the point.
 3. **Run.** Both forks run with `JEV_ROUTER=off`, so the router never fires inside the
-   experiment. The same message goes to both; only the delegate fork also gets a
-   mandatory hand-off naming the helper. The runner checks in its transcript that the
-   named helper actually ran. If the parent keeps the job anyway, the point is re-run
-   once; a second refusal is recorded as an override and reported separately. The two
-   forks run one after the other, in random order. Each side runs once; five points
-   run three times per side to measure run-to-run variance.
-4. **Measure** from the transcripts, helpers included: API-equivalent cost, wall time,
-   calls. Because the forks share a prompt-cache prefix, whichever runs second would
-   read it cheaper; the parent's first call is therefore priced as a cache read in both
-   forks, as it would be in a live session.
+   experiment. The same message goes to both; the delegate fork also gets exactly the
+   hand-off text the live router would add. The runner checks in its transcript that the
+   named helper ran; if the parent kept the job, that is an override, and it counts as a
+   loss (retries are for the pilot only). The two forks run one after the other, in
+   random order. Each side runs once; for five points both sides run twice more to
+   measure run-to-run variance, and the first run is the one scored.
+4. **Measure** API-equivalent cost, wall time and calls from the transcripts, helpers
+   included, plus any cross-AI review the work triggers (its CLI session logs, matched
+   by the fork's worktree path). Costs are priced from token counts, not from what was
+   billed: the shared pre-fork transcript at the cache-read price and every new token
+   (the message, the hand-off, everything after) at the cache-write price, so which
+   fork ran first, or whether the cache had expired, cannot change the comparison.
 5. **Judge** quality by criteria fixed before any run: the project's tests pass where
-   they exist, the job's stated outcome is met, and a blind Codex review comparing the
-   two results without knowing which branch made them does not prefer the kept one.
+   they exist, the job's stated outcome is met, and a blind review comparing the two
+   results without knowing which fork made them does not prefer the kept one. The blind
+   reviewer is never the harness that did the work: Codex judges Claude Code forks, and
+   Claude or DeepSeek judges Codex forks.
 
-A validation point counts as a loss when delegating costs more or fails a quality
-criterion. The validation phase is fixed in advance at 30 points and passes with at
+A validation point counts as a loss when delegating costs more, fails a quality
+criterion, or is overridden. The validation phase is fixed in advance at 30 points and passes with at
 most one loss: the exact one-sided 95% upper bound on the loss rate is then 14.9%. It
 does not stop early or add points.
 

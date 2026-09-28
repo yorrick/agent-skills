@@ -10,10 +10,10 @@ somewhere else.
 
 Success, measured in the fork experiment (Validation) with a rule frozen beforehand: on
 the jobs the router selects, delegating costs less than keeping; quality does not drop
-by the criteria fixed in advance; the 95% upper bound on the share of selected jobs
-where delegating loses money or quality is at most 15%; and delegating is not slower,
-with a median wall-time ratio (delegate over keep, helpers included) of at most 1.0 and
-no job more than 1.5 times slower.
+by the criteria fixed in advance; the 95% upper bound on the share of sessions with a
+losing job (costlier, worse, overridden, or more than 1.5 times slower) is at most 15%;
+and delegating is not slower, with a median wall-time ratio (delegate over keep,
+helpers included) of at most 1.0.
 
 ## What the study found
 
@@ -140,11 +140,13 @@ and effort is a valid choice, and matching models is no reason to keep a job.
 When the router delegates: the job, why (expected saving, context size, predicted
 length) and the helper to use. The parent writes a self-contained brief: the goal, the
 files and decisions that matter, and what done looks like. Helpers never write outside
-the repository: the brief tells the helper to stop before any push, pull request,
-deploy or write to an external service and report what is left, and the parent does
-those steps itself after the relay. This holds whatever the message says, so no
-question about external effects is needed, and it is what the fork experiment
-validates. It keeps the job only when
+the repository, and this is enforced, not only asked: the Claude Code helper agents
+list pushes, pull-request and merge commands, deploys and other external writes in
+their `disallowedTools`, and the brief tells the helper to stop before such a step and
+report what is left. The parent does those steps itself after the relay. (Codex
+helpers get the same boundary before Codex leaves shadow mode; how to enforce it there
+is an open question.) This holds whatever the message says, so no question about
+external effects is needed. It keeps the job only when
 the work needs the user in the loop or cannot be briefed. When the router does not
 delegate, it says nothing.
 
@@ -167,30 +169,38 @@ tune the margins, and then a validation phase with the rule frozen, on new jobs 
 1. **Select before sending.** When the user is about to send a message in a Claude Code
    session, an experiment command asks the router for its decision on that message
    without sending it. Only messages the router selects go on, taken as they come,
-   including follow-ups and borderline selections. The sampling unit is one selected
-   message, and each validation point comes from a different session, so outcomes are
-   independent.
+   including follow-ups and borderline selections. During the validation period each
+   selected message is taken with a fixed probability set in advance, so sessions with
+   many selected follow-ups contribute in proportion; one session may give several
+   points.
 2. **Fork before the turn.** The runner forks the session twice (`claude --resume <id>
    --fork-session`) before the message is sent anywhere, and checks that both forks'
    transcripts end at the same entry. It copies the full working state into two
    worktrees, including uncommitted and untracked files, and checks that both copies
-   hash the same. Both forks run with pushes, pull requests, deploys and other writes
-   outside the repository denied, and both are told to stop before such steps, so the
-   two forks do the same local work and neither can change what the other sees. A
-   helper that tries such a write fails the point.
+   hash the same. Each fork gets its own throwaway remote (a bare clone standing in for
+   `origin`) and has every other external write denied, so both forks can finish the
+   job through the same end point, a push or a pull request included, without either
+   changing what the other sees. The parent's completion steps after the relay are
+   therefore run and measured. A helper that attempts an external write fails the point.
 3. **Run.** Both forks run with `JEV_ROUTER=off`, so the router never fires inside the
    experiment. The same message goes to both; the delegate fork also gets exactly the
    hand-off text the live router would add. The runner checks in its transcript that the
    named helper ran; if the parent kept the job, that is an override, and it counts as a
    loss (retries are for the pilot only). The two forks run one after the other, in
    random order. Each side runs once; for five points both sides run twice more to
-   measure run-to-run variance, and the first run is the one scored.
+   measure run-to-run variance, each repeat in a fresh fork restored from the same
+   pre-turn snapshot (transcript and working state), and the first run is the one
+   scored.
 4. **Measure** API-equivalent cost, wall time and calls from the transcripts, helpers
    included, plus any cross-AI review the work triggers (its CLI session logs, matched
-   by the fork's worktree path). Costs are priced from token counts, not from what was
-   billed: the shared pre-fork transcript at the cache-read price and every new token
-   (the message, the hand-off, everything after) at the cache-write price, so which
-   fork ran first, or whether the cache had expired, cannot change the comparison.
+   by the fork's worktree path). Costs are priced per call from token counts under one
+   cache-state rule for both forks: in each fork's first parent call, the shared
+   pre-fork transcript is priced as a cache read (as in a live session, whose cache is
+   warm when the user types), whichever fork actually ran first. Everything else is
+   priced by its recorded category: cache reads, cache writes and uncached input at
+   their prices, and output at the output price. Wall time is measured the same way for
+   both: each fork's first call starts after a warm-up request that fills the cache
+   with the shared prefix.
 5. **Judge** quality by criteria fixed before any run: the project's tests pass where
    they exist, the job's stated outcome is met, and a blind review comparing the two
    results without knowing which fork made them does not prefer the kept one. The blind
@@ -198,9 +208,13 @@ tune the margins, and then a validation phase with the rule frozen, on new jobs 
    Claude or DeepSeek judges Codex forks.
 
 A validation point counts as a loss when delegating costs more, fails a quality
-criterion, or is overridden. The validation phase is fixed in advance at 30 points and passes with at
-most one loss: the exact one-sided 95% upper bound on the loss rate is then 14.9%. It
-does not stop early or add points.
+criterion, is overridden, or takes more than 1.5 times as long as keeping. Because
+points from one session can be correlated, the bound is computed on sessions: a
+session counts as a loss if any of its points is. The validation phase is fixed in
+advance at 30 sessions and passes only if at most one session is a loss (the exact
+one-sided 95% upper bound on the session loss rate is then 14.9%) and the median
+wall-time ratio over all points, delegate over keep, is at most 1.0. It does not stop
+early or add sessions.
 
 ## Out of scope
 
@@ -211,5 +225,7 @@ orchestrator, and delegation in opencode.
 ## Open questions
 
 - How often the parent overrides a delegation, and whether that needs its own rule.
-- Whether Codex's calibration needs its own study, since the transcripts studied are
-  Claude Code only.
+- How to enforce the helpers' no-external-write boundary in Codex, whose `spawn_agent`
+  helpers share the parent's sandbox.
+- The validation period's sampling probability, set from shadow-mode selection rates
+  so that 30 sessions arrive in a reasonable time.

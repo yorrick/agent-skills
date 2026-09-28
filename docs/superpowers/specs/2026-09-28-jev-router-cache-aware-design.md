@@ -157,22 +157,26 @@ allowlists.
   checkout, so letting the helper commit would mean letting it write there.)
 - **Reads:** the worktree, the system and language toolchains it needs, and the
   harness's own installation and credentials. Not the home directory, other
-  repositories, `~/.ssh`, `~/.config`, the keychain or shell history, so the helper
-  cannot read local secrets and send them out through the model API.
+  repositories, `~/.ssh`, `~/.config`, other keychain items or shell history. This does
+  not make the helper unable to see secrets: like the parent session, it can read any
+  secret inside the worktree, and it runs with the harness's own credentials, and like
+  the parent it sends what it reads to the same model provider. The helper's
+  confidentiality boundary is therefore the parent's, no wider; the sandbox's purpose
+  is that nothing reaches any other host and nothing is written outside the worktree.
 - **Network and environment:** connections only to the model provider's API, and an
   environment reduced to an allowlist (`PATH`, `LANG`, a private `HOME`, the harness's
   own authentication), so exported API keys do not reach it.
 
 No shell command or script the helper runs can push, open a pull request, deploy, call
-another service or read a secret, however it is spelled. The brief tells the helper to
+another service, or read files outside its read allowlist, however it is spelled. The brief tells the helper to
 stop before an external step and report what is left; the parent does those steps
 after the relay. This holds whatever the message says, so no question about external
 effects is needed.
 
 Before any live delegation, a boundary test runs the helper against a fixture that
 tries each kind of escape (writing outside the worktree or into `.git`, reading
-`~/.ssh` or another repository, reading an exported secret, `git push`, `curl` to
-another host, a script that does any of these) and passes only if every attempt fails
+`~/.ssh` or another repository, reading an exported environment secret, `git push`,
+`curl` to another host, a script that does any of these) and passes only if every attempt fails
 and in-worktree work still succeeds. It runs again whenever the sandbox profile
 changes. Codex gets the same helper runner and boundary test (`codex exec` under the
 same sandbox) before it leaves shadow mode.
@@ -195,31 +199,36 @@ tune the margins, and then a validation phase with the rule frozen, on new jobs 
 
 1. **Enroll sessions at random, then test every selected job in them.** During the
    validation period, each new interactive Claude Code session is enrolled with a
-   probability fixed in advance, drawn by the runner when the session starts (seed and
-   draws recorded), before anything about its jobs is known; at most one session is
-   enrolled per calendar day. The population is sessions with at least one selected
-   job. In an enrolled session, every message the user is about to send goes first to
-   an experiment command that asks the router for its decision without sending it, and
-   every message the router selects is tested, follow-ups and borderline selections
-   included. The user carries on in the kept fork's session and working copy, so the
-   next selected message is forked from the state the user actually has.
+   probability fixed in advance, drawn independently by the runner when the session
+   starts (seed and draws recorded), before anything about its jobs is known. The
+   population is sessions with at least one selected job. In an enrolled session,
+   every message the user is about to send goes first to an experiment command that
+   asks the router for its decision without sending it, and every message the router
+   selects is tested, follow-ups and borderline selections included. It is declared in
+   advance that the user always carries on in the control (kept) fork's session and
+   working copy, so each selected job is tested from the state the user actually has.
+   The experiment therefore validates delegation job by job; it makes no claim about
+   effects that compound across a run in which every job is delegated.
 2. **Fork before the turn.** The runner forks the session twice (`claude --resume <id>
    --fork-session`) before the message is sent anywhere, and checks that both forks'
    transcripts end at the same entry. Each fork gets a fully independent clone, not a
-   linked worktree, so its Git configuration, objects and remotes are private; the full
-   working state is copied in, including uncommitted and untracked files, and both
-   copies must hash the same. Each fork's `origin` is its own bare clone, and stateful
-   fixtures stand in for the other end points: a local pull-request service that the
-   stub `gh` talks to and that keeps the PR's branch, title and body, and deploy stubs
-   that record exactly what would be deployed. The quality check reads the fixtures'
-   state. A job whose stated outcome the fixtures cannot evaluate (a deploy's live
-   behaviour, say) counts as a validation failure. Each process in a fork has its own
+   linked worktree, so its Git configuration, objects and remotes are private. Each
+   fork is checked against the source, not only against the other fork: the same
+   HEAD, the same staged index, the same contents for every tracked, untracked and
+   ignored file the project's setup needs (its declared build and test inputs, such as
+   `.env.example`-derived files or installed dependencies). Each fork's `origin` is its
+   own bare clone. A pull request goes to a real throwaway GitHub repository created
+   for that fork and deleted after scoring, so both forks' pull requests are real and
+   are verified (branch, diff, title, body, checks) before the point is scored. Deploys
+   go to stubs that record exactly what would be deployed; a job whose stated outcome
+   depends on a deploy's live behaviour cannot be verified and counts as a validation
+   failure. Each process in a fork has its own
    egress allowlist: the parent and its helpers reach only their model API, a cross-AI
    reviewer only its own model API, and nothing reaches any other host. A helper that
    attempts an external write fails the point.
-   Once a point is scored, the kept fork's recorded external steps are carried out for
-   real (the push, the pull request) and checked against what the fixtures recorded,
-   before the user carries on from it.
+   Once a point is scored, the control fork's external steps are carried out against the
+   user's real remote (the push, the pull request) and checked against what its
+   throwaway repository received, before the user carries on from it.
 3. **Run.** Both forks run with `JEV_ROUTER=off`, so the router never fires inside the
    experiment. The same message goes to both; the delegate fork also gets exactly the
    hand-off text the live router would add. The runner checks in its transcript that the
@@ -241,9 +250,10 @@ tune the margins, and then a validation phase with the rule frozen, on new jobs 
    through shadow mode, whose logs record which selected turns started cold, with their
    prefix size and model. The report prices a cold variant of each point by replacing,
    in both forks' first parent call, the prefix's cache-read charge with its
-   cache-write charge (not adding to it), and adds the cold first-call latency measured
-   in shadow logs for the same model and a similar prefix size to both forks. Warm and
-   cold results are reported separately and combined by the observed cold share.
+   cache-write charge (not adding to it), and adds to both forks the difference between
+   cold and warm first-call latency measured in shadow logs for the same model and a
+   similar prefix size. Warm and cold results are reported separately and combined per
+   point by the cold rate observed for that model and prefix-size band.
 5. **Judge** quality by criteria fixed before any run: the project's tests pass where
    they exist, the job's stated outcome is met, and a blind review comparing the two
    results without knowing which fork made them does not prefer the kept one. The blind
@@ -258,10 +268,10 @@ job, taken in enrollment order, and does not stop early or add sessions. It pass
 if all of these hold:
 
 - at most one session is a loss (the exact one-sided 95% upper bound on the session
-  loss rate is then 14.9%). This bound assumes enrolled sessions are independent draws
-  from the user's working sessions; random enrollment, fixed before a session's jobs
-  are known, and at most one session per day are what make that assumption
-  defensible, and the report states it;
+  loss rate is then 14.9%). This bound treats enrolled sessions as independent draws;
+  since sessions on the same day can share a task, the phase also requires a
+  day-clustered bootstrap 95% upper bound on the session loss rate of at most 15%, and
+  the report gives both;
 - summed over all points, delegating costs at least 10% less than keeping, so a
   losing session cannot cancel the savings unnoticed;
 - the median wall-time ratio over all points, delegate over keep, is at most 1.0;

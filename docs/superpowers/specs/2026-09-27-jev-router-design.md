@@ -2,10 +2,19 @@
 
 ## Goal
 
-The user asked for a router that asks Jev (TypeSafe's `typesafe/jev-router` on
-OpenRouter) one question about every message they send: what is the smallest
-model that can do this job well? Small jobs then go to a smaller, cheaper model
-instead of the biggest one. It must work in Claude Code, Codex and opencode.
+The user asked for a router that asks Jev one question about every message they
+send: what is the smallest model that can do this job well? Small jobs then go
+to a smaller, cheaper model instead of the biggest one. It must work in Claude
+Code, Codex and opencode.
+
+**Correction, 2026-09-28.** Version 0.1.0 asked `typesafe/jev-router`, which is
+not Jev: it is OpenRouter's chat router built on Jev, and it forwards the prompt
+to a chat model it picks and returns that model's text. Every size and
+"confidence" 0.1.0 used was written by that chat model, which is why calls took
+about 3 s and often failed with upstream 502/504s. From 0.2.0 the router asks
+Jev itself (`typesafe/jev-1.13`) through OpenRouter's Decisions API: one Choice
+question for the size and one Noul question for "is this a follow-up", answered
+with probabilities in about 0.3 s. The decisions below are updated to match.
 
 Their requirements, and where each one is met:
 
@@ -107,9 +116,9 @@ harness, and a test enforces it, so a helper's work is still that harness's work
 
 ## Decisions
 
-- **Deadline.** Across 26 measured calls, Jev answered in 0.8 to 8.4 s, with a
-  median of about 3.5 s. It routes its own sizing question to whichever model it
-  picks. The cap is 6 s of wall-clock time, enforced with a thread because
+- **Deadline.** Across 24 measured calls to the Decisions API, Jev answered in
+  0.16 to 0.5 s, with a median of about 0.28 s, and gave the same size on every
+  repeat of a message. The cap is 2 s of wall-clock time, enforced with a thread because
   `urlopen`'s timeout only bounds each socket read. `timeout_seconds` in
   `config.json` can only lower it, because the harnesses stop the whole hook at
   8 s and startup plus logging need the rest. A timed-out call may still be billed; its
@@ -119,9 +128,12 @@ harness, and a test enforces it, so a helper's work is still that harness's work
   opencode module catches everything, including a broken `tiers.json` at load,
   because opencode drops a message whose hook throws. Each harness also stops
   the whole hook at 8 s, which covers `uv` startup and logging as well as Jev.
-- **Strict verdicts.** A verdict counts only with a known size, a numeric
-  confidence from 0 to 100 (59.6 is not rounded up to 60), and an explicit
-  boolean `follow_up`. Anything else is an error, and the router carries on.
+- **Strict verdicts.** A verdict counts only with a Choice answer naming a
+  known size and a Noul answer, each with probabilities from 0 to 1. How sure
+  Jev is of a size is the probability it gives that size (0.596 is 59.6%, not
+  rounded up to 60); Jev's `confidence` field measures how concentrated the whole
+  distribution is, so it is not used. A follow-up is a Noul of 0.5 or more.
+  Anything else is an error, and the router carries on.
   OpenRouter's billed cost is logged even when the answer is unusable.
 - **Codex spawns with `fork_turns "none"`.** A full-history fork inherits the
   parent's model and ignores the override, so the hand-off asks for a fresh
@@ -151,10 +163,9 @@ harness, and a test enforces it, so a helper's work is still that harness's work
   advise, and the session keeps a job only when it is certain it already runs
   the helper's model at the helper's thinking level.
   `status` says so rather than claiming the helper did the work.
-- **Privacy.** While the router is on, message text reaches OpenRouter, TypeSafe,
-  and whichever model Jev picks to answer the sizing question. Probes saw that
-  question answered by `openai/gpt-6-luna`, `deepseek/deepseek-v4.1-flash`,
-  `google/gemini-3.8-flash` and `openai/gpt-6-sol`. `on` and `status` say this.
+- **Privacy.** While the router is on, message text reaches OpenRouter and
+  TypeSafe, and nothing else: every Decisions response names TypeSafe as the
+  provider. `on` and `status` say this.
 
 ## Repository changes
 

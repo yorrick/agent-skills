@@ -1,9 +1,9 @@
 {
   "jobs": {
-    "tiny": "a lookup, a rename, a one-line answer",
-    "everyday": "a normal email, post or short document",
-    "large": "a multi-step build, research, a full report",
-    "hardest": "strategy, or anything where a wrong call is expensive"
+    "tiny": "a lookup, a rename, a one-line answer or a one-line code change",
+    "everyday": "a normal email, post or short document, or a small, well-defined code change or bug fix",
+    "large": "a multi-step build, research, a full report, or a feature that spans several files",
+    "hardest": "strategy, architecture or data design, or anything where a wrong call is expensive"
   },
   "harnesses": {
     "claude": [

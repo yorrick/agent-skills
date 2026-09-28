@@ -36,15 +36,33 @@ sys.modules["jev_router"] = jev_router
 _spec.loader.exec_module(jev_router)
 
 
+def jev_answers(size: str, confidence: float, follow_up: bool) -> dict:
+    """What Jev's Decisions API returns for the router's two questions: the size
+    it picks with `confidence` percent probability, the rest spread evenly."""
+    others = [s for s in ("tiny", "everyday", "large", "hardest") if s != size]
+    rest = round((1 - confidence / 100) / len(others), 4)
+    return {
+        "size": {
+            "type": "choice",
+            "choice": size,
+            "confidence": 0.5,
+            "probabilities": {**dict.fromkeys(others, rest), size: confidence / 100},
+        },
+        "follow_up": {"type": "noul", "noul": 0.9 if follow_up else 0.1},
+    }
+
+
 class FakeJev:
-    """A local OpenRouter stand-in that answers with whatever the test sets."""
+    """A local OpenRouter stand-in that answers with whatever the test sets:
+    `answer` in the router's terms, or `raw_answers` sent verbatim."""
 
     def __init__(self) -> None:
-        self.answer: dict | str = {"size": "tiny", "confidence": 97, "follow_up": False}
+        self.answer: dict = {"size": "tiny", "confidence": 97, "follow_up": False}
+        self.raw_answers: object = None
         self.status = 200
         self.delay = 0.0
-        self.usage: dict = {"cost": 0.00002}
-        self.model = "openai/gpt-6-luna"
+        self.usage: dict = {"input_tokens": 480, "output_tokens": 60, "cost": 0.00002}
+        self.model = "typesafe/jev-1.13-20260917"
         self.requests: list[dict] = []
         fake = self
 
@@ -52,11 +70,13 @@ class FakeJev:
             def do_POST(self) -> None:
                 fake.requests.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
                 time.sleep(fake.delay)
-                content = fake.answer if isinstance(fake.answer, str) else json.dumps(fake.answer)
+                answers = fake.raw_answers if fake.raw_answers is not None else jev_answers(**fake.answer)
                 body = json.dumps(
                     {
+                        "id": "gen-dec-1",
                         "model": fake.model,
-                        "choices": [{"message": {"content": content}}],
+                        "provider": "TypeSafe",
+                        "answers": answers,
                         "usage": fake.usage,
                     }
                 ).encode()
@@ -73,7 +93,7 @@ class FakeJev:
                 pass
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/api/v1/chat/completions"
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/api/alpha/decisions"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
 
@@ -217,15 +237,20 @@ def test_commands_skill_calls_and_task_notices_are_not_sent_to_jev(home: Path, j
     assert jev.requests == []
 
 
-def test_jev_sees_the_sizes_and_a_truncated_message(home: Path, jev: FakeJev) -> None:
+def test_jev_itself_gets_two_typed_questions_and_a_truncated_message(home: Path, jev: FakeJev) -> None:
+    """Jev itself, not `typesafe/jev-router`, OpenRouter's chat router that hands
+    the prompt to another model and returns that model's text."""
     switch_on(home, jev)
     hook(home, jev, prompt="x" * 10_000)
     [request] = jev.requests
-    assert request["model"] == "typesafe/jev-router"
-    system, user = request["messages"]
-    for size in ("tiny", "everyday", "large", "hardest"):
-        assert f"- {size}:" in system["content"]
-    assert len(user["content"]) == jev_router.MAX_MESSAGE_CHARS
+    assert request["model"] == "typesafe/jev-1.13"
+    assert set(request) == {"model", "state", "questions"}
+    size, follow_up = request["questions"]["size"], request["questions"]["follow_up"]
+    assert size["type"] == "choice"
+    assert list(size["criteria"]) == ["tiny", "everyday", "large", "hardest"]
+    assert size["criteria"]["tiny"] == jev_router.JOBS["tiny"]
+    assert follow_up["type"] == "noul" and set(follow_up["criteria"]) == {"true", "false"}
+    assert len(request["state"]["message"]) == jev_router.MAX_MESSAGE_CHARS
 
 
 def test_codex_spawns_with_the_model_and_thinking_level(home: Path, jev: FakeJev) -> None:
@@ -299,21 +324,31 @@ def test_slow_jev_is_abandoned_at_the_deadline(home: Path, jev: FakeJev) -> None
     assert log(home)[-1]["outcome"] == "timeout"
 
 
+def _answers(size: dict | None = None, follow_up: dict | None = None) -> dict:
+    good = jev_answers("tiny", 90, False)
+    return {"size": {**good["size"], **(size or {})}, "follow_up": {**good["follow_up"], **(follow_up or {})}}
+
+
 @pytest.mark.parametrize(
-    "answer",
+    "answers",
     [
         "I think this is small.",
-        '{"size": "medium", "confidence": 90, "follow_up": false}',
-        '{"size": "tiny", "confidence": 250, "follow_up": false}',
-        '{"size": "tiny", "confidence": "high", "follow_up": false}',
-        '{"size": "tiny", "confidence": true, "follow_up": false}',
-        '{"size": "tiny", "confidence": 90}',
-        '{"size": "tiny", "confidence": 90, "follow_up": "no"}',
+        {},
+        {"size": _answers()["size"]},
+        _answers(size={"choice": "medium", "probabilities": {"medium": 0.9}}),
+        _answers(size={"probabilities": {"tiny": 2.5}}),
+        _answers(size={"probabilities": {"tiny": "high"}}),
+        _answers(size={"probabilities": {"tiny": True}}),
+        _answers(size={"probabilities": {"everyday": 0.9}}),
+        _answers(size={"type": "score"}),
+        _answers(follow_up={"noul": "no"}),
+        _answers(follow_up={"noul": -0.1}),
+        _answers(follow_up={"type": "choice"}),
     ],
 )
-def test_unusable_answers_are_ignored_but_still_cost_money(home: Path, jev: FakeJev, answer: str) -> None:
+def test_unusable_answers_are_ignored_but_still_cost_money(home: Path, jev: FakeJev, answers: object) -> None:
     switch_on(home, jev)
-    jev.answer = answer
+    jev.raw_answers = answers
     assert hook(home, jev) == ""
     event = log(home)[-1]
     assert event["outcome"] == "error" and event["cost"] == 0.00002
@@ -328,21 +363,18 @@ def test_odd_response_shapes_never_break_the_hook(body: object) -> None:
 
 
 def test_the_timeout_can_be_lowered_but_not_raised_past_the_outer_cap() -> None:
-    assert jev_router.timeout_of({}) == 6
+    assert jev_router.timeout_of({}) == 2
     assert jev_router.timeout_of({"timeout_seconds": 0.5}) == 0.5
-    assert jev_router.timeout_of({"timeout_seconds": 30}) == 6
+    assert jev_router.timeout_of({"timeout_seconds": 30}) == 2
 
 
 @pytest.mark.parametrize("routed", [True, False])
 def test_the_log_never_keeps_what_jev_said(home: Path, jev: FakeJev, routed: bool) -> None:
-    """Neither the reply text nor any other string field of the response is logged."""
+    """No string field of the response is logged, whether or not it is usable."""
     switch_on(home, jev)
     jev.model = "customer/SECRET-PROJECT-X"
-    jev.answer = (
-        {"size": "tiny", "confidence": 90, "follow_up": False}
-        if routed
-        else "You asked me to rename SECRET-PROJECT-X, which is a tiny job."
-    )
+    if not routed:
+        jev.raw_answers = {"size": {"type": "choice", "choice": "SECRET-PROJECT-X"}}
     hook(home, jev, prompt="rename SECRET-PROJECT-X")
     assert "SECRET" not in (home / "log.jsonl").read_text()
 

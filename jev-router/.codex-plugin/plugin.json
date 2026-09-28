@@ -1,7 +1,7 @@
 {
   "name": "jev-router",
   "description": "Asks Jev (via OpenRouter) how big each message is and sends small jobs to a smaller, cheaper model. Off until you turn it on with /jev on.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": {
     "name": "Yorrick Jansen"
   },

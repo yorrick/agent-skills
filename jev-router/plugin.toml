@@ -4,7 +4,7 @@
 
 [plugin]
 name = "jev-router"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 description = "Asks Jev (via OpenRouter) how big each message is and sends small jobs to a smaller, cheaper model. Off until you turn it on with /jev on."
 keywords = ["routing", "models", "cost", "openrouter", "jev"]

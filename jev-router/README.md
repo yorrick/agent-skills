@@ -2,15 +2,20 @@
 
 Sends each job to the model and thinking level that fit it, which usually means a cheaper
 one. While it is on, every message you type goes to
-[Jev](https://openrouter.ai/typesafe/jev-router) on OpenRouter with one question: what is
-the smallest model that can do this job well?
+[Jev](https://openrouter.ai/typesafe/jev-1.13), TypeSafe's decision model, through
+OpenRouter's Decisions API, with one typed question: what is the smallest model that can do
+this job well? Jev picks one of the sizes below and gives the probability of each.
 
 | Size | Jobs | Claude Code | Codex | opencode |
 |---|---|---|---|---|
-| tiny | a lookup, a rename, a one-line answer | Haiku 4.5 | GPT-6 Luna, medium | GLM 5.3 flash, high |
-| everyday | a normal email, post or short document | Opus 5.5, low | GPT-6 Luna, max | GLM 5.3 flash, high |
-| large | a multi-step build, research, a full report | Opus 5.5, high | GPT-6 Sol, high | GLM 5.3 flash, max |
-| hardest | strategy, or anything where a wrong call is expensive | Opus 5.5, max | GPT-6 Astra, max | GLM 5.3 flash, max |
+| tiny | a lookup, a rename, a one-line answer or a one-line code change | Haiku 4.5 | GPT-6 Luna, medium | GLM 5.3 flash, high |
+| everyday | a normal email, post or short document, or a small, well-defined code change or bug fix | Opus 5.5, low | GPT-6 Luna, max | GLM 5.3 flash, high |
+| large | a multi-step build, research, a full report, or a feature that spans several files | Opus 5.5, high | GPT-6 Sol, high | GLM 5.3 flash, max |
+| hardest | strategy, architecture or data design, or anything where a wrong call is expensive | Opus 5.5, max | GPT-6 Astra, max | GLM 5.3 flash, max |
+
+Jev reads these descriptions literally, as the options of a typed Choice question, so each
+names coding work as well as writing: without that, coding tasks came back split between
+two sizes at about 50%.
 
 Each cell is a model and its thinking level (Haiku 4.5 has none). They were chosen from
 [Artificial Analysis](https://artificialanalysis.ai/?cost=intelligence-vs-cost-per-task)
@@ -22,7 +27,7 @@ benchmark tasks. On a Claude Max or ChatGPT subscription you pay in usage limits
 and we assume those limits are spent in proportion to API prices, since that is the best
 proxy available.
 
-When Jev is at least 60% sure, the job goes to the helper for that size, and the reply
+When Jev gives its pick at least a 60% probability, the job goes to the helper for that size, and the reply
 ends with a line such as `Done by Claude Opus 5.5 at low thinking`. The session keeps the
 job when Jev is less sure, when the message is a short reply that only makes sense inside
 the conversation, or when the session is certain it already runs that model at that
@@ -41,7 +46,7 @@ thinking level.
   `opencode run --attach` to your running TUI with an explicit `--agent` runs inside the
   TUI and looks exactly like typing there, so it is routed. Nothing in opencode's hook
   tells the two apart (verified), and your review commands do not attach.
-- **Block a message.** If Jev is slow (over 6 seconds) or anything fails, the message goes
+- **Block a message.** If Jev is slow (over 2 seconds) or anything fails, the message goes
   through as if the router were not there.
 
 ## Honest limits
@@ -57,15 +62,14 @@ Neither hook can see the session's current thinking level, so the main model dec
 whether it already matches. Claude knows its own level. A model that is not certain hands
 the job off.
 
-Asking Jev takes time. It usually answers in 1 to 5 seconds, and the router waits at most
-6 seconds before carrying on without it. When the router is off, the hook costs about
+Asking Jev takes a moment: it answered in 0.16 to 0.5 seconds in our probes, and the router
+waits at most 2 seconds before carrying on without it. When the router is off, the hook costs about
 40 ms.
 
 ## Privacy
 
-While the router is on, the text of every message you type goes to OpenRouter, to TypeSafe
-(the company that makes Jev), and to whichever model Jev picks to answer the sizing
-question. Keep it off for private work. The router's log keeps no message text.
+While the router is on, the text of every message you type goes to OpenRouter and to TypeSafe
+(the company that makes Jev). Keep it off for private work. The router's log keeps no message text.
 
 ## Using it
 

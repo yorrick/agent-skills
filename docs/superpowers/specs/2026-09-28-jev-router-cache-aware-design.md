@@ -57,8 +57,9 @@ the context comparison in point 5 came after that review.
 
 Claude Code and Codex, where a helper is a subagent with its own fresh context. Claude
 Code can delegate once shadow mode and the fork experiment pass. Codex runs in shadow
-mode only until it has its own labelled, held-out calibration data from its shadow
-logs, because the study's transcripts are all Claude Code. opencode is excluded from
+mode only, because the study's transcripts are all Claude Code: it delegates live only
+after its own calibration (from its shadow logs), its own pilot and its own frozen
+validation pass, with the same fork protocol run through `codex exec fork`. opencode is excluded from
 delegation: its hook moves the message onto another model in
 the same session, which keeps the whole context and so buys none of the fresh-context
 saving. opencode keeps 0.2.0's behaviour until an isolated helper session exists there.
@@ -102,7 +103,10 @@ One Decisions API call, provider pinned to TypeSafe, 2 s deadline, with the mess
 (capped at 4,000 characters) and the previous reply as state:
 
 - `steps`, a Score over five buckets (1, 2-3, 4-10, 11-30, 31+ calls), as in the study;
-- `size`, the existing Choice, now used only to pick the helper's model and effort.
+- `size`, the existing Choice, now used only to pick the helper's model and effort;
+- `external`, a Noul: will the job change anything outside the repository (push, open
+  a pull request, deploy, write to an external service)? Such jobs are not delegated in
+  this version, because the fork experiment cannot validate them (Validation, step 2).
 
 The follow-up question is dropped. The privacy notice in `on` and `status` changes to
 say that the agent's previous reply is sent along with the message.
@@ -161,27 +165,33 @@ tune the margins, and then a validation phase with the rule frozen, on new jobs 
 1. **Select before sending.** When the user is about to send a message in a Claude Code
    session, an experiment command asks the router for its decision on that message
    without sending it. Only messages the router selects go on, taken as they come,
-   including follow-ups and borderline selections.
+   including follow-ups and borderline selections. The sampling unit is one selected
+   message; at most two come from the same session.
 2. **Fork before the turn.** The runner forks the session twice (`claude --resume <id>
    --fork-session`) before the message is sent anywhere, and checks that both forks'
    transcripts end at the same entry. It copies the full working state into two
    worktrees, including uncommitted and untracked files, and checks that both copies
-   hash the same.
-3. **Run.** Send the same message to both. The delegate branch gets the hand-off
-   instruction directly, so the result reflects the helper, not Jev's pick. Each side
-   runs once; five of the points run three times per side to measure run-to-run
-   variance.
+   hash the same. Both forks run with pushes, pull requests, deploys and other writes
+   outside the repository denied, so neither can change what the other sees.
+3. **Run.** Both forks run with `JEV_ROUTER=off`, so the router never fires inside the
+   experiment. The same message goes to both; only the delegate fork also gets a
+   mandatory hand-off naming the helper. The runner checks in its transcript that the
+   named helper actually ran. If the parent keeps the job anyway, the point is re-run
+   once; a second refusal is recorded as an override and reported separately. The two
+   forks run one after the other, in random order. Each side runs once; five points
+   run three times per side to measure run-to-run variance.
 4. **Measure** from the transcripts, helpers included: API-equivalent cost, wall time,
-   calls.
+   calls. Because the forks share a prompt-cache prefix, whichever runs second would
+   read it cheaper; the parent's first call is therefore priced as a cache read in both
+   forks, as it would be in a live session.
 5. **Judge** quality by criteria fixed before any run: the project's tests pass where
    they exist, the job's stated outcome is met, and a blind Codex review comparing the
    two results without knowing which branch made them does not prefer the kept one.
 
-A selected point counts as a loss when delegating costs more or fails a quality
-criterion. With no losses among 20 independent validation points, the 95% upper bound
-on the loss rate is about 14%, so the success criterion needs at least 20 validation
-points with no losses, or proportionally more if some lose. Codex joins the experiment
-once it leaves shadow mode.
+A validation point counts as a loss when delegating costs more or fails a quality
+criterion. The validation phase is fixed in advance at 30 points and passes with at
+most one loss: the exact one-sided 95% upper bound on the loss rate is then 14.9%. It
+does not stop early or add points.
 
 ## Out of scope
 

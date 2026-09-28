@@ -8,12 +8,12 @@ at the same quality. 0.2.0 cannot do that: it decides once per typed message, ne
 routes a follow-up, and ranks jobs by difficulty. The study below shows the money is
 somewhere else.
 
-Success, measured in the fork experiment (Validation) with a rule frozen beforehand: on
-the jobs the router selects, delegating costs less than keeping; quality does not drop
-by the criteria fixed in advance; the 95% upper bound on the share of sessions with a
-losing job (costlier, worse, overridden, or more than 1.5 times slower) is at most 15%;
-and delegating is not slower, with a median wall-time ratio (delegate over keep,
-helpers included) of at most 1.0.
+Success, measured in the fork experiment (Validation) with a rule frozen beforehand,
+on the jobs the router selects: delegating costs at least 10% less in total than
+keeping; quality does not drop by the criteria fixed in advance; the 95% upper bound on
+the share of sessions with a losing job (costlier, worse or overridden) is at most 15%;
+delegating is not slower, with a median wall-time ratio (delegate over keep, helpers
+included) of at most 1.0; and no job is more than 1.5 times slower.
 
 ## What the study found
 
@@ -55,8 +55,9 @@ the context comparison in point 5 came after that review.
 
 ### Scope
 
-Claude Code and Codex, where a helper is a subagent with its own fresh context. Claude
-Code can delegate once shadow mode and the fork experiment pass. Codex runs in shadow
+Claude Code and Codex, where a helper is a separate, sandboxed headless run of the same
+harness with its own fresh context (What the session is told). Claude Code can delegate
+once shadow mode, the helper boundary test and the fork experiment pass. Codex runs in shadow
 mode only, because the study's transcripts are all Claude Code: it delegates live only
 after its own calibration (from its shadow logs), its own pilot and its own frozen
 validation pass, with the same fork protocol run through `codex exec fork`. opencode is excluded from
@@ -139,16 +140,28 @@ and effort is a valid choice, and matching models is no reason to keep a job.
 
 When the router delegates: the job, why (expected saving, context size, predicted
 length) and the helper to use. The parent writes a self-contained brief: the goal, the
-files and decisions that matter, and what done looks like. Helpers never write outside
-the repository, and this is enforced, not only asked: the Claude Code helper agents
-list pushes, pull-request and merge commands, deploys and other external writes in
-their `disallowedTools`, and the brief tells the helper to stop before such a step and
-report what is left. The parent does those steps itself after the relay. (Codex
-helpers get the same boundary before Codex leaves shadow mode; how to enforce it there
-is an open question.) This holds whatever the message says, so no question about
-external effects is needed. It keeps the job only when
+files and decisions that matter, and what done looks like. It keeps the job only when
 the work needs the user in the loop or cannot be briefed. When the router does not
 delegate, it says nothing.
+
+The parent hands the brief to `jev-helper`, a command the plugin ships, which runs the
+helper as a separate headless process of the same harness (`claude -p` with the
+helper's model and effort, `JEV_ROUTER=off`) and prints its final report. The helper
+never writes outside the repository, and this is enforced by capabilities, not by
+naming commands: the process runs under an operating-system sandbox (macOS
+`sandbox-exec`, Linux `bwrap`) that allows file writes only inside the worktree and its
+temporary directory, and network connections only to the model provider's API. No
+shell command or script the helper runs can push, open a pull request, deploy or call
+another service, however it is spelled. The brief tells the helper to stop before such
+a step and report what is left; the parent does those steps itself after the relay.
+This holds whatever the message says, so no question about external effects is needed.
+
+Before any live delegation, a boundary test runs the helper against a fixture that
+tries each kind of escape (writing outside the worktree, `git push`, `curl` to another
+host, a script that does either) and passes only if every attempt fails and in-worktree
+work still succeeds. It runs again whenever the sandbox profile changes. Codex gets the
+same helper runner and boundary test (`codex exec` under the same sandbox) before it
+leaves shadow mode.
 
 ### Shadow mode
 
@@ -166,22 +179,26 @@ It measures what shadow mode cannot: the real cost, speed and quality of delegat
 job the router selects. It runs in two phases: a pilot, whose forks and shadow logs
 tune the margins, and then a validation phase with the rule frozen, on new jobs only.
 
-1. **Select before sending.** When the user is about to send a message in a Claude Code
-   session, an experiment command asks the router for its decision on that message
-   without sending it. Only messages the router selects go on, taken as they come,
-   including follow-ups and borderline selections. During the validation period each
-   selected message is taken with a fixed probability set in advance, so sessions with
-   many selected follow-ups contribute in proportion; one session may give several
-   points.
+1. **Enroll sessions, then test every selected job in them.** During the validation
+   period, each new interactive Claude Code session is enrolled or not by a rule fixed
+   in advance and applied when the session starts, before anything about its jobs is
+   known (the first session of each working day, say, or a fixed probability). In an
+   enrolled session, every message the user is about to send goes first to an
+   experiment command that asks the router for its decision without sending it, and
+   every message the router selects is tested, follow-ups and borderline selections
+   included. The user carries on in the kept fork's session and worktree, so the next
+   selected message is forked from the same state the user actually has.
 2. **Fork before the turn.** The runner forks the session twice (`claude --resume <id>
    --fork-session`) before the message is sent anywhere, and checks that both forks'
    transcripts end at the same entry. It copies the full working state into two
    worktrees, including uncommitted and untracked files, and checks that both copies
-   hash the same. Each fork gets its own throwaway remote (a bare clone standing in for
-   `origin`) and has every other external write denied, so both forks can finish the
-   job through the same end point, a push or a pull request included, without either
-   changing what the other sees. The parent's completion steps after the relay are
-   therefore run and measured. A helper that attempts an external write fails the point.
+   hash the same. Each fork runs in an isolated environment that stands in for every
+   external end point: a bare clone as `origin` for pushes, and stub `gh`, deploy and
+   service commands first on `PATH` that record the call and return a realistic
+   success, with all other network access denied. Both forks can therefore finish the
+   job through the same end point, a pull request or deploy included, without either
+   changing what the other sees, and the parent's completion steps after the relay are
+   run and measured. A helper that attempts an external write fails the point.
 3. **Run.** Both forks run with `JEV_ROUTER=off`, so the router never fires inside the
    experiment. The same message goes to both; the delegate fork also gets exactly the
    hand-off text the live router would add. The runner checks in its transcript that the
@@ -193,14 +210,16 @@ tune the margins, and then a validation phase with the rule frozen, on new jobs 
    scored.
 4. **Measure** API-equivalent cost, wall time and calls from the transcripts, helpers
    included, plus any cross-AI review the work triggers (its CLI session logs, matched
-   by the fork's worktree path). Costs are priced per call from token counts under one
-   cache-state rule for both forks: in each fork's first parent call, the shared
-   pre-fork transcript is priced as a cache read (as in a live session, whose cache is
-   warm when the user types), whichever fork actually ran first. Everything else is
-   priced by its recorded category: cache reads, cache writes and uncached input at
-   their prices, and output at the output price. Wall time is measured the same way for
-   both: each fork's first call starts after a warm-up request that fills the cache
-   with the shared prefix.
+   by the fork's worktree path). Every call is priced by its recorded categories: cache
+   reads, cache writes and uncached input at their prices, and output at the output
+   price. Before each fork's timed run, a warm-up request with the shared pre-fork
+   transcript fills the cache; the runner then checks that each fork's first parent call
+   recorded a cache read covering the shared prefix (within 1%), and repeats the
+   warm-up and the fork if it did not, so both forks start from a verified warm cache.
+   Live turns that start cold (a session idle past the cache lifetime) are represented
+   through shadow mode: its logs give the share of selected turns that start cold, and
+   the report adds, for that share, the cost of re-caching the prefix, which falls on
+   the parent's first call in both forks.
 5. **Judge** quality by criteria fixed before any run: the project's tests pass where
    they exist, the job's stated outcome is met, and a blind review comparing the two
    results without knowing which fork made them does not prefer the kept one. The blind
@@ -208,13 +227,18 @@ tune the margins, and then a validation phase with the rule frozen, on new jobs 
    Claude or DeepSeek judges Codex forks.
 
 A validation point counts as a loss when delegating costs more, fails a quality
-criterion, is overridden, or takes more than 1.5 times as long as keeping. Because
-points from one session can be correlated, the bound is computed on sessions: a
-session counts as a loss if any of its points is. The validation phase is fixed in
-advance at 30 sessions and passes only if at most one session is a loss (the exact
-one-sided 95% upper bound on the session loss rate is then 14.9%) and the median
-wall-time ratio over all points, delegate over keep, is at most 1.0. It does not stop
-early or add sessions.
+criterion, or is overridden. Every selected job in an enrolled session is tested, so a
+session's outcome is fully observed: it counts as a loss if any of its points is. The
+validation phase is fixed in advance at 30 enrolled sessions with at least one selected
+job, taken in enrollment order, and does not stop early or add sessions. It passes only
+if all of these hold:
+
+- at most one session is a loss (the exact one-sided 95% upper bound on the session
+  loss rate is then 14.9%);
+- summed over all points, delegating costs at least 10% less than keeping, so a
+  losing session cannot cancel the savings unnoticed;
+- the median wall-time ratio over all points, delegate over keep, is at most 1.0;
+- no point is more than 1.5 times slower; a single breach fails the phase.
 
 ## Out of scope
 
@@ -225,7 +249,7 @@ orchestrator, and delegation in opencode.
 ## Open questions
 
 - How often the parent overrides a delegation, and whether that needs its own rule.
-- How to enforce the helpers' no-external-write boundary in Codex, whose `spawn_agent`
-  helpers share the parent's sandbox.
-- The validation period's sampling probability, set from shadow-mode selection rates
-  so that 30 sessions arrive in a reasonable time.
+- The session enrollment rule, set from shadow-mode selection rates so that 30
+  sessions with a selected job arrive in a reasonable time.
+- Whether the model provider's API can be reached from inside the helper sandbox by
+  host name alone, or needs its addresses pinned.

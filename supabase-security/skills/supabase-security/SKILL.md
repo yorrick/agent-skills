@@ -183,9 +183,9 @@ Projects created before 30 May 2026 do **not** have the safer default of not aut
 
 ### R11 — `TRUNCATE` ignores RLS entirely
 
-RLS governs rows. `TRUNCATE` is a whole-table operation and **no policy applies to it** — a role holding `TRUNCATE` can wipe every tenant's data regardless of how good your isolation is. Never grant it to `anon` or `authenticated`.
+RLS governs rows. `TRUNCATE` is a whole-table operation and **no policy applies to it** — a role holding `TRUNCATE` can wipe every tenant's data regardless of how good your isolation is. Never grant it to `anon` or `authenticated`. PostgREST has no `TRUNCATE` route, so the public key alone cannot reach it; an invoker function that runs caller-controlled SQL, or any other SQL path, can.
 
-On legacy projects the grant comes from Supabase's **default privileges** (`GRANT ALL` on new tables to `anon`, `authenticated` and `service_role`), not from any migration. So revoking it on today's tables is half the fix: every table a later migration creates gets it back. Revoke both:
+The grant usually comes from Supabase's **default privileges** (`GRANT ALL` on new tables to `anon`, `authenticated` and `service_role`), not from any migration. Newer projects dropped some of those defaults, so check the effective grant whatever the project's age. Revoking it on today's tables is half the fix: every table a later migration creates gets it back. Revoke both:
 
 ```sql
 revoke truncate on all tables in schema public from anon, authenticated;
@@ -193,7 +193,9 @@ alter default privileges for role postgres in schema public
   revoke truncate on tables from anon, authenticated;
 ```
 
-- **Only your own defaults are yours to change.** `supabase_admin` carries the same default in `public`, and `postgres` is not a member of it; nor of `supabase_storage_admin`, whose grants on `storage.objects` and friends include `TRUNCATE`. Only Supabase can revoke those. `postgres` *is* a member of `supabase_functions_admin`, so the database-webhook tables in `supabase_functions` are within reach. Check with `pg_has_role('postgres', <owner>, 'MEMBER')`.
+A per-schema revoke only undoes a per-schema default. If the grant sits in a global one (`pg_default_acl.defaclnamespace = 0`), drop `in schema public`.
+
+- **Only your own defaults are yours to change.** `supabase_admin` carries the same default in `public`, and `postgres` is not a member of it; nor of `supabase_storage_admin`, whose grants on `storage.objects` and friends include `TRUNCATE`. Only Supabase can revoke those. `postgres` *is* a member of `supabase_functions_admin`, so the database-webhook tables in `supabase_functions` are within reach. Check with `pg_has_role('postgres', <owner>, 'USAGE')`: plain membership is not enough without the inherit option.
 - **A foreign key is not protection.** It blocks a plain `TRUNCATE` of a referenced table, but `TRUNCATE ... CASCADE` empties it and everything referencing it, provided the role holds `TRUNCATE` on all of them. Leaf tables need no cascade at all.
 - **The revoke is safe on hot tables.** `GRANT`/`REVOKE` rewrite catalogue rows and take no lock on the table, so they neither wait behind nor block readers.
 - **Guard it in CI**, since the default can return: assert that `has_table_privilege(role, c.oid, 'TRUNCATE')` is false for every relation in the schemas you control. The auditor's `R11-truncate-default` flags default privileges that would re-grant it.

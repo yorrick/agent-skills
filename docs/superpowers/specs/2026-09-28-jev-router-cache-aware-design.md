@@ -170,21 +170,23 @@ the jobs the router selects, on the user's own work.
    the working copy's state (HEAD, uncommitted changes and untracked files). The user
    works as usual; the real session is never touched. The check takes the next 20
    selected jobs, follow-ups included, with no picking.
-2. **Replay both ways.** A runner restores each snapshot into two full clones, each with
-   an `origin` that is a local bare copy. Nothing is installed: the working copy's
-   ignored files (setup files and installed dependencies) are copied in, and a job that
-   needs anything else is inconclusive. It saves the transcript copy as a new session of each clone, with
-   its own id, so the user's real session is never resumed, and resumes it headless
-   with `JEV_ROUTER=off` and the same message. The delegate side also gets exactly the
-   note the live router would add; the keep side gets nothing. Replays run inside the
-   harness's own confinement (Claude Code with its sandbox on and edits accepted only
-   inside the clone, Codex with `--sandbox workspace-write`) and without MCP servers, so
-   they write only inside the clone and the harnesses' own state directories, and reach
-   no host but the model APIs they use (their own and a cross-AI reviewer's). Pushes go
-   to the local origin. Both sides are told to stop before opening a pull request,
-   deploying or touching a live service, and are judged on their work up to that point;
-   a job whose outcome is itself such an effect (deploy this, check production) is
-   inconclusive and replaced by the next selected job. The two sides run one after the
+2. **Replay both ways.** The check covers code jobs: reading, editing, running tests and
+   local commands, and cross-AI reviews. A runner restores each snapshot into two full
+   clones, each with an `origin` that is a local bare copy. Nothing is installed: the
+   working copy's ignored files (setup files and installed dependencies) are copied in.
+   It saves the transcript copy as a new session of each clone, with its own id, so the
+   user's real session is never resumed, and resumes it headless with `JEV_ROUTER=off`
+   and the same message. The delegate side also gets exactly the note the live router
+   would add; the keep side gets nothing. Replays run inside the harness's own
+   confinement (Claude Code with its sandbox on, where sandboxed commands run without
+   asking, and edits accepted only inside the clone; Codex with `--sandbox
+   workspace-write`) and without MCP servers, so they write only inside the clone and
+   the harnesses' own state directories, and reach no host but the model APIs they use
+   (their own and a cross-AI reviewer's). Pushes go to the local origin, and both sides
+   are told to stop before a pull request or deploy and are judged on their work up to
+   there. A job that needs anything the replay blocks (an MCP server, another host, a
+   live service, a missing dependency) is inconclusive and replaced by the next selected
+   job; the report states how many were replaced. The two sides run one after the
    other in random order.
 3. **Measure** API-equivalent cost, wall time and calls from the transcripts, subagents
    included, pricing every call by its recorded categories (cache reads, cache writes,

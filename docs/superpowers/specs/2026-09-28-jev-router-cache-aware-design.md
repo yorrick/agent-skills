@@ -171,8 +171,9 @@ the jobs the router selects, on the user's own work.
    works as usual; the real session is never touched. The check takes the next 20
    selected jobs, follow-ups included, with no picking.
 2. **Replay both ways.** A runner restores each snapshot into two full clones, each with
-   its ignored setup files copied, its dependencies installed, and an `origin` that is a
-   local bare copy. It saves the transcript copy as a new session of each clone, with
+   an `origin` that is a local bare copy. Nothing is installed: the working copy's
+   ignored files (setup files and installed dependencies) are copied in, and a job that
+   needs anything else is inconclusive. It saves the transcript copy as a new session of each clone, with
    its own id, so the user's real session is never resumed, and resumes it headless
    with `JEV_ROUTER=off` and the same message. The delegate side also gets exactly the
    note the live router would add; the keep side gets nothing. Replays run inside the
@@ -188,7 +189,8 @@ the jobs the router selects, on the user's own work.
 3. **Measure** API-equivalent cost, wall time and calls from the transcripts, subagents
    included, pricing every call by its recorded categories (cache reads, cache writes,
    uncached input, output). Right before each side runs, a one-line throwaway fork of the
-   same transcript warms the cache, and a pair is scored only when both sides' first
+   same transcript, under the same confinement and with no tools, warms the cache, and a
+   pair is scored only when both sides' first
    calls read the prefix from cache; otherwise it is rerun. Every run is scored on what
    it really cost and took, including a parent that kept a job it was told to delegate;
    the report counts these overrides. The shadow log's Jev cost and latency over every
@@ -201,7 +203,10 @@ the jobs the router selects, on the user's own work.
 The check passes when all of the conditions in Goal hold over the 20 jobs. Twenty jobs
 is a practical sample for a personal tool, not a statistical guarantee, so the report
 also shows every job: its predicted and real length, both costs, both times and the
-verdict. Codex gets the same check (`codex exec fork`) once it is calibrated.
+verdict. The 10% condition is about the jobs the router selects; the report also states
+the saving as a share of the whole period's cost (from the shadow log), without a
+threshold, since that share depends on how the user's work mixes long and short jobs.
+Codex gets the same check (`codex exec fork`) once it is calibrated.
 
 ## Out of scope
 

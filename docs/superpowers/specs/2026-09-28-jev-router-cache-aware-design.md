@@ -219,18 +219,22 @@ tune the margins, and then a validation phase with the rule frozen, on new jobs 
    HEAD, the same staged index, the same contents for every tracked, untracked and
    ignored file the project's setup needs (its declared build and test inputs, such as
    `.env.example`-derived files or installed dependencies). Each fork's `origin` is its
-   own bare clone. Each process in a fork has its own egress allowlist: the parent and
-   its helpers reach only their model API, a cross-AI reviewer only its own model API,
-   and nothing reaches any other host, GitHub included. A fork's pull request is
+   own bare clone. Every process in a fork, the parent and anything it runs included,
+   writes only inside that fork's clone and its private temporary directory, so no
+   fork can touch the user's real checkout, the other fork or any other repository; a
+   job that needs to write anywhere else fails the point. Each process also has its own
+   egress allowlist: the parent and its helpers reach only their model API, a cross-AI
+   reviewer only its own model API, and nothing reaches any other host, GitHub
+   included. A fork's pull request is
    therefore mediated: its `gh` records the request, and a runner outside the forks,
    authorized for the user's GitHub account, creates it in a private throwaway
    repository made for that fork, with the source's branch protection and required
    check names but GitHub Actions disabled, so no fork-written code runs on GitHub's
-   runners. The runner reproduces each required check itself in an isolated executor
-   (the same kind of sandbox as a helper: no credentials, and network access limited to
-   the package registries the checks need) and publishes the results as commit
-   statuses on the throwaway pull request. A required check that cannot be reproduced
-   safely this way counts as a failure. Both forks' pull requests are created and
+   runners. The runner fetches each check's dependencies beforehand, then reproduces
+   the check itself in an isolated executor with no network access and no credentials
+   at all, and publishes the results as commit statuses on the throwaway pull request.
+   A required check that needs network access or a credential to run counts as a
+   failure. Both forks' pull requests are created and
    verified this way (branch, diff, title, body, required checks) before the point is
    scored, and the repositories are deleted afterwards. Deploys go to stubs
    that record exactly what would be deployed. Any outcome the runner cannot verify

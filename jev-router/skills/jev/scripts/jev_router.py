@@ -173,8 +173,17 @@ class Verdict:
 
     @property
     def confidence(self) -> float:
-        """The same probability in percent, for people and the log. `:g` shows 0.596 as 59.6."""
+        """The same probability in percent, unrounded, for the log."""
         return self.probability * 100
+
+    @property
+    def sure(self) -> str:
+        """The percentage as people read it: 0.596 shows as 59.6. A probability
+        under 60% never shows as 60, since it is kept for being under 60%."""
+        text = f"{self.confidence:g}"
+        if self.probability < MIN_CONFIDENCE / 100 <= float(text) / 100:
+            return f"just under {MIN_CONFIDENCE}"
+        return text
 
 
 def jev_questions(tiers: tuple[Tier, ...]) -> dict:
@@ -201,7 +210,8 @@ class BadAnswer(ValueError):
     """Jev answered, but not with a usable verdict.
 
     The messages are fixed strings on purpose: whatever an error says ends up in
-    the log, and the log never keeps anything from a response but its cost.
+    the log, and the log keeps no string from a response. From a response it keeps
+    only the cost and, once validated, a known size name and a probability.
     """
 
 
@@ -320,7 +330,7 @@ def outcome_of(verdict: Verdict, tier: Tier | None) -> str:
 
 
 def handoff(harness: str, tier: Tier, verdict: Verdict) -> str:
-    sized = f"Jev router: Jev's size for this message is {tier.size} ({verdict.confidence:g}% sure)."
+    sized = f"Jev router: Jev's size for this message is {tier.size} ({verdict.sure}% sure)."
     sign_off = f"Done by {tier.label}"
     # Reason: neither hook can see the session's thinking level, but the model can
     # (verified for Claude, including after a mid-session /effort). An earlier
@@ -361,7 +371,7 @@ def keep_note(verdict: Verdict) -> str:
     why = (
         "it is a follow-up reply that needs this conversation"
         if verdict.follow_up
-        else f"Jev is only {verdict.confidence:g}% sure of its size"
+        else f"Jev is only {verdict.sure}% sure of its size"
     )
     # Reason: the note is about Jev's hand-off and the sign-off only; it must not
     # override what the user asked for (e.g. "yes, ask an agent to review it").
@@ -446,7 +456,7 @@ def route(harness: str, stdin: str) -> str:
         event.update(answered=True, cost=cost_of(body))
     if verdict is not None:
         tier = decide(verdict, tiers)
-        event.update(outcome=outcome_of(verdict, tier), size=verdict.size, confidence=round(verdict.confidence, 4))
+        event.update(outcome=outcome_of(verdict, tier), size=verdict.size, confidence=verdict.confidence)
     record(event)
     return hook_output(harness, tier, verdict) if verdict else ""
 
@@ -562,11 +572,11 @@ def cmd_classify(harness: str, messages: list[str]) -> int:
         took = time.monotonic() - started
         tier = decide(verdict, tiers)
         cost = cost_of(body)
-        event.update(answered=True, size=verdict.size, confidence=round(verdict.confidence, 4), cost=cost)
+        event.update(answered=True, size=verdict.size, confidence=verdict.confidence, cost=cost)
         record(event)
         does = f"hands to {tier.label}" if tier else "keeps it in the session"
         print(
-            f"| {n} | {message} | {verdict.size} | {verdict.confidence:g}% | "
+            f"| {n} | {message} | {verdict.size} | {verdict.sure}% | "
             f"{'yes' if verdict.follow_up else 'no'} | {does} | {took:.1f}s | "
             f"{f'${cost:.5f}' if cost is not None else '?'} |"
         )

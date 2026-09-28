@@ -389,13 +389,20 @@ def test_status_counts_an_answered_call_that_reported_no_cost(home: Path, jev: F
     assert "$0.0000 over 1 answered calls, 1 of which reported no cost." in text
 
 
-@pytest.mark.parametrize(("confidence", "shown"), [(59.6, "59.6"), (59.999, "59.999")])
+@pytest.mark.parametrize(("confidence", "shown"), [(59.6, "59.6"), (59.999, "59.999"), (59.99999, "just under 60")])
 def test_confidence_just_under_sixty_is_not_rounded_up(home: Path, jev: FakeJev, confidence: float, shown: str) -> None:
     switch_on(home, jev)
     jev.answer = {"size": "tiny", "confidence": confidence, "follow_up": False}
-    assert f"{shown}% sure" in hook(home, jev)
-    assert log(home)[-1]["outcome"] == "unsure"
-    assert log(home)[-1]["confidence"] == confidence
+    assert f"Jev is only {shown}% sure" in hook(home, jev)
+    [event] = log(home)
+    assert event["outcome"] == "unsure"
+    assert event["confidence"] == pytest.approx(confidence) and event["confidence"] < 60
+
+
+def test_sixty_percent_exactly_is_shown_as_sixty() -> None:
+    verdict = jev_router.Verdict(size="tiny", probability=0.6, follow_up=False)
+    assert verdict.sure == "60"
+    assert jev_router.decide(verdict, jev_router.TIERS["claude"]) is not None
 
 
 def test_http_errors_are_ignored(home: Path, jev: FakeJev) -> None:

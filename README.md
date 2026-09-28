@@ -198,8 +198,9 @@ codex plugin add visual-design-review@yorrick
 Sends each job to the model and thinking level that fit it, which usually means a
 cheaper one. While it is on, every message you type goes to
 [Jev](https://openrouter.ai/typesafe/jev-1.13), TypeSafe's decision model, on OpenRouter
-with one question: what is the smallest model that can do this job well? When Jev gives its
-pick at least a 60% probability, the job
+with two typed questions: what is the smallest model that can do this job well, and does
+the message only make sense inside the conversation? When Jev gives its pick at least a 60%
+probability, and the message is not such a follow-up, the job
 goes to a helper on that size's model and thinking level, which signs off with
 `Done by <model> at <level> thinking`. It only routes inside the harness you are in,
 never touches headless runs such as `claude -p` reviews, and never blocks a message: if

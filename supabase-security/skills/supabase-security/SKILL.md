@@ -193,7 +193,7 @@ alter default privileges for role postgres in schema public
   revoke truncate on tables from anon, authenticated;
 ```
 
-A per-schema revoke only undoes a per-schema default. If the grant sits in a global one (`pg_default_acl.defaclnamespace = 0`), drop `in schema public`.
+These remove only grants made directly to the two roles: if `TRUNCATE` reaches them through `PUBLIC` or a group role, revoke it from that grantee, then re-check `has_table_privilege`. A per-schema revoke also only undoes a per-schema default; if the grant sits in a global one (`pg_default_acl.defaclnamespace = 0`), drop `in schema public`.
 
 - **Only your own defaults are yours to change.** `supabase_admin` carries the same default in `public`, and `postgres` is not a member of it; nor of `supabase_storage_admin`, whose grants on `storage.objects` and friends include `TRUNCATE`. Only Supabase can revoke those. `postgres` *is* a member of `supabase_functions_admin`, so the database-webhook tables in `supabase_functions` are within reach. Check with `pg_has_role('postgres', <owner>, 'USAGE')`: plain membership is not enough without the inherit option.
 - **A foreign key is not protection.** It blocks a plain `TRUNCATE` of a referenced table, but `TRUNCATE ... CASCADE` empties it and everything referencing it, provided the role holds `TRUNCATE` on all of them. Leaf tables need no cascade at all.

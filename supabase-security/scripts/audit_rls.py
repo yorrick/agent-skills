@@ -111,8 +111,13 @@ QUERIES: list[tuple[str, str, str, str]] = [
         "R11-truncate-granted",
         """
         SELECT n.nspname || '.' || c.relname || ' (' || r.rolname || ')',
-               'TRUNCATE granted - NO RLS policy applies to it; this role can wipe '
-                 || 'every tenant''s rows regardless of isolation'
+               CASE WHEN c.relkind = 'f'
+                    THEN 'TRUNCATE granted on a foreign table - if its wrapper allows it '
+                           || '(postgres_fdw does unless truncatable is false), this role can '
+                           || 'wipe the remote table, and no RLS policy applies'
+                    ELSE 'TRUNCATE granted - NO RLS policy applies to it; this role can wipe '
+                           || 'every tenant''s rows regardless of isolation'
+               END
           FROM pg_class c
           JOIN pg_namespace n ON n.oid = c.relnamespace
           CROSS JOIN unnest(%(api_roles)s::text[]) AS r(rolname)
@@ -122,7 +127,8 @@ QUERIES: list[tuple[str, str, str, str]] = [
         """,
         # Reason: RLS governs rows; TRUNCATE is a whole-table operation and no
         # policy is consulted. Perfect tenant isolation does not survive it.
-        # Foreign tables ('f') are included: postgres_fdw supports TRUNCATE.
+        # Foreign tables ('f') are included, worded conditionally: whether they
+        # can be truncated depends on the wrapper (postgres_fdw: truncatable).
         "The gap RLS cannot cover at all.",
     ),
     (

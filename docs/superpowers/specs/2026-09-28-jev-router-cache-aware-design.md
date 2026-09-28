@@ -11,8 +11,8 @@ somewhere else.
 The design aims for the simplest thing that reaches that goal: the harness's own
 subagents, one Jev call per message, and a small real-world check.
 
-Success, measured in the fork check (Validation) on the next 20 jobs the router
-selects, with its rule frozen beforehand, and with the router's own cost and added
+Success, measured in the fork check (Validation) on the next 20 code jobs the router
+selects that the check can replay (exclusions counted), with its rule frozen beforehand, and with the router's own cost and added
 latency on every message of the check period counted against delegation: delegating
 costs at least 10% less in total than keeping; delegated results are as good (no
 delegated result fails a test or its stated outcome where the kept one passes, and a
@@ -143,8 +143,9 @@ subagent with a fresh context:
 - **Codex:** `spawn_agent` with the tier's `model` and `reasoning_effort` and
   `fork_turns: "none"`. The default, `all`, copies the whole conversation.
 
-The parent keeps the job only when the work needs the user in the loop or cannot be
-briefed. The helper runs with the session's own permissions, like any subagent the user
+The parent keeps the job only when the work needs the user in the loop, cannot be
+briefed, or needs an MCP server or a live service (the fork check validates code jobs
+only; a later check can widen this). The helper runs with the session's own permissions, like any subagent the user
 already runs. The brief tells it not to commit, push, open pull requests or deploy, and
 to report what is left; the parent reviews the changes and does those steps after the
 relay. When the router does not delegate, it says nothing.
@@ -167,13 +168,15 @@ the jobs the router selects, on the user's own work.
 1. **Snapshot selected jobs.** With the rule frozen and `"fork_check": true`, whenever
    the router (still in shadow mode) selects a job, the hook saves a snapshot before the
    turn runs: a copy of the transcript ending just before the message, the message, and
-   the working copy's state (HEAD, uncommitted changes and untracked files). The user
-   works as usual; the real session is never touched. The check takes the next 20
-   selected jobs, follow-ups included, with no picking.
+   the working copy's state (HEAD, uncommitted changes and untracked files) with a hash
+   of its ignored setup files and installed dependencies. The user works as usual; the
+   real session is never touched. The check takes the next 20 selected jobs it can
+   replay, follow-ups included, with no picking.
 2. **Replay both ways.** The check covers code jobs: reading, editing, running tests and
    local commands, and cross-AI reviews. A runner restores each snapshot into two full
    clones, each with an `origin` that is a local bare copy. Nothing is installed: the
-   working copy's ignored files (setup files and installed dependencies) are copied in.
+   working copy's ignored files (setup files and installed dependencies) are copied in,
+   and if their hash no longer matches the snapshot's, the job is inconclusive.
    It saves the transcript copy as a new session of each clone, with its own id, so the
    user's real session is never resumed, and resumes it headless with `JEV_ROUTER=off`
    and the same message. The delegate side also gets exactly the note the live router

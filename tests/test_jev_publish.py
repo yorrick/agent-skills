@@ -12,32 +12,13 @@ import pytest
 SCRIPTS = Path(__file__).resolve().parent.parent / "jev-router" / "skills" / "jev" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+import fork_check  # noqa: E402
 import publish  # noqa: E402
 import replay  # noqa: E402
 from test_jev_snapshot import git  # noqa: E402
 
 
-def test_an_existing_public_copy_stops_everything(tmp_path: Path, repo: Path, snap: Path) -> None:
-    git(repo, "remote", "add", "origin", "git@github.com:acme/shop.git")
-
-    def gh(*args: str) -> str:
-        if args[:2] == ("api", "user"):
-            return "yorrick\n"
-        if args[:2] == ("repo", "view"):
-            return "PUBLIC\n"
-        raise AssertionError(f"unexpected gh call: {args}")
-
-    result = {"id": "x", "sides": {"keep": {"clone": str(tmp_path / "k")}, "delegate": {"clone": str(tmp_path / "d")}}}
-    with pytest.raises(RuntimeError, match="not private"):
-        publish.publish(snap, result, gh=gh, remote=str(tmp_path / "copy.git"))
-
-
-def test_copy_name_is_private_repo_named_after_the_source() -> None:
-    assert publish.copy_name("git@github.com:acme/shop.git", "yorrick") == "yorrick/shop-jev-replays"
-    assert publish.copy_name("https://github.com/acme/shop", "yorrick") == "yorrick/shop-jev-replays"
-
-
-def test_publish_pushes_both_results_and_opens_the_compare_pr(tmp_path: Path, repo: Path, snap: Path) -> None:
+def _setup(tmp_path: Path, repo: Path, snap: Path) -> tuple[Path, Path, Path, str, dict]:
     git(repo, "remote", "add", "origin", "git@github.com:acme/shop.git")
     keep = replay.restore(snap, tmp_path / "k")
     delegate = replay.restore(snap, tmp_path / "d")
@@ -45,16 +26,6 @@ def test_publish_pushes_both_results_and_opens_the_compare_pr(tmp_path: Path, re
     (delegate / "RESULT.txt").write_text("delegate\n")
     remote = tmp_path / "copy.git"
     subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
-    calls: list[tuple[str, ...]] = []
-
-    def gh(*args: str) -> str:
-        calls.append(args)
-        if args[:2] == ("api", "user"):
-            return "yorrick\n"
-        if args[:2] == ("repo", "view"):
-            raise RuntimeError("not found")
-        return "https://github.com/yorrick/shop-jev-replays/pull/1\n" if args[:2] == ("pr", "create") else ""
-
     sid = json.loads((snap / "meta.json").read_text())["id"]
     result = {
         "id": sid,
@@ -63,7 +34,43 @@ def test_publish_pushes_both_results_and_opens_the_compare_pr(tmp_path: Path, re
             "delegate": {"clone": str(delegate), "cost": 0.5, "wall_seconds": 50, "calls": 12, "delegated": True},
         },
     }
-    url = publish.publish(snap, result, gh=gh, remote=str(remote))
+    return keep, delegate, remote, sid, result
+
+
+def _gh(calls: list[tuple[str, ...]], visibility: str = "not found", pr_url: str = "https://x/pull/1\n"):
+    def gh(*args: str) -> str:
+        calls.append(args)
+        if args[:2] == ("api", "user"):
+            return "yorrick\n"
+        if args[:2] == ("repo", "view"):
+            if visibility == "not found":
+                raise RuntimeError("not found")
+            return visibility + "\n"
+        if args[:2] == ("pr", "create"):
+            return pr_url
+        return ""
+
+    return gh
+
+
+def test_an_existing_public_copy_stops_everything(tmp_path: Path, repo: Path, snap: Path) -> None:
+    keep, delegate, _remote, sid, result = _setup(tmp_path, repo, snap)
+    calls: list[tuple[str, ...]] = []
+    with pytest.raises(RuntimeError, match="not private"):
+        publish.publish(snap, result, gh=_gh(calls, visibility="PUBLIC"), remote=str(tmp_path / "copy2.git"))
+
+
+def test_copy_name_is_private_repo_named_after_the_source() -> None:
+    assert publish.copy_name("git@github.com:acme/shop.git", "yorrick") == "yorrick/shop-jev-replays"
+    assert publish.copy_name("https://github.com/acme/shop", "yorrick") == "yorrick/shop-jev-replays"
+
+
+def test_publish_pushes_both_results_and_opens_the_compare_pr(tmp_path: Path, repo: Path, snap: Path) -> None:
+    keep, delegate, remote, sid, result = _setup(tmp_path, repo, snap)
+    calls: list[tuple[str, ...]] = []
+    url = publish.publish(
+        snap, result, gh=_gh(calls, pr_url="https://github.com/yorrick/shop-jev-replays/pull/1\n"), remote=str(remote)
+    )
     assert url == "https://github.com/yorrick/shop-jev-replays/pull/1"
     assert (
         "repo",
@@ -83,3 +90,114 @@ def test_publish_pushes_both_results_and_opens_the_compare_pr(tmp_path: Path, re
     assert pr[pr.index("--base") + 1] == f"replay/{sid}/keep"
     assert pr[pr.index("--head") + 1] == f"replay/{sid}/compare"
     assert chr(0x2014) not in pr[pr.index("--body") + 1]
+
+
+# Ruling T12a: a restored ignored file must never be published, even if the
+# replayed session (running with bypass permissions) rewrote the clone's own
+# ignore rules or force-added the file.
+def test_a_restored_ignored_file_is_refused_even_if_the_clone_stops_ignoring_it(
+    tmp_path: Path, repo: Path, snap: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keep, delegate, remote, sid, result = _setup(tmp_path, repo, snap)
+    assert (keep / ".env").exists()
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")  # mask the user's own global excludes (it may list .env)
+    (keep / ".gitignore").write_text("node_modules/\n.venv/\n__pycache__/\n")  # the replay dropped the .env line
+    calls: list[tuple[str, ...]] = []
+    with pytest.raises(RuntimeError, match=r"\.env"):
+        publish.publish(snap, result, gh=_gh(calls), remote=str(remote))
+    assert git(remote, "branch", "-a").strip() == ""  # nothing was pushed
+
+
+def test_a_restored_ignored_file_committed_earlier_in_the_replay_is_also_refused(
+    tmp_path: Path, repo: Path, snap: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Caught by the history check even once it is no longer at HEAD."""
+    keep, delegate, remote, sid, result = _setup(tmp_path, repo, snap)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    (keep / ".gitignore").write_text("node_modules/\n.venv/\n__pycache__/\n")
+    git(keep, "add", "-A")
+    git(keep, "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-qm", "the replay committed .env")
+    git(keep, "rm", "-q", ".env")
+    git(keep, "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-qm", "the replay removed it again")
+    calls: list[tuple[str, ...]] = []
+    with pytest.raises(RuntimeError, match=r"\.env"):
+        publish.publish(snap, result, gh=_gh(calls), remote=str(remote))
+    assert git(remote, "branch", "-a").strip() == ""
+
+
+# Ruling T12b: an inconclusive result, or a side missing a priced cost, must
+# refuse before touching gh at all.
+def test_inconclusive_result_is_refused_with_no_gh_call(tmp_path: Path, repo: Path, snap: Path) -> None:
+    git(repo, "remote", "add", "origin", "git@github.com:acme/shop.git")
+    calls: list[tuple[str, ...]] = []
+    result = {"id": "x", "order": [], "sides": {}, "inconclusive": True, "reason": "no model recorded"}
+    with pytest.raises(RuntimeError, match="inconclusive"):
+        publish.publish(snap, result, gh=_gh(calls), remote=str(tmp_path / "copy.git"))
+    assert calls == []
+
+
+def test_a_side_missing_cost_is_refused_with_no_gh_call(tmp_path: Path, repo: Path, snap: Path) -> None:
+    keep, delegate, remote, sid, result = _setup(tmp_path, repo, snap)
+    del result["sides"]["delegate"]["cost"]
+    calls: list[tuple[str, ...]] = []
+    with pytest.raises(RuntimeError, match="cost"):
+        publish.publish(snap, result, gh=_gh(calls), remote=str(remote))
+    assert calls == []
+
+
+# Ruling T12c: no retry without clearing the copy's branches first, gh login is
+# validated, and cmd_publish never lets an exception escape as a traceback.
+def test_cmd_publish_refuses_without_a_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(fork_check, "root", lambda: tmp_path)
+    sid = "20261001-100000-abc"
+    (tmp_path / "results" / sid).mkdir(parents=True)
+    (tmp_path / "results" / sid / "result.json").write_text("{}")
+    assert fork_check.main(["publish", sid]) == 1
+    assert "Judge" in capsys.readouterr().out
+
+
+def test_internal_visibility_is_also_refused(tmp_path: Path, repo: Path, snap: Path) -> None:
+    keep, delegate, remote, sid, result = _setup(tmp_path, repo, snap)
+    calls: list[tuple[str, ...]] = []
+    with pytest.raises(RuntimeError, match="not private"):
+        publish.publish(snap, result, gh=_gh(calls, visibility="INTERNAL"), remote=str(remote))
+
+
+def test_an_existing_private_copy_is_not_recreated(tmp_path: Path, repo: Path, snap: Path) -> None:
+    keep, delegate, remote, sid, result = _setup(tmp_path, repo, snap)
+    calls: list[tuple[str, ...]] = []
+    publish.publish(snap, result, gh=_gh(calls, visibility="PRIVATE"), remote=str(remote))
+    assert not any(c[:2] == ("repo", "create") for c in calls)
+
+
+def test_existing_remote_branches_refuse_a_retry_instead_of_a_force_push(
+    tmp_path: Path, repo: Path, snap: Path
+) -> None:
+    keep, delegate, remote, sid, result = _setup(tmp_path, repo, snap)
+    # A branch left over from a previous, failed publish attempt.
+    git(keep, "push", "-q", str(remote), f"HEAD:refs/heads/replay/{sid}/keep")
+    calls: list[tuple[str, ...]] = []
+    with pytest.raises(RuntimeError, match="gh api -X DELETE"):
+        publish.publish(snap, result, gh=_gh(calls, visibility="PRIVATE"), remote=str(remote))
+    assert not any(c[:2] == ("pr", "create") for c in calls)
+
+
+def test_cmd_publish_records_publish_failed_instead_of_raising(
+    tmp_path: Path, repo: Path, snap: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keep, delegate, remote, sid, result = _setup(tmp_path, repo, snap)
+    fc_root = snap.parent.parent  # `snap` already lives under <fc_root>/snapshots/<sid>
+    monkeypatch.setattr(fork_check, "root", lambda: fc_root)
+    results_dir = fc_root / "results" / sid
+    results_dir.mkdir(parents=True)
+    (results_dir / "verdict.json").write_text("{}")
+    (results_dir / "result.json").write_text(json.dumps(result))
+
+    def gh(*args: str) -> str:
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(publish, "run_gh", gh)
+    assert fork_check.main(["publish", sid]) == 1
+    assert fork_check.statuses()[sid]["status"] == "publish_failed"

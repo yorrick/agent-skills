@@ -241,7 +241,14 @@ def cmd_publish(sid: str) -> int:
         print(f"Judge {sid} first: the judge must see the results before anything is committed or pushed.")
         return 1
     result = json.loads((root() / "results" / sid / "result.json").read_text())
-    url = publish.publish(root() / "snapshots" / sid, result)
+    try:
+        # `gh=publish.run_gh` (not the function's own default) so a test can
+        # monkeypatch the module attribute and still reach this call.
+        url = publish.publish(root() / "snapshots" / sid, result, gh=publish.run_gh)
+    except Exception as exc:
+        set_status(sid, "publish_failed", str(exc)[:200])
+        print(f"{sid}: publish failed ({exc})")
+        return 1
     set_status(sid, "published", url)
     print(url)
     return 0

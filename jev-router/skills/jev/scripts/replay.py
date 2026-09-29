@@ -213,17 +213,25 @@ def restore(snap: Path, dest: Path, *, copy_ignored: bool = True) -> Path:
         # widens what the comparison can see.
         before = run("git", "-C", str(clone), "status", "--porcelain", "--untracked-files=all")
         skipped: list[str] = []
+        ignored: list[str] = []
         for rel in snapshot.ignored_entries(top):
             if os.path.lexists(clone / rel):
                 raise Inconclusive(f"{rel} already exists in the clone; ignore rules changed since the snapshot")
             excluded = _collect_exclusions(top, rel)
             _copy_selective(top, rel, clone / rel, excluded)
             skipped.extend(excluded)
+            ignored.append(rel)
         after = run("git", "-C", str(clone), "status", "--porcelain", "--untracked-files=all")
         if after != before:
             raise Inconclusive("ignored files changed since the snapshot")
         _reject_stray_checkouts(clone)
-        (dest / "restore.json").write_text(json.dumps({"skipped": sorted(skipped)}, indent=2) + "\n")
+        # Reason: "ignored" (the top-level entries actually copied in, such as
+        # ".env") lets a later publish step refuse to push one of them even if
+        # the clone's own ignore rules later change or are force-added around,
+        # since the replay runs with bypass permissions and can rewrite them.
+        (dest / "restore.json").write_text(
+            json.dumps({"skipped": sorted(skipped), "ignored": sorted(ignored)}, indent=2) + "\n"
+        )
     return clone
 
 

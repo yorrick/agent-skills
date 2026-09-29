@@ -8,18 +8,29 @@ Env vars the tests use to steer it:
   FAKE_CLAUDE_COLD_WARMUP   every warm-up call is cold: no priced call at all.
   FAKE_CLAUDE_COLD_WARMUP_ONCE=<path>  only the first warm-up call ever seen (tracked in the
                             named counter file) is cold; later ones are warm.
+  FAKE_CLAUDE_COLD_JOB      the warm-up is normally priced and warm, but the job call's own
+                            first read misses the cache (it is still priced, just not warm).
   FAKE_CLAUDE_DIRTY_WARMUP  a warm-up call leaves a stray file in the working copy.
-  FAKE_CLAUDE_CRASH         the job call (never the warm-up) exits non-zero, writing nothing.
+  FAKE_CLAUDE_CRASH         the job call (never the warm-up) exits non-zero before writing
+                            anything: a hard crash with nothing to scan.
+  FAKE_CLAUDE_ERROR_RESULT  the job call writes its session file as usual (so a leak in it is
+                            still there to find), then reports is_error instead of exiting non-zero:
+                            a graceful crash, the kind whose output still names a session id.
   FAKE_CLAUDE_UNPRICED      the job call's model is one `prices.json` has no entry for.
   FAKE_CLAUDE_LEAK_PATH=<path>  the job call's tool input names this path, simulating an
                             incomplete path rewrite.
+  FAKE_CLAUDE_SLEEP_CHILD=<path>  spawns a detached `sleep 60`, writes its pid to the named
+                            file, then sleeps itself, for exercising the timeout/process-group
+                            kill. Short-circuits everything else.
   FAKE_CLAUDE_LOG           appends each call's details to a file.
 """
 
 import json
 import os
 import re
+import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -38,6 +49,12 @@ def log(**extra: object) -> None:
             entry = {"args": args, "cwd": os.getcwd(), "note": note, "router": os.environ.get("JEV_ROUTER"), **extra}
             handle.write(json.dumps(entry) + "\n")
 
+
+if pidfile := os.environ.get("FAKE_CLAUDE_SLEEP_CHILD"):
+    child = subprocess.Popen(["sleep", "60"])
+    Path(pidfile).write_text(str(child.pid))
+    time.sleep(60)
+    sys.exit(0)  # never reached in the test: the parent kills the whole group first
 
 if not warm and os.environ.get("FAKE_CLAUDE_CRASH") == "1":
     log(crashed=True)
@@ -97,6 +114,7 @@ if not warm and (leak_path := os.environ.get("FAKE_CLAUDE_LEAK_PATH")):
 
 if not cold_warmup:
     model_name = "unknown-model" if not warm and os.environ.get("FAKE_CLAUDE_UNPRICED") == "1" else "claude-opus-5-5"
+    cold_job = not warm and os.environ.get("FAKE_CLAUDE_COLD_JOB") == "1"
     ctx = 100_000
     entries.append(
         {
@@ -108,8 +126,8 @@ if not cold_warmup:
                 "content": content,
                 "usage": {
                     "input_tokens": 5,
-                    "cache_read_input_tokens": ctx,
-                    "cache_creation_input_tokens": 200,
+                    "cache_read_input_tokens": 0 if cold_job else ctx,
+                    "cache_creation_input_tokens": ctx if cold_job else 200,
                     "output_tokens": 50,
                 },
             },
@@ -119,4 +137,7 @@ if not cold_warmup:
 if not warm:
     Path("RESULT.txt").write_text(f"done by {'delegate' if note else 'keep'}\n")
 log()
-print(json.dumps({"type": "result", "session_id": new, "result": "ok"}))
+result: dict = {"type": "result", "session_id": new, "result": "ok"}
+if not warm and os.environ.get("FAKE_CLAUDE_ERROR_RESULT") == "1":
+    result["is_error"] = True
+print(json.dumps(result))

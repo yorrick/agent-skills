@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -304,6 +305,8 @@ def test_pair_runs_both_sides_and_only_delegate_gets_the_note(tmp_path: Path, sn
     assert [c["note"] is not None for c in calls if not prompt_of(c).startswith("Reply")] == [
         name == "delegate" for name in result["order"]
     ]
+    # Ruling T11f New 2: the warm-up never gets the note, on either side.
+    assert all(c["note"] is None for c in calls if prompt_of(c).startswith("Reply"))
     # Ruling T11e-i: the subagent's call is counted in the delegate side's cost, not
     # just its call count.
     p = usage.load_prices()["claude-opus-5-5"]
@@ -391,6 +394,70 @@ def test_unpriced_call_makes_the_pair_inconclusive(
     monkeypatch.setenv("FAKE_CLAUDE_UNPRICED", "1")
     result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
     assert result["inconclusive"] and result["reason"] == "unpriced"
+    # Ruling T11f Open 2: an unpriced call stops the pair at once; the second side
+    # never runs.
+    assert len(result["sides"]) == 1
+
+
+def test_warm_warmup_but_cold_job_is_retried(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling T11f New 1: the warm-up's own calls being priced does not prove the
+    job's own first call actually read the shared prefix from cache; both checks
+    must run."""
+    monkeypatch.setenv("FAKE_CLAUDE_COLD_JOB", "1")
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert result["inconclusive"] and result["reason"] == "never warm"
+    first = result["order"][0]
+    assert list(result["sides"]) == [first]
+    assert result["sides"][first]["attempt"] == replay.ATTEMPTS
+
+
+def test_model_has_no_suffix_for_a_context_at_or_below_the_threshold(
+    tmp_path: Path, repo: Path, fake_claude: Path
+) -> None:
+    event = {**EVENT, "context": 200_000}
+    transcript = write(tmp_path / "t.jsonl", [typed("start"), assistant("r1")])
+    sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "build it", "N", event)
+    snap = tmp_path / "fc" / "snapshots" / sid
+    replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    calls = calls_log(tmp_path)
+    assert calls
+    for c in calls:
+        assert c["args"][c["args"].index("--model") + 1] == "claude-opus-5-5"
+
+
+def test_timeout_makes_the_pair_inconclusive_at_once_without_retrying(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(replay, "TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setenv("FAKE_CLAUDE_SLEEP_CHILD", str(tmp_path / "child.pid"))
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert result["inconclusive"] and result["reason"] == "timed out"
+    first = result["order"][0]
+    assert list(result["sides"]) == [first]
+    # Ruling T11f Also: a timeout is never retried.
+    assert result["sides"][first]["attempt"] == 1
+
+
+def test_timeout_kills_the_whole_process_group(
+    tmp_path: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(replay, "TIMEOUT_SECONDS", 1)
+    pidfile = tmp_path / "child.pid"
+    monkeypatch.setenv("FAKE_CLAUDE_SLEEP_CHILD", str(pidfile))
+    _, _, code = replay.run_claude(tmp_path, "sid", "hello", {}, fake_claude, "claude-opus-5-5")
+    assert code == -1
+    child_pid = int(pidfile.read_text())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail("the sleep child was not killed along with the timed-out fake claude")
 
 
 def test_leaked_real_path_makes_the_pair_inconclusive_and_stops_the_second_side(
@@ -443,8 +510,99 @@ def test_install_session_refuses_a_transcript_line_that_does_not_parse(tmp_path:
     sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "build it", "N", EVENT)
     snap = tmp_path / "fc" / "snapshots" / sid
     clone = replay.restore(snap, tmp_path / "r")
-    with pytest.raises(replay.Inconclusive, match="no longer parsed"):
+    # Ruling T11f Also: the wording covers a line that never parsed at all, not just
+    # one the rewrite itself broke.
+    with pytest.raises(replay.Inconclusive, match="did not parse as JSON"):
         replay.install_session(snap, clone, tmp_path / "claude-home")
+
+
+def test_install_session_refuses_a_copy_that_still_names_the_real_path(
+    tmp_path: Path, snap: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling T11f Open 3: right after every line is rewritten, the installed copy
+    is scanned once more, before any `claude` call spends real time or money."""
+    clone = replay.restore(snap, tmp_path / "r")
+    monkeypatch.setattr(replay, "_rewrite_real_paths", lambda text, tops, clone: text)
+    with pytest.raises(replay.Inconclusive, match="still names the real repository"):
+        replay.install_session(snap, clone, tmp_path / "claude-home")
+    target = replay.project_dir(tmp_path / "claude-home", clone)
+    assert not list(target.glob("*.jsonl")) if target.exists() else True
+
+
+def test_path_boundary_rewrites_shell_quoted_and_composed_forms(tmp_path: Path, repo: Path) -> None:
+    """Ruling T11f Open 1: the boundary regressed to only `/`, a quote, whitespace,
+    a backslash or end of string, so `cd '<top>'`, `cd <top>;`, `(cd <top>)`,
+    `` `<top>` `` and `PYTHONPATH=<top>:x` all kept the real path. One boundary,
+    `(?![\\w.-])`, must cover all five, and the sibling test must still pass."""
+    real_repo = repo.resolve()
+    other = real_repo.parent / (real_repo.name + "-other")
+    forms = [
+        f"cd '{real_repo}' && ls",
+        f"cd {real_repo}; ls",
+        f"(cd {real_repo})",
+        f"`{real_repo}`",
+        f"PYTHONPATH={real_repo}:x",
+    ]
+    text = "; ".join(forms) + f"; keep {other}/keep.py"
+    transcript = write(tmp_path / "t.jsonl", [typed("start"), assistant("r1", text=text)])
+    sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "build it", "N", EVENT)
+    snap2 = tmp_path / "fc" / "snapshots" / sid
+    clone = replay.restore(snap2, tmp_path / "r")
+    new_sid = replay.install_session(snap2, clone, tmp_path / "claude-home")
+    rewritten = (replay.project_dir(tmp_path / "claude-home", clone) / f"{new_sid}.jsonl").read_text()
+    for original in forms:
+        assert original not in rewritten
+        assert original.replace(str(real_repo), str(clone)) in rewritten
+    assert f"{other}/keep.py" in rewritten
+
+
+def test_leak_scan_runs_on_a_crashed_attempt_too(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling T11f Open 1: a leak must be caught even when the job that produced it
+    also reported is_error (a graceful crash: the session file is written, with the
+    leaking tool call in it, before the CLI reports the error), not only after a
+    clean success."""
+    meta = json.loads((snap / "meta.json").read_text())
+    monkeypatch.setenv("FAKE_CLAUDE_LEAK_PATH", meta["toplevel"])
+    monkeypatch.setenv("FAKE_CLAUDE_ERROR_RESULT", "1")
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert result["inconclusive"]
+    assert result["reason"] == "a replay used a path into the real repository"
+
+
+def test_history_naming_a_sibling_checkout_is_not_flagged(tmp_path: Path, repo: Path, fake_claude: Path) -> None:
+    """Ruling T11f Open 3: a sibling checkout's name (`<repo>-sibling`) shares a
+    literal text prefix with the real checkout's own path, and a leak scan that
+    read the whole forked file (inherited history included) would risk flagging
+    it; the new-turn-scoped scan never even looks at that history."""
+    sibling = f"{repo}-sibling"
+    entries = [
+        typed("earlier"),
+        {
+            "type": "assistant",
+            "requestId": "r0",
+            "message": {
+                "model": "claude-opus-5-5",
+                "content": [
+                    {"type": "tool_use", "id": "r0", "name": "Read", "input": {"file_path": f"{sibling}/README.md"}}
+                ],
+                "usage": {
+                    "input_tokens": 5,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 50,
+                    "output_tokens": 10,
+                },
+            },
+        },
+        typed("start"),
+        assistant("r1", text=f"Edited {repo}/app.py"),
+    ]
+    transcript = write(tmp_path / "t.jsonl", entries)
+    sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "build it", "NOTE", EVENT)
+    snap = tmp_path / "fc" / "snapshots" / sid
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert not result["inconclusive"]
 
 
 def test_install_session_rewrites_the_main_worktree_and_home_forms_but_not_a_similar_path(

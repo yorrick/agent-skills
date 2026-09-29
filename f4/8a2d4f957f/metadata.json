@@ -1,0 +1,25 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "f48a2d4f957f",
+  "strategy": "manual-commit",
+  "branch": "jev-cache-aware-spec",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "jev-router/skills/jev/SKILL.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/f4/8a2d4f957f/0/metadata.json",
+      "transcript": "/f4/8a2d4f957f/0/full.jsonl",
+      "content_hash": "/f4/8a2d4f957f/0/content_hash.txt",
+      "prompt": "/f4/8a2d4f957f/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 2852,
+    "cache_creation_tokens": 3824529,
+    "cache_read_tokens": 382496907,
+    "output_tokens": 1169410,
+    "api_call_count": 1206
+  }
+}

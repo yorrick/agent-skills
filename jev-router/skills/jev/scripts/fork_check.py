@@ -28,10 +28,20 @@ import report
 import usage
 
 EXTERNAL_SHELL = re.compile(
-    r"\bgit\s+push\b|\bgh\s+(pr|issue|release|repo|secret|workflow)\s+(create|merge|edit|close|comment|delete|run|set)"
-    r"|\bgh\s+api\b.*-X\s*(POST|PUT|PATCH|DELETE)|\bvercel\b|\bsupabase\s+(db\s+push|functions\s+deploy)"
-    r"|\bpulumi\s+up\b|\bterraform\s+apply\b|\bcurl\b.*-X\s*(POST|PUT|PATCH|DELETE)|\bhttp\s+(POST|PUT|PATCH|DELETE)\b"
-    r"|\bnpm\s+publish\b|\bdeploy\b",
+    # git push, also after `-C <path>` or `-c key=value`
+    r"\bgit\s+(?:-[Cc]\s*(?:\"[^\"]*\"|'[^']*'|\S+)\s+)*push\b"
+    r"|\bgh\s+(pr|issue|release|repo|secret|workflow)\s+(create|merge|edit|close|comment|delete|run|set)"
+    # gh api with any method but GET, or with fields (a POST unless the method says GET)
+    r"|\bgh\s+api\b.*(?:-X|--method)\s*=?\s*['\"]?(?!GET\b)[A-Z]"
+    r"|\bgh\s+api\b(?!.*(?:-X|--method)\s*=?\s*['\"]?GET\b).*\s(?:-f|-F|--field|--raw-field|--input)\b"
+    r"|\bvercel\b|\bsupabase\s+(db\s+push|functions\s+deploy)|\bpulumi\s+up\b|\bterraform\s+apply\b"
+    # curl with a writing method, or with a body (a POST by default)
+    r"|\bcurl\b.*(?:-X|--request)\s*=?\s*['\"]?(POST|PUT|PATCH|DELETE)"
+    r"|\bcurl\b.*\s(?:-d|--data(?:-raw|-binary|-urlencode)?|--json|-F|--form)\b"
+    # httpie: a writing method, or a data item (`k=v`, `k:=json`) that makes it a POST
+    r"|\bhttps?\s+(POST|PUT|PATCH|DELETE)\b"
+    r"|\bhttps?\s+(?!(?:GET|HEAD|OPTIONS)\b)[^|;&\n]*?\s[\w.\[\]@-]+:?=(?!=)"
+    r"|\baws\s+[a-z]|\bnpm\s+publish\b|\bdeploy\b",
     re.IGNORECASE,
 )
 # Reason: an MCP tool is listed unless its name says it only reads; the user decides.
@@ -120,20 +130,26 @@ def cmd_list() -> int:
     """Every finished snapshot, its status, and what its real turn did outside the
     machine, so the user can decide which jobs are safe to replay with full access."""
     done = statuses()
-    print("| snapshot | repo | expected saving | status | outside the machine (from the real turn) |")
-    print("|---|---|---|---|---|")
+    print("| snapshot | repo | expected saving | status | prompt cut | outside the machine (from the real turn) |")
+    print("|---|---|---|---|---|---|")
     for snap in snapshot_dirs():
         meta = json.loads((snap / "meta.json").read_text())
         actions = external_actions(real_turn(meta, (snap / "message.txt").read_text()))
         shown = "; ".join(actions[:3]) + (f"; and {len(actions) - 3} more" if len(actions) > 3 else "")
         status = done.get(snap.name, {}).get("status", "new")
+        cut = {True: "yes", False: "no"}.get(meta.get("prompt_cut"), "?")
         print(
-            f"| {snap.name} | {Path(meta['toplevel']).name} | ${meta['expected_saving']:.2f} | {status} | "
+            f"| {snap.name} | {Path(meta['toplevel']).name} | ${meta['expected_saving']:.2f} | {status} | {cut} | "
             f"{shown or 'nothing found'} |"
         )
     print(
         "\nThe list is a guide: a replay can do something the real turn did not. Mark a job safe only if two "
         "replays in a row could run without an external effect you would mind."
+    )
+    print(
+        '"prompt cut: no" means the saved conversation did not end with the message. That is normal when Claude '
+        "Code had not written it yet; for a message with images or several text blocks, check that the "
+        "snapshot's transcript.jsonl does not already hold it, or the replay sees it twice."
     )
     snapshots_dir = root() / "snapshots"
     abandoned = sorted(snapshots_dir.glob("*.tmp")) if snapshots_dir.exists() else []

@@ -38,6 +38,49 @@ def test_external_actions_name_pushes_prs_deploys_and_mcp_writes() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git -C /work/app push origin HEAD",
+        "git -C '/work/my app' push",
+        "git -c push.default=current push",
+        "http example.org/api/items name=widget",
+        "https api.example.org/items count:=3",
+        "http --form :8000/upload file@report.pdf name=x",
+        "curl -d 'a=1' https://example.org/api",
+        "curl --data @body.json https://example.org/api",
+        "curl --json '{}' https://example.org/api",
+        "curl -X PUT https://example.org/api/1",
+        "curl --request DELETE https://example.org/api/1",
+        "gh api --method PATCH repos/acme/shop",
+        "gh api -X POST repos/acme/shop/issues",
+        "gh api repos/acme/shop/issues -f title=bug",
+        "aws s3 cp build s3://bucket/ --recursive",
+    ],
+)
+def test_external_actions_catch_the_common_writing_forms(command: str) -> None:
+    """Final Minor 9: each of these reaches outside the machine."""
+    assert fork_check.external_actions([tool("Bash", command=command)]) == [f"shell: {command}"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git -C /work/app status",
+        "http example.org/api/items q==widget",
+        "http GET example.org/api/items name=x",
+        "python -m http.server 8000",
+        "curl https://example.org/api",
+        "curl -X GET https://example.org/api",
+        "gh api repos/acme/shop",
+        "gh api -X GET search/issues -f q=bug",
+        "gh api --method=get repos/acme/shop",
+    ],
+)
+def test_external_actions_leave_reads_alone(command: str) -> None:
+    assert fork_check.external_actions([tool("Bash", command=command)]) == []
+
+
 def test_marks_are_recorded_and_the_latest_wins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(fork_check, "root", lambda: tmp_path)
     (tmp_path / "snapshots" / "20261001-100000-abc").mkdir(parents=True)
@@ -75,6 +118,7 @@ def test_list_shows_the_real_turns_external_actions(
                 "created": "2026-10-01T10:00:00+00:00",
                 "toplevel": "/work/app",
                 "expected_saving": 1.2,
+                "prompt_cut": False,
             }
         )
     )
@@ -84,6 +128,9 @@ def test_list_shows_the_real_turns_external_actions(
     assert "20261001-100000-abc" in out
     assert "shell: git push origin HEAD" in out
     assert "abandoned" not in out
+    # Ledger, Task 11: whether the snapshot cut the message out of its transcript.
+    assert "| prompt cut |" in out
+    assert "| 20261001-100000-abc | app | $1.20 | new | no | shell: git push origin HEAD |" in out
 
 
 def test_list_reports_abandoned_tmp_folders(

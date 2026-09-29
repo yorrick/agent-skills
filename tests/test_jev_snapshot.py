@@ -75,12 +75,17 @@ def test_snapshot_holds_the_conversation_and_the_working_copy(tmp_path: Path, re
     assert (d / "transcript.jsonl").read_text() == transcript.read_text()
 
 
+def meta_of(tmp_path: Path, sid: str) -> dict:
+    return json.loads((tmp_path / "fc" / "snapshots" / sid / "meta.json").read_text())
+
+
 def test_snapshot_cuts_the_prompt_if_already_written(tmp_path: Path, repo: Path) -> None:
     before = [typed("start"), assistant("r1", text="Ready.")]
     transcript = write(tmp_path / "t.jsonl", [*before, typed("build it")])
     sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "build it", "N", EVENT)
     kept = (tmp_path / "fc" / "snapshots" / sid / "transcript.jsonl").read_text()
     assert kept == "".join(json.dumps(e) + "\n" for e in before)
+    assert meta_of(tmp_path, sid)["prompt_cut"] is True
 
 
 def test_snapshot_keeps_everything_if_prompt_not_written_yet(tmp_path: Path, repo: Path) -> None:
@@ -88,12 +93,26 @@ def test_snapshot_keeps_everything_if_prompt_not_written_yet(tmp_path: Path, rep
     transcript = write(tmp_path / "t.jsonl", entries)
     sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "build it", "N", EVENT)
     assert (tmp_path / "fc" / "snapshots" / sid / "transcript.jsonl").read_text() == transcript.read_text()
+    assert meta_of(tmp_path, sid)["prompt_cut"] is False
 
 
 def test_snapshot_keeps_an_earlier_identical_prompt(tmp_path: Path, repo: Path) -> None:
     transcript = write(tmp_path / "t.jsonl", [typed("continue"), assistant("r1", text="Done.")])
     sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "continue", "N", EVENT)
     assert (tmp_path / "fc" / "snapshots" / sid / "transcript.jsonl").read_text() == transcript.read_text()
+    assert meta_of(tmp_path, sid)["prompt_cut"] is False
+
+
+def test_snapshot_keeps_the_earlier_identical_prompt_even_with_a_later_one(tmp_path: Path, repo: Path) -> None:
+    """ "continue" typed, answered, then typed again: the message is already written
+    (the last typed entry), but an earlier identical "continue" must not fool the
+    cut into keeping only up to itself; the first two lines (the earlier exchange)
+    are what stays."""
+    before = [typed("continue"), assistant("r1")]
+    transcript = write(tmp_path / "t.jsonl", [*before, typed("continue")])
+    sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "continue", "N", EVENT)
+    kept = (tmp_path / "fc" / "snapshots" / sid / "transcript.jsonl").read_text()
+    assert kept == "".join(json.dumps(e) + "\n" for e in before)
 
 
 def test_fingerprint_sees_python_packages_come_and_go(repo: Path) -> None:
@@ -129,6 +148,33 @@ def test_huge_untracked_files_are_refused(tmp_path: Path, repo: Path, monkeypatc
         snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "x", "N", EVENT)
 
 
+# --- untracked nested repositories and worktrees (Ruling T7a) ------------------------
+
+
+def test_untracked_nested_git_repositories_are_skipped_not_tarred(tmp_path: Path, repo: Path) -> None:
+    """`git ls-files --others` reports a directory holding its own .git (a nested
+    repo or a worktree) as a single entry, never descended into. Walking it with
+    tar.add would recurse through its whole tree in one uninterruptible call, so it
+    must be skipped, not tarred, and named in meta.json instead."""
+    nested = repo / "vendor" / "sub"
+    nested.mkdir(parents=True)
+    git(nested, "init", "-q")
+    (nested / "file.txt").write_text("x\n")
+    transcript = write(tmp_path / "t.jsonl", [assistant("r1")])
+    sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "x", "N", EVENT)
+    d = tmp_path / "fc" / "snapshots" / sid
+    with tarfile.open(d / "untracked.tar") as tar:
+        names = tar.getnames()
+    assert not any(n.startswith("vendor/sub") for n in names)
+    assert meta_of(tmp_path, sid)["skipped"] == ["vendor/sub"]
+
+
+def test_a_snapshot_with_nothing_to_skip_lists_no_skipped_paths(tmp_path: Path, repo: Path) -> None:
+    transcript = write(tmp_path / "t.jsonl", [assistant("r1")])
+    sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "x", "N", EVENT)
+    assert meta_of(tmp_path, sid)["skipped"] == []
+
+
 # --- deadlines and the atomic .tmp folder (Ruling P4) --------------------------------
 
 
@@ -145,3 +191,20 @@ def test_a_successful_snapshot_leaves_no_tmp_folder(tmp_path: Path, repo: Path) 
     sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "x", "N", EVENT)
     names = [p.name for p in (tmp_path / "fc" / "snapshots").iterdir()]
     assert names == [sid]
+
+
+def test_a_failure_after_the_tmp_folder_exists_still_leaves_nothing_behind(
+    tmp_path: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`ignored_fingerprint` runs last, well after `.tmp` has been created and every
+    other file written, so failing there exercises cleanup of a `.tmp` folder that
+    is not empty, unlike the deadline-already-past case above."""
+
+    def boom(top: Path, deadline: float | None = None) -> str:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(snapshot, "ignored_fingerprint", boom)
+    transcript = write(tmp_path / "t.jsonl", [assistant("r1")])
+    with pytest.raises(RuntimeError, match="boom"):
+        snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "x", "N", EVENT)
+    assert list((tmp_path / "fc" / "snapshots").iterdir()) == []

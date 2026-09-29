@@ -654,7 +654,7 @@ def test_capture_mode_records_a_failed_snapshot_without_blocking_the_message(
     )
     assert result.stdout == ""
     (event,) = log(home)
-    assert "snapshot_error" in event and "snapshot" not in event
+    assert event.get("snapshot_error") == "git rev-parse failed" and "snapshot" not in event
 
 
 # --- status ------------------------------------------------------------------------

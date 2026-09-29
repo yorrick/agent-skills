@@ -571,8 +571,10 @@ def interactive(harness: str, payload: dict) -> bool:
 def route_cache_aware(config: dict, payload: dict, prompt: str) -> str:
     """Claude Code: price keeping the job against a fresh subagent. Only `live` mode
     tells the session anything; `shadow` and `capture` only log."""
-    # Reason: capture mode's snapshot gets a 6 s budget of the hook's own 8 s
-    # timeout, leaving the rest for startup, the Jev call and logging.
+    # Reason: taken here, before the transcript read and the Jev call, so the
+    # snapshot's 6 s deadline is a budget shared with all of that work, not extra
+    # time on top of it. It still leaves 2 s of the hook's 8 s timeout for process
+    # startup and shutdown outside this function.
     started = time.monotonic()
     mode = config.get("mode", "shadow")
     event: dict = {

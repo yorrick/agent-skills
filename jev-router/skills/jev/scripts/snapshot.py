@@ -5,6 +5,11 @@ fast: a transcript copy, `git diff`, a tar of untracked files, and a cheap
 fingerprint of the ignored setup files and dependencies (sizes and modification
 times, never their contents except small `.env` files).
 
+Only regular files and symlinks go into the tar; anything else `git ls-files
+--others` reports (chiefly a nested repository or worktree, which comes back as
+one directory entry) is skipped and named in `meta.json["skipped"]` instead, so a
+snapshot never walks another repository's whole tree.
+
 Every git call and the tar loop respect an optional deadline (a `time.monotonic()`
 value), so a snapshot that is about to run out of time fails fast instead of
 running past the hook's own timeout. The snapshot is built in a `.tmp` sibling
@@ -16,7 +21,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
+import stat
 import subprocess
 import tarfile
 import time
@@ -57,7 +64,10 @@ def git(cwd: Path, *args: str, deadline: float | None = None) -> str:
 
 
 def _git_bytes(cwd: Path, *args: str, deadline: float | None = None) -> bytes:
-    result = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, timeout=_time_left(deadline))
+    try:
+        result = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, timeout=_time_left(deadline))
+    except subprocess.TimeoutExpired:
+        raise SnapshotError("snapshot ran out of time") from None
     if result.returncode != 0:
         raise SnapshotError(f"git {args[0]} failed")
     return result.stdout
@@ -119,24 +129,44 @@ def take_snapshot(
         top = Path(git(cwd, "rev-parse", "--show-toplevel", deadline=deadline).strip())
         head = git(top, "rev-parse", "HEAD", deadline=deadline).strip()
         branch = git(top, "rev-parse", "--abbrev-ref", "HEAD", deadline=deadline).strip()
-        untracked = [
+        raw = [
             p
             for p in _git_bytes(top, "ls-files", "--others", "--exclude-standard", "-z", deadline=deadline).split(b"\0")
             if p
         ]
-        if sum((top / p.decode()).stat().st_size for p in untracked) > MAX_UNTRACKED_BYTES:
+        # Reason: a directory holding its own .git (a nested repo or a worktree)
+        # comes back from `ls-files` as one entry, never descended into. Walking it
+        # with tar.add would recurse through its whole tree, including its own
+        # .git, in one uninterruptible call, and the user's worktrees live under
+        # <repo>/.claude/worktrees/. Only regular files and symlinks are kept; every
+        # other entry (a nested repo, a worktree, a socket, ...) is skipped and
+        # named in meta.json instead.
+        untracked: list[bytes] = []
+        skipped: list[str] = []
+        total = 0
+        for p in raw:
+            rel = p.decode()
+            st = os.lstat(top / rel)
+            if stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode):
+                untracked.append(p)
+                total += st.st_size
+            else:
+                skipped.append(rel.rstrip("/"))
+        if total > MAX_UNTRACKED_BYTES:
             raise SnapshotError("untracked files are too large to snapshot")
         tmp.mkdir(parents=True)
         transcript = Path(payload["transcript_path"])
-        (tmp / "transcript.jsonl").write_bytes(trim_before_prompt(transcript.read_bytes(), prompt))
+        raw_transcript = transcript.read_bytes()
+        trimmed_transcript = trim_before_prompt(raw_transcript, prompt)
+        prompt_cut = trimmed_transcript != raw_transcript
+        (tmp / "transcript.jsonl").write_bytes(trimmed_transcript)
         (tmp / "message.txt").write_text(prompt)
         (tmp / "note.txt").write_text(note)
         (tmp / "changes.diff").write_bytes(_git_bytes(top, "diff", "--binary", "HEAD", deadline=deadline))
         with tarfile.open(tmp / "untracked.tar", "w") as tar:
             for p in untracked:
-                if deadline is not None and time.monotonic() >= deadline:
-                    raise SnapshotError("snapshot ran out of time")
-                tar.add(top / p.decode(), arcname=p.decode())
+                _time_left(deadline)  # raises once nothing is left
+                tar.add(top / p.decode(), arcname=p.decode(), recursive=False)
         meta = {
             "id": sid,
             "created": now.isoformat(timespec="seconds"),
@@ -147,6 +177,8 @@ def take_snapshot(
             "head": head,
             "branch": branch,
             "ignored_fingerprint": ignored_fingerprint(top, deadline=deadline),
+            "skipped": skipped,
+            "prompt_cut": prompt_cut,
             **{
                 k: event.get(k)
                 for k in ("context", "model", "helper", "expected_saving", "loss_probability", "median_calls")

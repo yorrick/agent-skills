@@ -9,6 +9,12 @@ hook runs `hook <harness>` with the user's message as JSON on stdin. The user
 flips the router with `on` and `off`, reads the counters with `status`, and can
 size messages by hand with `classify`.
 
+Codex and opencode hand a job to the model Jev sizes it for. Claude Code instead
+asks Jev how many model calls the job takes and prices keeping it in the session
+(every call re-reads the whole conversation) against briefing a fresh subagent;
+`mode` sets whether it only logs that decision (`shadow`, `capture`) or tells
+the session (`live`).
+
 The router must never get in the way of a message. When it is off, when Jev is
 slow, or when anything at all fails, `hook` prints nothing and exits 0, which
 every harness treats as "no opinion": the message goes through unchanged.
@@ -20,6 +26,7 @@ dependency would add resolver time to each one.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import re
@@ -28,9 +35,16 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TypeVar
+
+# Reason: sibling modules, found because `uv run --script` puts this folder first on sys.path.
+import delegation
+import session as sessions
+import usage
 
 # Reason: Jev itself, through OpenRouter's Decisions API. Not `typesafe/jev-router`,
 # OpenRouter's chat router built on Jev: that one forwards the prompt to whichever
@@ -99,10 +113,37 @@ def load_tiers() -> tuple[dict[str, str], dict[str, tuple[Tier, ...]]]:
 
 
 JOBS, TIERS = load_tiers()
+MODES = ("shadow", "capture", "live")
+STEPS_INSTRUCTIONS = (
+    "An AI coding agent receives this message. How many steps will it take to finish what the message asks? "
+    "One step is one model call: reading a file, running a command, making an edit, delegating, or writing the reply."
+)
+STEP_BUCKETS = [
+    "1 step: a direct answer from what is already known, no tools",
+    "2 to 3 steps: one quick lookup, command or small edit",
+    "4 to 10 steps: read or edit a few files, run a test",
+    "11 to 30 steps: a feature, a debugging session, or a change across several files",
+    "more than 30 steps: a long autonomous build, migration, review loop or investigation",
+]
+
+
+@functools.cache
+def calibration() -> tuple[delegation.Bin, ...]:
+    """Loaded on first use inside the guarded Claude route, so a broken file can only
+    cost that message its opinion, never block it or touch Codex and opencode."""
+    override = os.environ.get("JEV_ROUTER_CALIBRATION")
+    return delegation.load_calibration(Path(override) if override else None)
+
+
+@functools.cache
+def prices() -> dict[str, usage.Prices]:
+    return usage.load_prices()
+
 
 PRIVACY = (
     "While it is on, the text of every message you send also goes to OpenRouter and to TypeSafe "
-    "(the company that makes Jev). Keep it off for private work."
+    "(the company that makes Jev), and in Claude Code so does the agent's previous reply (its last "
+    "1,500 characters). Keep it off for private work."
 )
 
 
@@ -126,6 +167,11 @@ def save_config(config: dict) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(config, indent=2) + "\n")
     tmp.replace(path)
+
+
+def fork_check_dir(config: dict) -> Path:
+    """Where capture mode saves snapshots (set with `mode capture --dir`)."""
+    return Path(config.get("fork_check_dir") or home() / "fork-check")
 
 
 def record(event: dict) -> None:
@@ -247,6 +293,39 @@ def parse_verdict(body: object, tiers: tuple[Tier, ...]) -> Verdict:
     return Verdict(size=size, probability=probability(picked), follow_up=probability(follow_up) >= FOLLOW_UP_AT)
 
 
+def steps_questions(tiers: tuple[Tier, ...]) -> dict:
+    """The cache-aware questions: how many calls the job takes, and which tier fits it."""
+    return {
+        "steps": {"type": "score", "instructions": STEPS_INSTRUCTIONS, "criteria": STEP_BUCKETS},
+        "size": jev_questions(tiers)["size"],
+    }
+
+
+@dataclass(frozen=True)
+class StepsVerdict:
+    steps: float  # Jev's step score: 0 is one call, 4 is more than 30
+    size: str
+    probability: float
+
+
+def parse_steps_verdict(body: object, tiers: tuple[Tier, ...]) -> StepsVerdict:
+    try:
+        steps_answer = body["answers"]["steps"]  # type: ignore[index]
+        size_answer = body["answers"]["size"]  # type: ignore[index]
+        score = steps_answer["score"]
+        size = size_answer["choice"]
+        picked = size_answer["probabilities"][size]
+    except (KeyError, IndexError, TypeError):
+        raise BadAnswer("no steps or size answer") from None
+    if steps_answer.get("type") != "score" or size_answer.get("type") != "choice":
+        raise BadAnswer("an answer has the wrong type")
+    if isinstance(score, bool) or not isinstance(score, int | float) or not 0 <= score <= len(STEP_BUCKETS) - 1:
+        raise BadAnswer("the step score is not a number from 0 to 4")
+    if size not in {t.size for t in tiers}:
+        raise BadAnswer("unknown size")
+    return StepsVerdict(steps=float(score), size=size, probability=probability(picked))
+
+
 def cost_of(body: object) -> float | None:
     """What OpenRouter billed for the call, kept even when the answer is unusable."""
     usage = body.get("usage") if isinstance(body, dict) else None
@@ -270,8 +349,18 @@ def error_label(exc: Exception) -> str:
     return type(exc).__name__
 
 
-def ask_jev(message: str, tiers: tuple[Tier, ...], key: str, timeout: float) -> dict:
-    """One call to Jev, abandoned at `timeout` seconds of wall-clock time.
+def ask_jev(
+    message: str,
+    tiers: tuple[Tier, ...],
+    key: str,
+    timeout: float,
+    *,
+    state: dict | None = None,
+    questions: dict | None = None,
+) -> dict:
+    """One call to Jev, abandoned at `timeout` seconds of wall-clock time. By default
+    it asks the 0.2.0 questions about the message alone; the cache-aware path passes
+    its own state and questions.
 
     urlopen's own timeout bounds each socket operation, not the whole exchange, so a
     slow trickle could outlast it; the daemon thread gives a hard overall deadline.
@@ -279,8 +368,8 @@ def ask_jev(message: str, tiers: tuple[Tier, ...], key: str, timeout: float) -> 
     body = json.dumps(
         {
             "model": JEV_MODEL,
-            "state": {"message": message[:MAX_MESSAGE_CHARS]},
-            "questions": jev_questions(tiers),
+            "state": state or {"message": message[:MAX_MESSAGE_CHARS]},
+            "questions": questions or jev_questions(tiers),
             # Reason: the message goes to TypeSafe and nowhere else, even if
             # OpenRouter adds another provider for Jev later. Verified: OpenRouter
             # answers 404 rather than fall back when the allowed provider is absent.
@@ -310,6 +399,46 @@ def ask_jev(message: str, tiers: tuple[Tier, ...], key: str, timeout: float) -> 
     if error is not None:
         raise error
     return outcome["body"]
+
+
+# Reason: a TypeVar, not `def consult[V]`: the script declares Python 3.11, which
+# cannot parse that syntax, and a syntax error would fail the hook before its guard.
+V = TypeVar("V")
+
+
+def consult(  # noqa: UP047
+    config: dict,
+    event: dict,
+    prompt: str,
+    tiers: tuple[Tier, ...],
+    parse: Callable[[object, tuple[Tier, ...]], V],
+    *,
+    state: dict | None = None,
+    questions: dict | None = None,
+) -> V | None:
+    """One guarded Jev call: the parsed verdict, or None for "no opinion".
+
+    Fills `event` with the outcome of a failed call, the latency, and whether Jev
+    answered and what that cost. Both routes use it, so both log the same way.
+    """
+    started = time.monotonic()
+    body = verdict = None
+    try:
+        key = read_key(config.get("key_file"))
+        if not key:
+            raise NoKey("no OpenRouter API key in the key file")
+        body = ask_jev(prompt, tiers, key, timeout_of(config), state=state, questions=questions)
+        verdict = parse(body, tiers)
+    except TimeoutError:
+        event["outcome"] = "timeout"
+    except Exception as exc:  # any failure means "no opinion"
+        event.update(outcome="error", error=error_label(exc))
+    event["latency_ms"] = round((time.monotonic() - started) * 1000)
+    if body is not None:
+        # Reason: no string from the response is logged: only its cost here, and
+        # after validation the fields a verdict holds (known size names and numbers).
+        event.update(answered=True, cost=cost_of(body))
+    return verdict
 
 
 def decide(verdict: Verdict, tiers: tuple[Tier, ...]) -> Tier | None:
@@ -381,6 +510,20 @@ def keep_note(verdict: Verdict) -> str:
     )
 
 
+def delegate_note(tier: Tier, decision: delegation.Decision, context: int) -> str:
+    share = decision.expected_saving / decision.expected_keep
+    return (
+        f"Jev router: this job will likely take about {decision.median_calls} model calls, and every call here "
+        f"re-reads this conversation's {context // 1000}k tokens. Doing it in a fresh subagent is expected to save "
+        f"${decision.expected_saving:.2f} ({share:.0%} of doing it here), with a {decision.loss_probability:.0%} "
+        "chance it costs more. Write a self-contained brief (the goal, the files and decisions that matter, and "
+        f"what done looks like) and give it to the `{tier.helper}` subagent, never the `fork` type, which copies "
+        "this whole conversation. Tell it not to commit, push, open pull requests or deploy, and to list what is "
+        "left. Then review its changes and do those steps yourself. Keep the job here only if it needs the user "
+        "in the loop or cannot be briefed."
+    )
+
+
 def hook_json(context: str) -> str:
     """What Claude Code and Codex read from a UserPromptSubmit hook."""
     return json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": context}})
@@ -424,6 +567,68 @@ def interactive(harness: str, payload: dict) -> bool:
     return True
 
 
+def route_cache_aware(config: dict, payload: dict, prompt: str) -> str:
+    """Claude Code: price keeping the job against a fresh subagent. Only `live` mode
+    tells the session anything; `shadow` and `capture` only log."""
+    mode = config.get("mode", "shadow")
+    event: dict = {
+        "harness": "claude",
+        "version": 3,
+        "mode": mode,
+        "session_id": payload.get("session_id"),
+        "transcript_path": payload.get("transcript_path"),
+        # Reason: lets the shadow report find the message in the transcript
+        # without the log ever holding its text.
+        "prompt_sha": usage.prompt_sha(prompt),
+    }
+    transcript = payload.get("transcript_path")
+    current = sessions.read_session(Path(transcript)) if transcript else None
+    if current is None:
+        event["outcome"] = "no_session"
+        record(event)
+        return ""
+    event.update(context=current.context, model=current.model, added=current.added, output=current.output)
+    try:
+        bins, table = calibration(), prices()
+    except Exception as exc:  # a broken data file costs this message its opinion, and no Jev call
+        event.update(outcome="error", error=error_label(exc))
+        record(event)
+        return ""
+    tiers = TIERS["claude"]
+    state = {"agent_previous_reply": current.previous_reply, "message": prompt[:MAX_MESSAGE_CHARS]}
+    verdict = consult(config, event, prompt, tiers, parse_steps_verdict, state=state, questions=steps_questions(tiers))
+    note = None
+    if verdict is not None:
+        tier = next(t for t in tiers if t.size == verdict.size)
+        parent, helper = table.get(current.model), table.get(tier.model_id)
+        event.update(steps=verdict.steps, size=verdict.size, helper=tier.helper, helper_model=tier.model_id)
+        if parent is None or helper is None:
+            event["outcome"] = "unpriced"
+        else:
+            sample = delegation.calls_for(bins, verdict.steps)
+            decision = delegation.decide(
+                sample,
+                current.context,
+                current.added,
+                current.output,
+                parent,
+                helper,
+                same_model=tier.model_id == current.model,
+            )
+            event.update(
+                outcome="delegate" if decision.delegate else "keep",
+                expected_keep=round(decision.expected_keep, 4),
+                expected_saving=round(decision.expected_saving, 4),
+                loss_probability=round(decision.loss_probability, 4),
+                median_calls=decision.median_calls,
+                calls=list(sample),
+            )
+            if decision.delegate:
+                note = delegate_note(tier, decision, current.context)
+    record(event)
+    return hook_json(note) if note and mode == "live" else ""
+
+
 def route(harness: str, stdin: str) -> str:
     """What the hook prints: a hand-off, or '' for "carry on as if I wasn't here"."""
     # Reason: a fork-check replay must see exactly the note the live router gave
@@ -448,31 +653,18 @@ def route(harness: str, stdin: str) -> str:
     # (verified: a subagent's own prompt never fires it, but its notice does).
     if not prompt or prompt[0] in "/$" or prompt.startswith(SYSTEM_TURN_PREFIXES):
         return ""
+    if harness == "claude":
+        return route_cache_aware(config, payload, prompt)
     tiers = TIERS[harness]
     event: dict = {"harness": harness}
-    started = time.monotonic()
-    body = verdict = tier = None
-    try:
-        key = read_key(config.get("key_file"))
-        if not key:
-            raise NoKey("no OpenRouter API key in the key file")
-        body = ask_jev(prompt, tiers, key, timeout_of(config))
-        verdict = parse_verdict(body, tiers)
-    except TimeoutError:
-        event["outcome"] = "timeout"
-    except Exception as exc:  # any failure means "no opinion"
-        event.update(outcome="error", error=error_label(exc))
-    event["latency_ms"] = round((time.monotonic() - started) * 1000)
-    if body is not None:
-        # Reason: no string from the response is logged: only its cost here, and
-        # below the size and probability of a verdict that passed validation (a
-        # known size name and a number).
-        event.update(answered=True, cost=cost_of(body))
-    if verdict is not None:
-        tier = decide(verdict, tiers)
-        event.update(outcome=outcome_of(verdict, tier), size=verdict.size, confidence=verdict.confidence)
+    verdict = consult(config, event, prompt, tiers, parse_verdict)
+    if verdict is None:
+        record(event)
+        return ""
+    tier = decide(verdict, tiers)
+    event.update(outcome=outcome_of(verdict, tier), size=verdict.size, confidence=verdict.confidence)
     record(event)
-    return hook_output(harness, tier, verdict) if verdict else ""
+    return hook_output(harness, tier, verdict)
 
 
 # --- commands --------------------------------------------------------------------
@@ -513,6 +705,23 @@ def cmd_off() -> int:
     return 0
 
 
+def cmd_mode(mode: str, directory: str | None) -> int:
+    config = load_config()
+    config["mode"] = mode
+    if directory:
+        config["fork_check_dir"] = str(Path(directory).expanduser().resolve())
+    save_config(config)
+    print(
+        {
+            "shadow": "Jev router mode: shadow. In Claude Code it decides and logs, and tells the session nothing.",
+            "capture": "Jev router mode: capture. Like shadow, and it saves a snapshot of each job it would "
+            f"delegate, under {fork_check_dir(config)}.",
+            "live": "Jev router mode: live. In Claude Code it tells the session to hand long jobs to a fresh subagent.",
+        }[mode]
+    )
+    return 0
+
+
 def status_text(config: dict, events: list[dict]) -> str:
     state = "ON" if config.get("enabled") else "OFF"
     lines = [f"Jev router is {state}." + (f" {PRIVACY}" if state == "ON" else " Turn it on with: /jev on")]
@@ -537,6 +746,14 @@ def status_text(config: dict, events: list[dict]) -> str:
         f"Kept in the session: {count['follow_up']} follow-up replies, {count['unsure']} under "
         f"{MIN_CONFIDENCE}% sure. Carried on without Jev: {count['timeout']} timed out, {count['error']} errors."
     )
+    mode = config.get("mode", "shadow")
+    where = f" Snapshots go under {fork_check_dir(config)}." if mode == "capture" else ""
+    lines.append(f"\nClaude Code mode: {mode}.{where}")
+    cache_aware = [e for e in events if e.get("version") == 3]
+    if cache_aware:
+        delegated = sum(e.get("outcome") == "delegate" for e in cache_aware)
+        snapshots = sum("snapshot" in e for e in cache_aware)
+        lines.append(f"{len(cache_aware)} messages decided, {delegated} worth a fresh subagent, {snapshots} snapshots.")
     answered = [e for e in events if e.get("answered")]
     priced = [e["cost"] for e in answered if isinstance(e.get("cost"), int | float)]
     manual = sum(e.get("harness") == "classify" for e in answered)
@@ -608,6 +825,9 @@ def main(argv: list[str] | None = None) -> int:
     classify = sub.add_parser("classify", help="size messages by hand and print a table")
     classify.add_argument("--harness", choices=HARNESSES, default="claude")
     classify.add_argument("messages", nargs="+")
+    mode = sub.add_parser("mode", help="shadow, capture or live (Claude Code)")
+    mode.add_argument("mode", choices=MODES)
+    mode.add_argument("--dir", help="where capture saves snapshots")
     args = parser.parse_args(argv)
 
     if args.command == "hook":
@@ -618,6 +838,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_off()
     if args.command == "status":
         return cmd_status()
+    if args.command == "mode":
+        return cmd_mode(args.mode, args.dir)
     return cmd_classify(args.harness, args.messages)
 
 

@@ -36,6 +36,8 @@ jev_router = importlib.util.module_from_spec(_spec)
 sys.modules["jev_router"] = jev_router
 _spec.loader.exec_module(jev_router)
 
+from test_jev_usage import assistant, typed  # noqa: E402
+
 
 def jev_answers(size: str, confidence: float, follow_up: bool) -> dict:
     """What Jev's Decisions API returns for the router's two questions: the size
@@ -135,7 +137,7 @@ def switch_on(home: Path, jev: FakeJev, **extra: object) -> None:
 def hook(
     home: Path,
     jev: FakeJev,
-    harness: str = "claude",
+    harness: str = "codex",
     prompt: str = "rename foo to bar",
     attended: str | None = "1",
     source: str | None = "cli",
@@ -198,27 +200,16 @@ def test_key_file_formats() -> None:
 # --- routing -------------------------------------------------------------------------
 
 
-def test_confident_job_is_handed_to_the_matching_claude_helper(home: Path, jev: FakeJev) -> None:
-    switch_on(home, jev)
-    out = json.loads(hook(home, jev))["hookSpecificOutput"]
-    assert out["hookEventName"] == "UserPromptSubmit"
-    assert "`jev-router:tiny`" in out["additionalContext"]
-    assert "Claude Haiku 4.5" in out["additionalContext"]
-    assert "97% sure" in out["additionalContext"]
-    [event] = log(home)
-    assert event["outcome"] == "routed" and event["size"] == "tiny" and event["cost"] == 0.00002
-    assert "rename" not in json.dumps(event), "the log must not keep message text"
-
-
 def test_sixty_percent_is_sure_enough_and_below_is_kept(home: Path, jev: FakeJev) -> None:
     switch_on(home, jev)
     jev.answer = {"size": "large", "confidence": 60, "follow_up": False}
-    assert "jev-router:large" in hook(home, jev)
+    routed = json.loads(hook(home, jev))["hookSpecificOutput"]["additionalContext"]
+    assert 'spawn_agent with fork_turns "none", model "gpt-6-sol", reasoning_effort "high"' in routed
     jev.answer = {"size": "large", "confidence": 59, "follow_up": False}
     context = json.loads(hook(home, jev))["hookSpecificOutput"]["additionalContext"]
     assert "not routing this message" in context and "59% sure" in context
     assert "Carry on with it as you normally would" in context
-    assert "jev-router:" not in context
+    assert "spawn_agent" not in context
     assert [e["outcome"] for e in log(home)] == ["routed", "unsure"]
 
 
@@ -267,15 +258,6 @@ def test_codex_spawns_with_the_model_and_thinking_level(home: Path, jev: FakeJev
     assert "If you are running on exactly GPT-6 Luna at max thinking, handle it yourself" in context
 
 
-def test_claude_hands_off_unless_the_session_is_certain_it_matches(home: Path, jev: FakeJev) -> None:
-    switch_on(home, jev)
-    jev.answer = {"size": "large", "confidence": 90, "follow_up": False}
-    context = json.loads(hook(home, jev))["hookSpecificOutput"]["additionalContext"]
-    assert "`jev-router:large` subagent, which runs on Claude Opus 5.5 at high thinking" in context
-    assert "If you are running on exactly Claude Opus 5.5 at high thinking, handle it yourself" in context
-    assert "if you cannot tell, hand it off" in context
-
-
 def test_opencode_gets_a_switch_it_can_apply(home: Path, jev: FakeJev) -> None:
     switch_on(home, jev)
     jev.answer = {"size": "hardest", "confidence": 90, "follow_up": False}
@@ -291,7 +273,7 @@ def test_opencode_gets_a_switch_it_can_apply(home: Path, jev: FakeJev) -> None:
 def test_headless_claude_is_never_routed_or_sent_to_jev(home: Path, jev: FakeJev, attended: str | None) -> None:
     """`claude -p` sets CLAUDE_CODE_SESSION_ATTENDED=0: a review pins its own model."""
     switch_on(home, jev)
-    assert hook(home, jev, attended=attended) == ""
+    assert hook(home, jev, harness="claude", attended=attended) == ""
     assert jev.requests == [] and log(home) == []
 
 
@@ -411,7 +393,8 @@ def test_the_log_never_keeps_what_jev_said(home: Path, jev: FakeJev, routed: boo
 def test_status_counts_an_answered_call_that_reported_no_cost(home: Path, jev: FakeJev) -> None:
     switch_on(home, jev)
     jev.usage = {}
-    assert "jev-router:tiny" in hook(home, jev)
+    routed = json.loads(hook(home, jev))["hookSpecificOutput"]["additionalContext"]
+    assert 'spawn_agent with fork_turns "none", model "gpt-6-luna", reasoning_effort "medium"' in routed
     text = run(home, jev, "status").stdout
     assert "$0.0000 over 1 answered calls, 1 of which reported no cost." in text
 
@@ -450,6 +433,158 @@ def test_garbage_on_stdin_is_ignored(home: Path, jev: FakeJev) -> None:
     switch_on(home, jev)
     result = run(home, jev, "hook", "claude", stdin="not json")
     assert (result.returncode, result.stdout) == (0, "")
+
+
+# --- Claude Code: keep the job, or brief a fresh subagent ----------------------------
+
+CALIBRATION = {
+    "bins": [{"max_score": 1.0, "calls": [1, 1, 2, 2, 3]}, {"max_score": None, "calls": [12, 20, 30, 40, 60]}]
+}
+
+
+def steps_answers(score: float, size: str = "large", p: float = 0.8) -> dict:
+    others = [s for s in ("tiny", "everyday", "large", "hardest") if s != size]
+    return {
+        "steps": {"type": "score", "score": score, "probabilities": dict.fromkeys("01234", 0.2)},
+        "size": {
+            "type": "choice",
+            "choice": size,
+            "confidence": 0.5,
+            "probabilities": {**dict.fromkeys(others, round((1 - p) / 3, 4)), size: p},
+        },
+    }
+
+
+def claude_hook(
+    home: Path,
+    jev: FakeJev,
+    *,
+    prompt: str = "build the whole export feature",
+    entries: list[dict] | None = None,
+    env: dict | None = None,
+) -> str:
+    calibration = home.parent / "calibration.json"
+    calibration.write_text(json.dumps(CALIBRATION))
+    transcript = home.parent / "claude-transcript.jsonl"
+    if entries is None:
+        entries = [typed("start"), assistant("r1", read=800_000, w1h=3_000, out=1_500, text="Ready.")]
+    transcript.write_text("".join(json.dumps(e) + "\n" for e in entries))
+    payload = {
+        "prompt": prompt,
+        "session_id": "sess-1",
+        "transcript_path": str(transcript),
+        "cwd": str(home.parent),
+        "permission_mode": "default",
+    }
+    result = run(
+        home,
+        jev,
+        "hook",
+        "claude",
+        stdin=json.dumps(payload),
+        env={"JEV_ROUTER_CALIBRATION": str(calibration), **(env or {})},
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
+def test_shadow_mode_decides_and_logs_but_tells_the_session_nothing(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev)
+    jev.raw_answers = steps_answers(3.5)
+    assert claude_hook(home, jev) == ""
+    (event,) = log(home)
+    assert event["version"] == 3 and event["mode"] == "shadow" and event["outcome"] == "delegate"
+    assert event["expected_saving"] >= 0.25 and event["loss_probability"] == 0
+    assert event["helper"] == "jev-router:large" and event["median_calls"] == 30
+    assert len(event["prompt_sha"]) == 16
+    assert "export feature" not in json.dumps(event)
+
+
+def test_live_mode_tells_the_session_to_brief_a_fresh_subagent(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev, mode="live")
+    jev.raw_answers = steps_answers(3.5)
+    note = json.loads(claude_hook(home, jev))["hookSpecificOutput"]["additionalContext"]
+    assert "`jev-router:large` subagent" in note
+    assert "never the `fork` type" in note
+    assert "not to commit, push, open pull requests or deploy" in note
+    assert chr(0x2014) not in note
+
+
+def test_short_jobs_stay_quiet_even_in_live_mode(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev, mode="live")
+    jev.raw_answers = steps_answers(0.2)
+    assert claude_hook(home, jev) == ""
+    assert log(home)[0]["outcome"] == "keep"
+
+
+def test_follow_ups_are_decided_like_any_message(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev, mode="live")
+    jev.raw_answers = steps_answers(3.5)
+    assert claude_hook(home, jev, prompt="ok go, iterate until the PR is ready") != ""
+
+
+def test_first_message_of_a_session_has_no_opinion(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev, mode="live")
+    assert claude_hook(home, jev, entries=[typed("hello")]) == ""
+    assert log(home)[0]["outcome"] == "no_session"
+    assert jev.requests == []
+
+
+def test_jev_gets_the_steps_and_size_questions_with_the_previous_reply(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev)
+    jev.raw_answers = steps_answers(3.5)
+    claude_hook(home, jev)
+    (request,) = jev.requests
+    assert list(request["state"]) == ["agent_previous_reply", "message"]
+    assert request["state"]["agent_previous_reply"] == "Ready."
+    assert set(request["questions"]) == {"steps", "size"}
+    assert request["questions"]["steps"]["type"] == "score"
+    assert len(request["questions"]["steps"]["criteria"]) == 5
+    assert request["provider"] == {"only": ["typesafe"], "allow_fallbacks": False}
+
+
+def test_a_session_on_an_unpriced_model_is_not_decided(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev, mode="live")
+    jev.raw_answers = steps_answers(3.5)
+    entries = [assistant("r1", model="claude-future-9", read=800_000)]
+    assert claude_hook(home, jev, entries=entries) == ""
+    assert log(home)[0]["outcome"] == "unpriced"
+
+
+def test_a_step_score_out_of_range_is_an_error(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev, mode="live")
+    jev.raw_answers = steps_answers(5.0)
+    assert claude_hook(home, jev) == ""
+    assert log(home)[0]["outcome"] == "error"
+
+
+def test_a_broken_calibration_file_never_blocks_the_message(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev, mode="live")
+    jev.raw_answers = steps_answers(3.5)
+    bad = home.parent / "bad.json"
+    bad.write_text("not json")
+    assert claude_hook(home, jev, env={"JEV_ROUTER_CALIBRATION": str(bad)}) == ""
+    assert log(home)[0]["outcome"] == "error"
+    assert jev.requests == []  # nothing was paid for
+    # Reason: the steps answers have no follow_up, so Codex would reject them for
+    # the wrong reason; its default answer shows the broken file does not reach it.
+    jev.raw_answers = None
+    assert "spawn_agent" in hook(home, jev, harness="codex", env={"JEV_ROUTER_CALIBRATION": str(bad)})
+
+
+def test_shadow_log_keeps_the_priced_call_distribution(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev)
+    jev.raw_answers = steps_answers(3.5)
+    claude_hook(home, jev)
+    assert log(home)[0]["calls"] == [12, 20, 30, 40, 60]
+
+
+def test_mode_command_sets_the_mode_and_capture_dir(home: Path, jev: FakeJev, tmp_path: Path) -> None:
+    result = run(home, jev, "mode", "capture", "--dir", str(tmp_path / "fc"))
+    assert result.returncode == 0
+    config = json.loads((home / "config.json").read_text())
+    assert config["mode"] == "capture" and config["fork_check_dir"] == str(tmp_path / "fc")
+    assert "snapshot" in result.stdout
 
 
 # --- status ------------------------------------------------------------------------
@@ -491,6 +626,27 @@ def test_status_when_nothing_happened_yet(home: Path, jev: FakeJev) -> None:
     text = run(home, jev, "status").stdout
     assert "Jev router is OFF. Turn it on with: /jev on" in text
     assert "Messages Jev sized: 0" in text
+
+
+def test_status_names_the_claude_code_mode_before_any_decision(home: Path, jev: FakeJev, tmp_path: Path) -> None:
+    assert "Claude Code mode: shadow." in run(home, jev, "status").stdout
+    assert run(home, jev, "mode", "capture").returncode == 0
+    assert f"Claude Code mode: capture. Snapshots go under {home / 'fork-check'}." in run(home, jev, "status").stdout
+    assert run(home, jev, "mode", "capture", "--dir", str(tmp_path / "fc")).returncode == 0
+    text = run(home, jev, "status").stdout
+    assert f"Claude Code mode: capture. Snapshots go under {tmp_path / 'fc'}." in text
+    assert "messages decided" not in text
+
+
+def test_status_counts_claude_code_decisions(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev, mode="live")
+    jev.raw_answers = steps_answers(3.5)
+    claude_hook(home, jev)
+    jev.raw_answers = steps_answers(0.2)
+    claude_hook(home, jev)
+    text = run(home, jev, "status").stdout
+    assert "Claude Code mode: live." in text
+    assert "2 messages decided, 1 worth a fresh subagent, 0 snapshots." in text
 
 
 # --- opencode: the hook module, through the repository's opencode entry -------------

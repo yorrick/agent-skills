@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -107,22 +108,133 @@ def test_force_added_tracked_file_survives_the_start_commit(tmp_path: Path, repo
     assert git(clone, "show", "refs/jev/start:build/out.txt") == "built\n"
 
 
-def test_ignore_rule_drift_since_the_snapshot_makes_it_inconclusive(tmp_path: Path, repo: Path) -> None:
-    """A file tracked at snapshot time can become untracked and ignored later (a
-    committed file the user removed from the index and added to .gitignore).
-    Blindly copying the source's current version over the clone's checked-out
-    one would silently rewrite the clone away from `head`, undetected unless
-    the copy's effect on `git status` is checked."""
+# --- fix round 2: symlinked ignored entries (Ruling T9f, repro.py) -------------------
+
+
+def test_symlinked_ignored_entry_through_a_parent_dir_leaves_the_real_dirs_untouched(
+    tmp_path: Path, repo: Path, snap: Path
+) -> None:
+    """repro.py mode "parent": an ignore pattern can match a symlink to a
+    directory entirely outside the repository that itself holds a nested
+    checkout and a venv. `cp -cRp` keeps the symlink, and a naive walk would
+    follow it into the user's real filesystem and delete real directories there;
+    this must never be touched, let alone removed."""
+    ext = tmp_path / "ext"
+    (ext / "subrepo").mkdir(parents=True)
+    git(ext / "subrepo", "init", "-q")
+    (ext / "subrepo" / "precious.txt").write_text("user work\n")
+    (ext / "venv").mkdir()
+    (ext / "venv" / "pyvenv.cfg").write_text("home=/x\n")
+    (repo / ".gitignore").write_text((repo / ".gitignore").read_text() + "data\n")
+    (repo / "data").symlink_to(ext)  # the user moved on after the snapshot
+    clone = replay.restore(snap, tmp_path / "r")
+    assert (ext / "subrepo").exists()
+    assert (ext / "venv").exists()
+    assert not (clone / "data").exists()
+    restored = json.loads((tmp_path / "r" / "restore.json").read_text())
+    assert restored["skipped"] == ["data"]
+
+
+def test_symlinked_special_dir_is_skipped_without_raising(tmp_path: Path, repo: Path, snap: Path) -> None:
+    """repro.py mode "self": the symlink points directly at a special dir (here a
+    nested checkout; a symlinked `.venv` or an `npm link`ed package is the same
+    shape). Deleting through a symlink like that used to raise a raw OSError;
+    the fix must never even attempt to copy it."""
+    ext = tmp_path / "ext"
+    (ext / "subrepo").mkdir(parents=True)
+    git(ext / "subrepo", "init", "-q")
+    (ext / "subrepo" / "precious.txt").write_text("user work\n")
+    (repo / ".gitignore").write_text((repo / ".gitignore").read_text() + "data\n")
+    (repo / "data").symlink_to(ext / "subrepo")  # the user moved on after the snapshot
+    clone = replay.restore(snap, tmp_path / "r")
+    assert (ext / "subrepo").exists()
+    assert not (clone / "data").exists()
+    restored = json.loads((tmp_path / "r" / "restore.json").read_text())
+    assert restored["skipped"] == ["data"]
+
+
+def test_relative_symlink_inside_an_ignored_entry_staying_in_the_repo_is_copied_as_a_link(
+    tmp_path: Path, repo: Path
+) -> None:
+    """A relative symlink inside an ignored directory that resolves inside the
+    repository is safe: `_collect_exclusions` must not flag it, and it must
+    reach the clone as a link, not be expanded or skipped."""
+    (repo / "node_modules" / ".bin").mkdir(parents=True)
+    (repo / "node_modules" / "real-target.js").write_text("module.exports = 1;\n")
+    (repo / "node_modules" / ".bin" / "tool").symlink_to(Path("..") / "real-target.js")
+    transcript = write(tmp_path / "t.jsonl", [typed("start"), assistant("r1")])
+    sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "build it", "N", EVENT)
+    snap = tmp_path / "fc" / "snapshots" / sid
+    clone = replay.restore(snap, tmp_path / "r")
+    link = clone / "node_modules" / ".bin" / "tool"
+    assert link.is_symlink()
+    assert os.readlink(link) == str(Path("..") / "real-target.js")
+    restored = json.loads((tmp_path / "r" / "restore.json").read_text())
+    assert restored["skipped"] == []
+
+
+def test_stray_git_guard_rejects_a_surviving_nested_checkout(tmp_path: Path) -> None:
+    """Direct unit test of the defense-in-depth backstop, independent of whether
+    the normal `restore` flow can still trigger it."""
+    clone = tmp_path / "clone"
+    (clone / ".git").mkdir(parents=True)
+    (clone / "vendor" / "sub" / ".git").mkdir(parents=True)
+    with pytest.raises(replay.Inconclusive, match="nested checkout survived"):
+        replay._reject_stray_checkouts(clone)
+
+
+# --- fix round 2: ignore-rule drift the porcelain diff alone cannot see (Ruling T9b, drift.py) ---
+
+
+def test_ignored_untracked_file_edited_after_the_snapshot_is_inconclusive(tmp_path: Path, repo: Path) -> None:
+    """drift.py mode "untracked-file": a file untracked and not ignored at
+    snapshot time (captured in untracked.tar) becomes ignored and is edited
+    afterward. `git status --porcelain` shows the same "?? scratch.txt" line
+    before and after copying regardless of content, so only checking that the
+    ignored path does not already exist in the clone catches this."""
+    (repo / "scratch.txt").write_text("v1\n")
+    transcript = write(tmp_path / "t.jsonl", [typed("start"), assistant("r1")])
+    sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "build it", "N", EVENT)
+    snap = tmp_path / "fc" / "snapshots" / sid
+    (repo / ".gitignore").write_text((repo / ".gitignore").read_text() + "scratch.txt\n")
+    (repo / "scratch.txt").write_text("v2 AFTER SNAPSHOT\n")  # the user moved on after the snapshot
+    with pytest.raises(replay.Inconclusive, match="already exists in the clone"):
+        replay.restore(snap, tmp_path / "r")
+
+
+def test_ignored_untracked_dir_edited_after_the_snapshot_is_inconclusive(tmp_path: Path, repo: Path) -> None:
+    """drift.py mode "untracked-dir": an untracked directory captured in the tar
+    is later matched by an ignore pattern. Copying it again on top would produce
+    a `notes/notes/a.md` duplicate that `git status --porcelain` also cannot
+    see, since it still collapses the whole directory into one "?? notes/"
+    line."""
+    (repo / "notes").mkdir()
+    (repo / "notes" / "a.md").write_text("v1\n")
+    transcript = write(tmp_path / "t.jsonl", [typed("start"), assistant("r1")])
+    sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "build it", "N", EVENT)
+    snap = tmp_path / "fc" / "snapshots" / sid
+    (repo / ".gitignore").write_text((repo / ".gitignore").read_text() + "notes/\n")
+    (repo / "notes" / "a.md").write_text("v2 AFTER SNAPSHOT\n")  # the user moved on after the snapshot
+    with pytest.raises(replay.Inconclusive, match="already exists in the clone"):
+        replay.restore(snap, tmp_path / "r")
+
+
+def test_modified_tracked_file_later_ignored_and_edited_is_inconclusive(tmp_path: Path, repo: Path) -> None:
+    """drift.py mode "modified-tracked": a file tracked and modified at snapshot
+    time (captured in changes.diff) is later untracked, ignored and edited
+    again. `git status --porcelain` shows the same " M config.json" line before
+    and after copying regardless of which modified content is on disk."""
     (repo / "config.json").write_text("{}\n")
     git(repo, "add", "config.json")
     git(repo, "commit", "-qm", "add config")
+    (repo / "config.json").write_text('{"v": 1}\n')  # snapshot-time uncommitted change
     transcript = write(tmp_path / "t.jsonl", [typed("start"), assistant("r1")])
     sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "build it", "N", EVENT)
     snap = tmp_path / "fc" / "snapshots" / sid
     git(repo, "rm", "-q", "--cached", "config.json")
     (repo / ".gitignore").write_text((repo / ".gitignore").read_text() + "config.json\n")
-    (repo / "config.json").write_text('{"changed": true}\n')  # the user moved on after the snapshot
-    with pytest.raises(replay.Inconclusive, match="ignored files changed since the snapshot"):
+    (repo / "config.json").write_text('{"v": 2, "AFTER": "SNAPSHOT"}\n')  # the user moved on after the snapshot
+    with pytest.raises(replay.Inconclusive, match="already exists in the clone"):
         replay.restore(snap, tmp_path / "r")
 
 

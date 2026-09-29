@@ -50,36 +50,92 @@ def copy_tree(source: Path, target: Path) -> None:
     run("cp", *flags, str(source), str(target))
 
 
-def _is_special_dir(path: Path) -> bool:
-    """A directory that must never end up inside a disposable clone: a nested
-    checkout (holds its own `.git`, whose `gitdir:` file can point straight back
-    at the user's real repository) or a Python virtualenv (holds `pyvenv.cfg`,
-    whose absolute paths in `bin/*` shebangs and `.pth`/`direct_url.json` files
-    point at the source's own venv)."""
-    return (path / ".git").exists() or (path / "pyvenv.cfg").exists()
+def _resolves_inside(top: Path, link: Path) -> bool:
+    """True only for a symlink that is relative and whose target, resolved from
+    the link's own directory, stays inside `top`. An absolute link, or one that
+    escapes `top`, is never safe to keep as a link in a disposable clone."""
+    raw = os.readlink(link)
+    if os.path.isabs(raw):
+        return False
+    target = (link.parent / raw).resolve()
+    try:
+        target.relative_to(top.resolve())
+    except ValueError:
+        return False
+    return True
 
 
-def _prune_copy(target: Path, top_rel: str) -> list[str]:
-    """After an ignored entry has been copied wholesale, remove anything inside it
-    that `_is_special_dir` flags, without descending into it first. `target` may
-    itself be such a directory (an ignored entry that is itself a nested checkout
-    or a venv), or hold one anywhere underneath. Returns each skipped path
-    relative to the snapshot's toplevel."""
-    if _is_special_dir(target):
-        shutil.rmtree(target)
-        return [top_rel]
-    skipped: list[str] = []
-    for dirpath, dirnames, _filenames in os.walk(target, topdown=True):
+def _collect_exclusions(top: Path, rel: str) -> set[str]:
+    """Everything under the ignored entry `rel` that must not be copied, found by
+    looking only, never following: a nested checkout (a directory holding its own
+    `.git`, whose `gitdir:` file can point straight back at the user's real
+    repository), a Python virtualenv (a directory holding `pyvenv.cfg`, whose
+    absolute paths in `bin/*` shebangs and `.pth`/`direct_url.json` files point at
+    the source's own venv), or a symlink that is absolute or escapes `top` (which
+    `cp -cRp` would keep as a link into the user's real filesystem, and a naive
+    walk would then follow). Returns paths relative to `top`. Nothing here reads
+    through a symlink: every check is `lexists`/`is_symlink`, and `os.walk` only
+    ever runs on a path already known not to be one."""
+    entry = top / rel
+    excluded: set[str] = set()
+
+    def unsafe(path: Path, path_rel: str) -> bool:
+        """True if `path` itself must be excluded; either way, once this returns
+        for a symlink, `path`'s contents (if any) are never looked at."""
+        if path.is_symlink():
+            if not _resolves_inside(top, path):
+                excluded.add(path_rel)
+            return True
+        if os.path.lexists(path / ".git") or os.path.lexists(path / "pyvenv.cfg"):
+            excluded.add(path_rel)
+            return True
+        return False
+
+    if unsafe(entry, rel) or not entry.is_dir():
+        return excluded
+    for dirpath, dirnames, filenames in os.walk(entry, followlinks=False):
+        base = os.path.relpath(dirpath, top)
         keep = []
         for name in dirnames:
-            sub = Path(dirpath) / name
-            if _is_special_dir(sub):
-                skipped.append(f"{top_rel}/{sub.relative_to(target)}")
-                shutil.rmtree(sub)
-            else:
+            path_rel = f"{base}/{name}"
+            if not unsafe(Path(dirpath) / name, path_rel):
                 keep.append(name)
         dirnames[:] = keep
-    return skipped
+        for name in filenames:
+            unsafe(Path(dirpath) / name, f"{base}/{name}")
+    return excluded
+
+
+def _copy_selective(top: Path, rel: str, target: Path, excluded: set[str]) -> None:
+    """Copy `top/rel` into `target`, honoring `excluded` (paths relative to
+    `top`, from `_collect_exclusions`): a path in it is skipped outright. A path
+    that is an ancestor of an excluded one cannot be copied whole (`cp` cannot
+    leave part of a directory out), so it is opened up instead: `mkdir`, keep its
+    mode, then recurse into each child with `os.scandir`. Anything else is copied
+    in one shot with `copy_tree`, which is what keeps this cheap on a
+    copy-on-write filesystem."""
+    if rel in excluded:
+        return
+    source = top / rel
+    prefix = f"{rel}/"
+    if any(path.startswith(prefix) for path in excluded):
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.copymode(source, target)
+        for child in os.scandir(source):
+            _copy_selective(top, f"{rel}/{child.name}", target / child.name, excluded)
+    else:
+        copy_tree(source, target)
+
+
+def _reject_stray_checkouts(clone: Path) -> None:
+    """A defense-in-depth backstop that runs after every ignored entry has been
+    copied: if `_collect_exclusions`/`_copy_selective` ever let a nested checkout
+    through despite every earlier safeguard, this is what stops it from reaching
+    the caller as an ordinary clone, instead of a `.git` quietly sitting there
+    with a `gitdir:` pointer back at the user's real repository."""
+    stray = [g for g in clone.rglob(".git") if g != clone / ".git"]
+    if stray:
+        raise Inconclusive(f"a nested checkout survived pruning at {stray[0].parent}")
 
 
 def _copy_info_exclude(top: Path, clone: Path) -> None:
@@ -141,22 +197,25 @@ def restore(snap: Path, dest: Path, *, copy_ignored: bool = True) -> Path:
     run("git", "-C", str(clone), "update-ref", "refs/jev/start", start)
     if copy_ignored:
         # Reason: the ignore list is the source's current one, which may have
-        # drifted since the snapshot (a path that was tracked then may be
-        # untracked and ignored now), and a copy's target may already exist from
-        # the checkout or the tar above. Either turns the copy into a silent
-        # mutation of the clone rather than an addition, so it must be visible in
-        # `git status` or not happen at all; if it changed anything the checkout
-        # did not already account for, the replay cannot be trusted.
-        before = run("git", "-C", str(clone), "status", "--porcelain")
+        # drifted since the snapshot. `git status --porcelain` cannot see that on
+        # its own: it drops file content, and it collapses an untracked directory
+        # into one line regardless of what ends up nested inside it. But without
+        # drift an ignored path can never already exist in the clone (the clone
+        # holds only the tracked tree and the tar's non-ignored untracked files),
+        # so checking that directly catches what the status text cannot.
+        # `--untracked-files=all` is kept as a second check, since it still
+        # widens what the comparison can see.
+        before = run("git", "-C", str(clone), "status", "--porcelain", "--untracked-files=all")
         skipped: list[str] = []
         for rel in snapshot.ignored_entries(top):
-            copy_tree(top / rel, clone / rel)
-            skipped.extend(_prune_copy(clone / rel, rel))
-        after = run("git", "-C", str(clone), "status", "--porcelain")
+            if os.path.lexists(clone / rel):
+                raise Inconclusive(f"{rel} already exists in the clone; ignore rules changed since the snapshot")
+            excluded = _collect_exclusions(top, rel)
+            _copy_selective(top, rel, clone / rel, excluded)
+            skipped.extend(excluded)
+        after = run("git", "-C", str(clone), "status", "--porcelain", "--untracked-files=all")
         if after != before:
             raise Inconclusive("ignored files changed since the snapshot")
-        stray = [g for g in clone.rglob(".git") if g != clone / ".git"]
-        if stray:
-            raise Inconclusive(f"a nested checkout survived pruning at {stray[0].parent}")
-        (dest / "restore.json").write_text(json.dumps({"skipped": skipped}, indent=2) + "\n")
+        _reject_stray_checkouts(clone)
+        (dest / "restore.json").write_text(json.dumps({"skipped": sorted(skipped)}, indent=2) + "\n")
     return clone

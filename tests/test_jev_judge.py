@@ -151,28 +151,48 @@ def point(keep_cost: float, del_cost: float, prefer: str = "tie", delegate_ok: b
 
 
 def test_check_passes_on_twenty_cheaper_equal_jobs() -> None:
-    text, passed = report.check_report([point(1.0, 0.8)] * 20, [], skipped=2, inconclusive=1)
+    skipped = [("20261001-090000-s1", "writes to production"), ("20261001-091000-s2", "")]
+    inconclusive = [("20261001-092000-i1", "timed out")]
+    text, passed = report.check_report([point(1.0, 0.8)] * 20, [], skipped=skipped, inconclusive=inconclusive)
     assert passed
     assert "Skipped by you: 2. Inconclusive: 1." in text
+    # Final Minor 11: each skipped and inconclusive job is listed with its reason.
+    assert "- 20261001-090000-s1: writes to production" in text
+    assert "- 20261001-091000-s2: no reason given" in text
+    assert "Inconclusive:\n- 20261001-092000-i1: timed out" in text
 
 
 def test_a_job_waiting_for_its_verdict_blocks_the_pass() -> None:
-    text, passed = report.check_report([point(1.0, 0.8)] * 19, [], 0, 0, waiting=("20261001-120000-abc",))
+    text, passed = report.check_report([point(1.0, 0.8)] * 19, [], [], [], waiting=("20261001-120000-abc",))
     assert not passed
     assert "waiting for 20261001-120000-abc" in text
 
 
 def test_one_broken_delegate_result_fails_the_check() -> None:
-    _, passed = report.check_report([point(1.0, 0.5)] * 19 + [point(1.0, 0.5, delegate_ok=False)], [], 0, 0)
+    _, passed = report.check_report([point(1.0, 0.5)] * 19 + [point(1.0, 0.5, delegate_ok=False)], [], [], [])
     assert not passed
 
 
 def test_period_share_is_reported_without_a_threshold() -> None:
-    text, _ = report.check_report([point(1.0, 0.8)] * 20, [], 0, 0, period_cost=40.0)
+    text, _ = report.check_report([point(1.0, 0.8)] * 20, [], [], [], period_cost=40.0)
     assert "Saving as a share of the period's decided messages (their main-thread cost): 10%" in text
 
 
 def test_jev_overhead_counts_against_delegation() -> None:
     events = [{"version": 3, "ts": "2026-10-01T10:00:00+00:00", "cost": 1.5, "latency_ms": 0}]
-    _, passed = report.check_report([point(1.0, 0.85)] * 20, events, 0, 0)
+    _, passed = report.check_report([point(1.0, 0.85)] * 20, events, [], [])
     assert not passed  # 17.0 + 1.5 > 0.9 * 20
+
+
+def test_the_period_starts_when_capture_started_if_known() -> None:
+    """Ruling F8: Jev's calls before the first scored job are part of the check."""
+    early = {"version": 3, "ts": "2026-10-01T08:30:00+00:00", "cost": 1.0}
+    during = {"version": 3, "ts": "2026-10-01T10:00:30+00:00", "cost": 0.5}
+    before_capture = {"version": 3, "ts": "2026-10-01T07:00:00+00:00", "cost": 9.0}
+    events = [before_capture, early, during]
+    points = [point(1.0, 0.8)]  # captured at 10:00
+    assert report.period_events(events, points) == [during]
+    assert report.period_events(events, points, "2026-10-01T08:00:00+00:00") == [early, during]
+    # check_report counts the same period: 0.8 + 1.0 + 0.5 delegate against 1.0 keep.
+    text, _ = report.check_report(points, events, [], [], capture_started="2026-10-01T08:00:00+00:00")
+    assert "delegate $2.30 with Jev's cost over the period included" in text

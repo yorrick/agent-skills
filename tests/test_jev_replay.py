@@ -1126,6 +1126,24 @@ def test_cmd_replay_marks_safe_replay_failed_and_clears_partial_results(
     assert not leftover.exists()
 
 
+def test_a_job_whose_checkout_is_gone_is_inconclusive(
+    tmp_path: Path, repo: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A job captured in a worktree the user has since removed: restore says so,
+    and replay records an inconclusive job with that reason, not a crash."""
+    toplevel = json.loads((snap / "meta.json").read_text())["toplevel"]
+    shutil.rmtree(repo)
+    with pytest.raises(replay.Inconclusive) as excinfo:
+        replay.restore(snap, tmp_path / "r")
+    assert str(excinfo.value) == f"the checkout {toplevel} no longer exists"
+    monkeypatch.setattr(fork_check, "root", lambda: tmp_path / "fc")
+    assert fork_check.main(["mark", snap.name, "safe"]) == 0
+    assert fork_check.main(["replay", snap.name]) == 0
+    status = fork_check.statuses()[snap.name]
+    assert status["status"] == "inconclusive" and "no longer exists" in status["reason"]
+    assert not (tmp_path / "calls.jsonl").exists()  # nothing ran
+
+
 def test_an_unknown_or_escaping_id_is_refused_before_anything_is_touched(
     tmp_path: Path, snap: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

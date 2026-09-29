@@ -7,7 +7,7 @@
 fork_check.py shadow                     shadow-mode decisions against what really happened
 fork_check.py list                       snapshots, their status, and what each real turn did outside
 fork_check.py check                      restore-check new snapshots without running anything
-fork_check.py mark ID (safe|skip) [--reason TEXT]
+fork_check.py mark ID (safe|skip|inconclusive) [--reason TEXT]
 fork_check.py replay (ID | --next) [--trial]
 fork_check.py judge ID                   blind Codex judge (before publishing)
 fork_check.py publish ID                 push both results to a private copy and open the comparison PR
@@ -204,6 +204,9 @@ def cmd_replay(sid: str | None, trial: bool) -> int:
         print(f"{sid} is not marked safe; mark it first.")
         return 1
     snap, out = root() / "snapshots" / sid, root() / "results" / sid
+    # Reason: written before anything runs, so the report knows a trial job even
+    # when the replay raises and no result.json is ever written.
+    set_status(sid, "replaying", "trial" if trial else "")
     # Reason: a previous run that ended in replay_failed may have left partial
     # clones here; restore()'s dest.mkdir(parents=True) would fail forever
     # otherwise, permanently jamming this snapshot.
@@ -305,26 +308,40 @@ def cmd_judge(sid: str) -> int:
 
 
 def cmd_report() -> int:
-    """The first 20 jobs ever marked safe (Ruling T13c), in capture order, excluding
-    trial jobs: a job with a result and a verdict counts as scored whatever its later
-    status (a publish that then failed does not undo a job the judge already scored);
-    an inconclusive result counts as inconclusive; a replay that failed, or no result
-    yet, counts as waiting, so a later job never silently takes an earlier one's slot."""
+    """The first 20 eligible jobs in capture order (Ruling T13c): jobs ever marked
+    safe and never replayed as a trial (the trial flag comes from the status
+    history, so it holds even for a trial replay that raised). Each job lands in
+    exactly one place: inconclusive when its status or its result says so (a
+    replay, a restore that refused, or `mark ID inconclusive`); scored when it
+    has a result and a verdict, whatever its later status (a publish that then
+    failed does not undo a job the judge already scored); waiting otherwise, so
+    a later job never silently takes an earlier one's slot. Skipped and
+    inconclusive jobs are counted and listed only up to the 20th eligible job."""
+    history = _status_history()
     done = statuses()
-    ever_safe = {entry["id"] for entry in _status_history() if entry["status"] == "safe"}
+    ever_safe = {entry["id"] for entry in history if entry["status"] == "safe"}
+    trials = {entry["id"] for entry in history if entry["status"] == "replaying" and entry["reason"] == "trial"}
     points: list[dict] = []
     waiting: list[str] = []
+    skipped: list[tuple[str, str]] = []
+    inconclusive: list[tuple[str, str]] = []
     for snap in snapshot_dirs():
+        if len(points) + len(waiting) == report.POINTS:
+            break
         sid = snap.name
-        if sid not in ever_safe:
+        status = done.get(sid, {})
+        if status.get("status") == "skip":
+            skipped.append((sid, status.get("reason", "")))
+            continue
+        if sid not in ever_safe or sid in trials:
             continue
         out = root() / "results" / sid
         result = json.loads((out / "result.json").read_text()) if (out / "result.json").exists() else None
-        if result is not None and (result.get("trial") or result.get("inconclusive")):
+        if status.get("status") == "inconclusive" or (result is not None and result.get("inconclusive")):
+            reason = status.get("reason") or (result or {}).get("reason", "")
+            inconclusive.append((sid, reason))
             continue
-        if len(points) + len(waiting) == report.POINTS:
-            break
-        if result is None or done.get(sid, {}).get("status") == "replay_failed" or not (out / "verdict.json").exists():
+        if result is None or status.get("status") == "replay_failed" or not (out / "verdict.json").exists():
             waiting.append(sid)
             continue
         points.append(
@@ -334,12 +351,13 @@ def cmd_report() -> int:
                 "verdict": json.loads((out / "verdict.json").read_text()),
             }
         )
-    skipped = sum(s["status"] == "skip" for s in done.values())
-    inconclusive = sum(s["status"] == "inconclusive" for s in done.values())
     events = jev_router.read_log()
-    period = report.period_events(events, points)
+    started = jev_router.load_config().get("capture_started")
+    period = report.period_events(events, points, started)
     period_cost = sum(r["real_cost"] for r in report.shadow_rows(period, usage.load_prices())) if period else None
-    text, passed = report.check_report(points, events, skipped, inconclusive, period_cost, tuple(waiting))
+    text, passed = report.check_report(
+        points, events, skipped, inconclusive, period_cost, tuple(waiting), capture_started=started
+    )
     (root() / "report.md").write_text(text + "\n")
     print(text)
     print("\nThe fork check PASSES." if passed else "\nThe fork check has not passed (yet).")
@@ -354,7 +372,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("list")
     mark = sub.add_parser("mark")
     mark.add_argument("id")
-    mark.add_argument("mark", choices=("safe", "skip"))
+    # Reason: `inconclusive` is the explicit exit for a stuck job, so it stops
+    # holding one of the report's 20 slots.
+    mark.add_argument("mark", choices=("safe", "skip", "inconclusive"))
     mark.add_argument("--reason", default="")
     rep = sub.add_parser("replay")
     target = rep.add_mutually_exclusive_group(required=True)

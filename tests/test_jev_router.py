@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 from collections.abc import Iterator
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -589,6 +590,20 @@ def test_mode_command_sets_the_mode_and_capture_dir(home: Path, jev: FakeJev, tm
     assert "snapshot" in result.stdout
 
 
+def test_capture_mode_records_when_capture_started(home: Path, jev: FakeJev, tmp_path: Path) -> None:
+    """Ruling F8: the fork check's report period starts here. Running `mode
+    capture` again while capturing (to move the folder) keeps the first time."""
+    assert run(home, jev, "mode", "shadow").returncode == 0
+    assert "capture_started" not in json.loads((home / "config.json").read_text())
+    assert run(home, jev, "mode", "capture").returncode == 0
+    started = json.loads((home / "config.json").read_text())["capture_started"]
+    assert datetime.fromisoformat(started).utcoffset() == timedelta(0)
+    config = json.loads((home / "config.json").read_text())
+    (home / "config.json").write_text(json.dumps({**config, "capture_started": "2026-10-01T08:00:00+00:00"}))
+    assert run(home, jev, "mode", "capture", "--dir", str(tmp_path / "fc")).returncode == 0
+    assert json.loads((home / "config.json").read_text())["capture_started"] == "2026-10-01T08:00:00+00:00"
+
+
 def test_capture_mode_snapshots_a_job_it_would_delegate(home: Path, jev: FakeJev, tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -714,9 +729,13 @@ def test_status_counts_claude_code_decisions(home: Path, jev: FakeJev) -> None:
     claude_hook(home, jev)
     jev.raw_answers = steps_answers(0.2)
     claude_hook(home, jev)
+    # Final Minor 12: a message Jev never decided counts under "no opinion".
+    claude_hook(home, jev, entries=[typed("hello")])
+    jev.raw_answers = steps_answers(5.0)
+    claude_hook(home, jev)
     text = run(home, jev, "status").stdout
     assert "Claude Code mode: live." in text
-    assert "2 messages decided, 1 worth a fresh subagent, 0 snapshots." in text
+    assert "2 messages decided, 1 worth a fresh subagent, 0 snapshots. No opinion: 2." in text
     # Their size answers are not 0.2.0 routing decisions, so the size table leaves them out.
     assert re.search(r"Messages Jev sized since \S+: 0\n", text)
     assert "routed" not in text

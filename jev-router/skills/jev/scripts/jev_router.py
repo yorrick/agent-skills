@@ -723,6 +723,12 @@ def cmd_off() -> int:
 
 def cmd_mode(mode: str, directory: str | None) -> int:
     config = load_config()
+    # Reason: the fork check's report counts Jev's cost and wait from here, not
+    # from its first scored job. Set when capture starts, not again when `mode
+    # capture` is run while already capturing (to change `--dir`, say), which
+    # would drop the calls made so far from the period.
+    if mode == "capture" and (config.get("mode") != "capture" or "capture_started" not in config):
+        config["capture_started"] = datetime.now(UTC).isoformat(timespec="seconds")
     config["mode"] = mode
     if directory:
         config["fork_check_dir"] = str(Path(directory).expanduser().resolve())
@@ -769,9 +775,15 @@ def status_text(config: dict, events: list[dict]) -> str:
     lines.append(f"\nClaude Code mode: {mode}.{where}")
     cache_aware = [e for e in events if e.get("version") == 3]
     if cache_aware:
-        delegated = sum(e.get("outcome") == "delegate" for e in cache_aware)
+        # Reason: only keep and delegate are decisions; a message with no session
+        # yet, an unpriced model, a timeout or an error got no opinion at all.
+        decided = [e for e in cache_aware if e.get("outcome") in ("keep", "delegate")]
+        delegated = sum(e.get("outcome") == "delegate" for e in decided)
         snapshots = sum("snapshot" in e for e in cache_aware)
-        lines.append(f"{len(cache_aware)} messages decided, {delegated} worth a fresh subagent, {snapshots} snapshots.")
+        lines.append(
+            f"{len(decided)} messages decided, {delegated} worth a fresh subagent, {snapshots} snapshots. "
+            f"No opinion: {len(cache_aware) - len(decided)}."
+        )
     answered = [e for e in events if e.get("answered")]
     priced = [e["cost"] for e in answered if isinstance(e.get("cost"), int | float)]
     manual = sum(e.get("harness") == "classify" for e in answered)

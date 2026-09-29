@@ -225,6 +225,11 @@ def restore(snap: Path, dest: Path, *, copy_ignored: bool = True) -> Path:
     copied: a secret added to info/exclude, a cache, the real turn's output)."""
     meta = json.loads((snap / "meta.json").read_text())
     top, head = Path(meta["toplevel"]), meta["head"]
+    # Reason: a job captured in a worktree the user has since removed can never
+    # be restored; saying so makes it inconclusive instead of a crash that would
+    # hold one of the report's slots forever.
+    if not top.is_dir():
+        raise Inconclusive(f"the checkout {top} no longer exists")
     captured: list[str] = []
     if copy_ignored:
         if "ignored_entries" not in meta:

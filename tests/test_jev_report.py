@@ -13,6 +13,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 import fork_check  # noqa: E402
 import jev_router  # noqa: E402
+import replay  # noqa: E402
 import report  # noqa: E402
 import usage  # noqa: E402
 from test_jev_usage import assistant, typed  # noqa: E402
@@ -156,6 +157,7 @@ def test_cmd_report_selects_ever_safe_jobs_in_capture_order(
 
     _result("20261001-100000-c", trial=True)
     fork_check.set_status("20261001-100000-c", "safe")
+    fork_check.set_status("20261001-100000-c", "replaying", "trial")
     fork_check.set_status("20261001-100000-c", "replayed", "")
 
     out_d = _result("20261001-103000-d")
@@ -170,3 +172,112 @@ def test_cmd_report_selects_ever_safe_jobs_in_capture_order(
     assert "20261001-090000-a" in text
     assert "20261001-103000-d" in text
     assert "20261001-100000-c" not in text
+
+
+# --- final Important 1, Rulings F7 and F8, final Minor 11 ------------------------------
+
+
+def _judged(sid: str, created: str) -> None:
+    _snap(sid, created)
+    _verdict(_result(sid))
+    fork_check.set_status(sid, "safe")
+    fork_check.set_status(sid, "judged", "tie")
+
+
+def test_a_trial_replay_that_raises_does_not_take_a_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("JEV_ROUTER_HOME", str(tmp_path))
+    _snap("20261001-090000-a", "2026-10-01T09:00:00+00:00")
+    _judged("20261001-100000-b", "2026-10-01T10:00:00+00:00")
+    assert fork_check.main(["mark", "20261001-090000-a", "safe"]) == 0
+
+    def boom(*a: object, **k: object) -> dict:
+        raise RuntimeError("the CLI refused --model")
+
+    monkeypatch.setattr(replay, "replay_pair", boom)
+    assert fork_check.main(["replay", "20261001-090000-a", "--trial"]) == 1
+    assert fork_check.statuses()["20261001-090000-a"]["status"] == "replay_failed"
+    capsys.readouterr()
+    assert fork_check.main(["report"]) == 0
+    out = capsys.readouterr().out
+    assert "Jobs judged: 1 of 20. Skipped by you: 0. Inconclusive: 0." in out
+    assert "20261001-090000-a" not in out
+
+
+def test_an_inconclusive_job_is_counted_once_even_without_a_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Ruling F7: restore refused the first job (its checkout is gone), so replay
+    wrote a status and no result.json; it was printed both as waiting and as
+    inconclusive before."""
+    monkeypatch.setenv("JEV_ROUTER_HOME", str(tmp_path))
+    _snap("20261001-090000-a", "2026-10-01T09:00:00+00:00")
+    fork_check.set_status("20261001-090000-a", "safe")
+    fork_check.set_status("20261001-090000-a", "inconclusive", "the checkout /work/wt no longer exists")
+    _judged("20261001-100000-b", "2026-10-01T10:00:00+00:00")
+    assert fork_check.main(["report"]) == 0
+    out = capsys.readouterr().out
+    assert "Jobs judged: 1 of 20. Skipped by you: 0. Inconclusive: 1." in out
+    assert "waiting" not in out
+    assert "- 20261001-090000-a: the checkout /work/wt no longer exists" in out
+
+
+def test_marking_a_stuck_job_inconclusive_frees_its_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("JEV_ROUTER_HOME", str(tmp_path))
+    monkeypatch.setattr(report, "POINTS", 2)
+    _snap("20261001-090000-a", "2026-10-01T09:00:00+00:00")
+    fork_check.set_status("20261001-090000-a", "safe")
+    fork_check.set_status("20261001-090000-a", "replay_failed", "network down")
+    _judged("20261001-100000-b", "2026-10-01T10:00:00+00:00")
+    _judged("20261001-110000-c", "2026-10-01T11:00:00+00:00")
+    assert fork_check.main(["report"]) == 0
+    assert "Jobs judged: 1 of 2, waiting for 20261001-090000-a." in capsys.readouterr().out
+    assert fork_check.main(["mark", "20261001-090000-a", "inconclusive", "--reason", "keeps failing"]) == 0
+    assert fork_check.main(["report"]) == 0
+    out = capsys.readouterr().out
+    assert "Jobs judged: 2 of 2. Skipped by you: 0. Inconclusive: 1." in out
+    assert "- 20261001-090000-a: keeps failing" in out
+    assert "20261001-110000-c" in out
+
+
+def test_skipped_and_inconclusive_are_counted_only_within_the_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Final Minor 11: up to the last eligible job in capture order, not over every snapshot."""
+    monkeypatch.setenv("JEV_ROUTER_HOME", str(tmp_path))
+    monkeypatch.setattr(report, "POINTS", 2)
+    _snap("20261001-080000-s1", "2026-10-01T08:00:00+00:00")
+    fork_check.set_status("20261001-080000-s1", "skip", "sends email")
+    _judged("20261001-090000-a", "2026-10-01T09:00:00+00:00")
+    _snap("20261001-093000-i1", "2026-10-01T09:30:00+00:00")
+    fork_check.set_status("20261001-093000-i1", "safe")
+    fork_check.set_status("20261001-093000-i1", "inconclusive", "timed out")
+    _judged("20261001-100000-b", "2026-10-01T10:00:00+00:00")
+    _snap("20261001-110000-s2", "2026-10-01T11:00:00+00:00")
+    fork_check.set_status("20261001-110000-s2", "skip", "deploys")
+    _snap("20261001-113000-i2", "2026-10-01T11:30:00+00:00")
+    fork_check.set_status("20261001-113000-i2", "safe")
+    fork_check.set_status("20261001-113000-i2", "inconclusive", "crashed")
+    assert fork_check.main(["report"]) == 0
+    out = capsys.readouterr().out
+    assert "Jobs judged: 2 of 2. Skipped by you: 1. Inconclusive: 1." in out
+    assert "- 20261001-080000-s1: sends email" in out
+    assert "- 20261001-093000-i1: timed out" in out
+    assert "-s2" not in out and "-i2" not in out
+
+
+def test_the_report_period_starts_at_capture_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Ruling F8: `mode capture` records when capture began, and the report's
+    period (Jev's cost and wait) starts there, not at the first scored job."""
+    monkeypatch.setenv("JEV_ROUTER_HOME", str(tmp_path))
+    (tmp_path / "config.json").write_text(json.dumps({"capture_started": "2026-10-01T08:00:00+00:00"}))
+    early = {"ts": "2026-10-01T08:30:00+00:00", "harness": "claude", "version": 3, "outcome": "no_session"}
+    (tmp_path / "log.jsonl").write_text(json.dumps({**early, "cost": 0.25}) + "\n")
+    _judged("20261001-100000-b", "2026-10-01T10:00:00+00:00")
+    assert fork_check.main(["report"]) == 0
+    assert "delegate $1.05 with Jev's cost over the period included" in capsys.readouterr().out

@@ -37,12 +37,14 @@ def turn_after(entries: list[dict], sha: str, near: str | None = None) -> list[d
     return entries[start:end]
 
 
-def period_events(events: list[dict], points: list[dict]) -> list[dict]:
-    """Every cache-aware hook event from the first scored job's capture to the last
-    one's, plus a minute: the last hook logs its event just after its snapshot."""
+def period_events(events: list[dict], points: list[dict], started: str | None = None) -> list[dict]:
+    """Every cache-aware hook event of the check, from `started` (when capture mode
+    was set, so Jev's calls before the first scored job count too) or, without it,
+    from the first scored job's capture, to the last one's plus a minute: the last
+    hook logs its event just after its snapshot."""
     if not points:
         return []
-    first = datetime.fromisoformat(points[0]["meta"]["created"])
+    first = datetime.fromisoformat(started or points[0]["meta"]["created"])
     last = datetime.fromisoformat(points[-1]["meta"]["created"]) + timedelta(seconds=60)
     return [e for e in events if e.get("version") == 3 and (t := _when(str(e.get("ts", "")))) and first <= t <= last]
 
@@ -119,20 +121,29 @@ def _broken(verdict: dict) -> bool:
     )
 
 
+def _listed(title: str, jobs: list[tuple[str, str]]) -> list[str]:
+    if not jobs:
+        return []
+    return [title, *[f"- {sid}: {reason or 'no reason given'}" for sid, reason in jobs], ""]
+
+
 def check_report(
     points: list[dict],
     events: list[dict],
-    skipped: int,
-    inconclusive: int,
+    skipped: list[tuple[str, str]],
+    inconclusive: list[tuple[str, str]],
     period_cost: float | None = None,
     waiting: tuple[str, ...] = (),
+    capture_started: str | None = None,
 ) -> tuple[str, bool]:
+    """`skipped` and `inconclusive` are (job, reason) pairs from the same window
+    as `points`: capture order, up to the 20th eligible job."""
     points = points[:POINTS]
     keep_cost = sum(p["result"]["sides"]["keep"]["cost"] for p in points)
     del_cost = sum(p["result"]["sides"]["delegate"]["cost"] for p in points)
     keep_time = sum(p["result"]["sides"]["keep"]["wall_seconds"] for p in points)
     del_time = sum(p["result"]["sides"]["delegate"]["wall_seconds"] for p in points)
-    period = period_events(events, points)
+    period = period_events(events, points, capture_started)
     del_cost += sum(e.get("cost") or 0 for e in period)
     del_time += sum(e.get("latency_ms") or 0 for e in period) / 1000
     broken = [p for p in points if _broken(p["verdict"])]
@@ -150,7 +161,7 @@ def check_report(
         "",
         f"Jobs judged: {len(points)} of {POINTS}"
         + (f", waiting for {', '.join(waiting)}" if waiting else "")
-        + f". Skipped by you: {skipped}. Inconclusive: {inconclusive}. "
+        + f". Skipped by you: {len(skipped)}. Inconclusive: {len(inconclusive)}. "
         f"Overrides (the session kept a job it was told to hand off): {overrides}.",
         f"Cost: keep ${keep_cost:.2f}, delegate ${del_cost:.2f} with Jev's cost over the period included.",
         f"Time: keep {keep_time / 60:.0f} min, delegate {del_time / 60:.0f} min with Jev's added wait included.",
@@ -168,6 +179,8 @@ def check_report(
         "",
         *[f"- {name}: {'pass' if ok else 'FAIL'}" for name, ok in conditions.items()],
         "",
+        *_listed("Skipped by you:", skipped),
+        *_listed("Inconclusive:", inconclusive),
         "| job | predicted calls | calls keep / delegate | cost keep / delegate | minutes keep / delegate | judge |",
         "|---|---|---|---|---|---|",
     ]

@@ -1110,6 +1110,8 @@ def test_a_broken_calibration_file_never_blocks_the_message(home: Path, jev: Fak
     bad = home.parent / "bad.json"
     bad.write_text("not json")
     assert claude_hook(home, jev, env={"JEV_ROUTER_CALIBRATION": str(bad)}) == ""
+    assert log(home)[0]["outcome"] == "error"
+    assert jev.requests == []  # nothing was paid for
     assert "spawn_agent" in hook(home, jev, harness="codex", env={"JEV_ROUTER_CALIBRATION": str(bad)})
 
 
@@ -1269,6 +1271,12 @@ def route_cache_aware(config: dict, payload: dict, prompt: str) -> str:
         record(event)
         return ""
     event.update(context=current.context, model=current.model, added=current.added, output=current.output)
+    try:
+        bins, table = calibration(), prices()
+    except Exception as exc:  # a broken data file costs this message its opinion, and no Jev call
+        event.update(outcome="error", error=error_label(exc))
+        record(event)
+        return ""
     tiers = TIERS["claude"]
     started = time.monotonic()
     body = verdict = None
@@ -1289,12 +1297,12 @@ def route_cache_aware(config: dict, payload: dict, prompt: str) -> str:
     note = None
     if verdict is not None:
         tier = next(t for t in tiers if t.size == verdict.size)
-        parent, helper = prices().get(current.model), prices().get(tier.model_id)
+        parent, helper = table.get(current.model), table.get(tier.model_id)
         event.update(steps=verdict.steps, size=verdict.size, helper=tier.helper, helper_model=tier.model_id)
         if parent is None or helper is None:
             event["outcome"] = "unpriced"
         else:
-            sample = delegation.calls_for(calibration(), verdict.steps)
+            sample = delegation.calls_for(bins, verdict.steps)
             decision = delegation.decide(
                 sample,
                 current.context,
@@ -2877,6 +2885,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPTS = Path(__file__).resolve().parent.parent / "jev-router" / "skills" / "jev" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
@@ -2892,6 +2902,14 @@ ANSWER = 'Both fine.\n{"A": {"tests": "pass", "outcome_met": true}, "B": {"tests
 
 def test_parse_takes_the_last_json_line() -> None:
     assert judge.parse(ANSWER)["prefer"] == "A"
+
+
+def test_parse_refuses_a_malformed_verdict() -> None:
+    bad = '{"A": {"tests": "pass", "outcome_met": "false"}, "B": {"tests": "pass", "outcome_met": true}, "prefer": "A"}'
+    with pytest.raises(ValueError):
+        judge.parse(bad)
+    with pytest.raises(ValueError):
+        judge.parse(ANSWER.replace('"prefer": "A"', '"prefer": "keep"'))
 
 
 def test_labels_are_mapped_back_to_keep_and_delegate(tmp_path: Path, snap: Path) -> None:
@@ -2946,7 +2964,7 @@ def test_one_broken_delegate_result_fails_the_check() -> None:
 
 def test_period_share_is_reported_without_a_threshold() -> None:
     text, _ = report.check_report([point(1.0, 0.8)] * 20, [], 0, 0, period_cost=40.0)
-    assert "Saving as a share of all Claude Code cost over the period: 10%" in text
+    assert "Saving as a share of the period's decided messages (their main-thread cost): 10%" in text
 
 
 def test_jev_overhead_counts_against_delegation() -> None:
@@ -3014,15 +3032,28 @@ def run_codex(prompt: str, work: Path) -> str:
     return out.read_text()
 
 
+def _valid(data: object) -> bool:
+    if not isinstance(data, dict) or data.get("prefer") not in ("A", "B", "tie"):
+        return False
+    return all(
+        isinstance(data.get(k), dict)
+        and data[k].get("tests") in ("pass", "fail", "none")
+        and isinstance(data[k].get("outcome_met"), bool)
+        for k in ("A", "B")
+    )
+
+
 def parse(text: str) -> dict:
+    """The last line that is a complete, well-formed verdict; anything else is an error,
+    never a guess (a string "false" is not a boolean, an unknown preference is not a tie)."""
     for line in reversed(text.strip().splitlines()):
         try:
             data = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(data, dict) and {"A", "B", "prefer"} <= data.keys():
+        if _valid(data):
             return data
-    raise ValueError("the judge gave no verdict line")
+    raise ValueError("the judge gave no well-formed verdict line")
 
 
 def judge(snap: Path, result: dict, work: Path, *, codex: Callable[[str, Path], str] = run_codex,
@@ -3037,8 +3068,8 @@ def judge(snap: Path, result: dict, work: Path, *, codex: Callable[[str, Path], 
         run("git", "-C", str(work / letter), "remote", "remove", "origin")
     raw = parse(codex(PROMPT.format(message=(snap / "message.txt").read_text(), example=EXAMPLE), work))
     verdict = {
-        names["A"]: {"tests": raw["A"]["tests"], "outcome_met": bool(raw["A"]["outcome_met"])},
-        names["B"]: {"tests": raw["B"]["tests"], "outcome_met": bool(raw["B"]["outcome_met"])},
+        names["A"]: {"tests": raw["A"]["tests"], "outcome_met": raw["A"]["outcome_met"]},
+        names["B"]: {"tests": raw["B"]["tests"], "outcome_met": raw["B"]["outcome_met"]},
         "prefer": names.get(raw["prefer"], "tie"),
         "why": str(raw.get("why", "")),
     }
@@ -3097,8 +3128,9 @@ def check_report(
         f"Time: keep {keep_time / 60:.0f} min, delegate {del_time / 60:.0f} min with Jev's added wait included.",
         f"Blind judge: prefers keep {prefer_keep}, delegate {prefer_delegate}; broken delegated results: {len(broken)}.",
         *(
-            [f"Saving as a share of all Claude Code cost over the period: {(keep_cost - del_cost) / period_cost:.0%} "
-             "(no threshold: it depends on how the work mixes long and short jobs)."]
+            [f"Saving as a share of the period's decided messages (their main-thread cost): "
+             f"{(keep_cost - del_cost) / period_cost:.0%} (no threshold: it depends on how the work mixes long and "
+             "short jobs)."]
             if period_cost
             else []
         ),
@@ -3126,8 +3158,12 @@ def cmd_judge(sid: str) -> int:
 
     import judge
 
+    import uuid
+
     out = root() / "results" / sid
-    verdict = judge.judge(root() / "snapshots" / sid, json.loads((out / "result.json").read_text()), out / "judge",
+    # Reason: a neutral folder away from results/, whose result.json names the sides.
+    blind = root() / "blind" / uuid.uuid4().hex
+    verdict = judge.judge(root() / "snapshots" / sid, json.loads((out / "result.json").read_text()), blind,
                           rng=random.Random())
     (out / "verdict.json").write_text(json.dumps(verdict, indent=2) + "\n")
     set_status(sid, "judged", verdict["prefer"])

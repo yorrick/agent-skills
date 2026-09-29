@@ -17,11 +17,13 @@ fork_check.py report                     the fork check's pass or fail over 20 j
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import IO
 
 import jev_router
 import report
@@ -94,28 +96,35 @@ def root() -> Path:
     return jev_router.fork_check_dir(jev_router.load_config())
 
 
-def _still_running(entry: dict) -> bool:
-    """Whether the `replay` run that wrote this "replaying" line is still alive.
-    A line without a pid, or whose process is gone, was left by an interrupted
-    run, so the job can be replayed again."""
-    pid = entry.get("pid")
-    if not isinstance(pid, int):
-        return False
+def _job_lock(sid: str) -> IO[str] | None:
+    """The job's exclusive lock (`results/<id>.lock`, created if missing), held
+    for as long as the returned file stays open, or None when another runner
+    holds it. The system drops a lock when its process ends, however it ends, so
+    a lock is never left behind by an interrupted run."""
+    path = root() / "results" / f"{sid}.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a")
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:  # alive, owned by someone else
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    return handle
+
+
+def _still_running(sid: str) -> bool:
+    """Whether another runner is replaying this job right now (it holds the lock)."""
+    lock = _job_lock(sid)
+    if lock is None:
         return True
-    return True
+    lock.close()
+    return False
 
 
-def set_status(sid: str, status: str, reason: str = "", *, pid: int | None = None) -> None:
+def set_status(sid: str, status: str, reason: str = "") -> None:
     path = root() / "status.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    line: dict = {"ts": datetime.now(UTC).isoformat(timespec="seconds"), "id": sid, "status": status, "reason": reason}
-    if pid is not None:
-        line["pid"] = pid
+    line = {"ts": datetime.now(UTC).isoformat(timespec="seconds"), "id": sid, "status": status, "reason": reason}
     with path.open("a") as handle:
         handle.write(json.dumps(line) + "\n")
 
@@ -227,9 +236,6 @@ def cmd_check() -> int:
 
 
 def cmd_replay(sid: str | None, trial: bool) -> int:
-    import random
-    import shutil
-
     import replay
 
     done = statuses()
@@ -238,24 +244,43 @@ def cmd_replay(sid: str | None, trial: bool) -> int:
         # "replaying", in capture order.
         names = [p.name for p in snapshot_dirs()]
         todo = [n for n in names if done.get(n, {}).get("status") == "safe"]
-        todo += [n for n in names if done.get(n, {}).get("status") == "replaying" and not _still_running(done[n])]
+        todo += [n for n in names if done.get(n, {}).get("status") == "replaying" and not _still_running(n)]
         if not todo:
             print("No snapshot is marked safe and waiting, or left half-replayed. Mark one with: mark ID safe")
             return 1
         sid = todo[0]
-    else:
-        entry = done.get(sid, {})
-        if entry.get("status") == "replaying" and _still_running(entry):
-            print(f"{sid} is being replayed by process {entry['pid']}; if that run is gone, mark it safe again.")
-            return 1
-        if entry.get("status") not in ("safe", "replaying"):
-            print(f"{sid} is not marked safe; mark it first.")
-            return 1
+    elif done.get(sid, {}).get("status") not in ("safe", "replaying"):
+        print(f"{sid} is not marked safe; mark it first.")
+        return 1
+    # Reason: one runner per job, for the whole replay: a second one would clear
+    # the first one's clones under it.
+    lock = _job_lock(sid)
+    if lock is None:
+        print(f"{sid} is being replayed by another runner right now; wait for it to finish.")
+        return 1
+    try:
+        return _replay_locked(sid, trial)
+    except (KeyboardInterrupt, replay.Terminated):
+        print(f"{sid}: interrupted, and its claude calls were stopped. Run `replay {sid}` to start it again.")
+        return 130
+    finally:
+        lock.close()
+
+
+def _replay_locked(sid: str, trial: bool) -> int:
+    import random
+    import shutil
+
+    import replay
+
     snap, out = root() / "snapshots" / sid, root() / "results" / sid
     # Reason: written before anything runs, so the report knows a trial job even
-    # when the replay raises and no result.json is ever written. The pid tells a
-    # later run whether this one is still going or was interrupted.
-    set_status(sid, "replaying", "trial" if trial else "", pid=os.getpid())
+    # when the replay raises and no result.json is ever written.
+    set_status(sid, "replaying", "trial" if trial else "")
+    # Reason: a runner killed outright never stopped its `claude`; stop it before
+    # its clones are cleared.
+    for pgid in replay.stop_leftover_groups(out):
+        print(f"{sid}: stopped process group {pgid}, left running by an earlier run.")
     # Reason: a previous run that ended in replay_failed may have left partial
     # clones here; restore()'s dest.mkdir(parents=True) would fail forever
     # otherwise, permanently jamming this snapshot.

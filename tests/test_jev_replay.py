@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import time
 import types
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+from typing import IO
 
 import pytest
 
@@ -1200,27 +1204,7 @@ def test_a_job_whose_checkout_is_gone_is_inconclusive(
     assert not (tmp_path / "calls.jsonl").exists()  # nothing ran
 
 
-def _dead_pid() -> int:
-    proc = subprocess.Popen(["true"])
-    proc.wait()
-    return proc.pid
-
-
-def test_a_job_left_replaying_by_an_interrupted_run_can_be_resumed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """N5: `replay ID` accepts it, and `--next` picks it after the safe jobs;
-    a job whose run is still alive is left alone."""
-    root = tmp_path / "fc"
-    monkeypatch.setattr(fork_check, "root", lambda: root)
-    for sid in ("20261001-090000-a", "20261001-100000-b", "20261001-110000-c"):
-        (root / "snapshots" / sid).mkdir(parents=True)
-        (root / "snapshots" / sid / "meta.json").write_text("{}")
-    fork_check.set_status("20261001-090000-a", "replaying", "", pid=_dead_pid())  # interrupted
-    fork_check.set_status("20261001-100000-b", "safe")
-    fork_check.set_status("20261001-110000-c", "replaying", "", pid=os.getpid())  # still running
-    replayed: list[str] = []
-
+def _fake_pair(replayed: list[str]) -> Callable[..., dict]:
     def fake_pair(snap: Path, *rest: object) -> dict:
         replayed.append(snap.name)
         sides = {"cost": 0.1, "wall_seconds": 1.0, "calls": 1, "warm": True, "delegated": True}
@@ -1232,16 +1216,162 @@ def test_a_job_left_replaying_by_an_interrupted_run_can_be_resumed(
             "reason": "",
         }
 
-    monkeypatch.setattr(replay, "replay_pair", fake_pair)
-    assert fork_check.main(["replay", "--next"]) == 0
-    assert fork_check.main(["replay", "--next"]) == 0
-    assert replayed == ["20261001-100000-b", "20261001-090000-a"]  # safe first, then the interrupted one
-    assert fork_check.main(["replay", "--next"]) == 1  # only the running one is left
-    assert fork_check.main(["replay", "20261001-110000-c"]) == 1
-    assert "is being replayed by process" in capsys.readouterr().out
-    fork_check.set_status("20261001-090000-a", "replaying", "", pid=_dead_pid())
+    return fake_pair
+
+
+def _hold_lock(root: Path, sid: str) -> IO[str]:
+    """What a live runner holds for the whole replay (F20)."""
+    (root / "results").mkdir(parents=True, exist_ok=True)
+    handle = (root / "results" / f"{sid}.lock").open("a")
+    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    return handle
+
+
+def _jobs(root: Path, *sids: str) -> None:
+    for sid in sids:
+        (root / "snapshots" / sid).mkdir(parents=True)
+        (root / "snapshots" / sid / "meta.json").write_text("{}")
+
+
+def test_a_job_left_replaying_by_an_interrupted_run_can_be_resumed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """N5: `replay ID` accepts it, and `--next` picks it after the safe jobs; a
+    job whose runner is still alive (it holds the job's lock) is left alone."""
+    root = tmp_path / "fc"
+    monkeypatch.setattr(fork_check, "root", lambda: root)
+    _jobs(root, "20261001-090000-a", "20261001-100000-b", "20261001-110000-c")
+    fork_check.set_status("20261001-090000-a", "replaying", "")  # interrupted: nobody holds its lock
+    fork_check.set_status("20261001-100000-b", "safe")
+    fork_check.set_status("20261001-110000-c", "replaying", "")
+    running = _hold_lock(root, "20261001-110000-c")  # still running
+    replayed: list[str] = []
+    monkeypatch.setattr(replay, "replay_pair", _fake_pair(replayed))
+    try:
+        assert fork_check.main(["replay", "--next"]) == 0
+        assert fork_check.main(["replay", "--next"]) == 0
+        assert replayed == ["20261001-100000-b", "20261001-090000-a"]  # safe first, then the interrupted one
+        assert fork_check.main(["replay", "--next"]) == 1  # only the running one is left
+        assert fork_check.main(["replay", "20261001-110000-c"]) == 1
+        assert "is being replayed by another runner right now" in capsys.readouterr().out
+    finally:
+        running.close()
+    fork_check.set_status("20261001-090000-a", "replaying", "")
     assert fork_check.main(["replay", "20261001-090000-a"]) == 0
     assert fork_check.statuses()["20261001-090000-a"]["status"] == "replayed"
+
+
+def test_a_second_runner_of_the_same_job_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F20: the job's lock is held for the whole replay; a second runner stops
+    before touching anything, and the job runs once the lock is free."""
+    root = tmp_path / "fc"
+    monkeypatch.setattr(fork_check, "root", lambda: root)
+    _jobs(root, "20261001-090000-a")
+    fork_check.set_status("20261001-090000-a", "safe")
+    (root / "results" / "20261001-090000-a").mkdir(parents=True)
+    (root / "results" / "20261001-090000-a" / "clone-in-use.txt").write_text("x\n")
+    replayed: list[str] = []
+    monkeypatch.setattr(replay, "replay_pair", _fake_pair(replayed))
+    first = _hold_lock(root, "20261001-090000-a")
+    try:
+        assert fork_check.main(["replay", "20261001-090000-a"]) == 1
+        assert "is being replayed by another runner right now" in capsys.readouterr().out
+        assert (root / "results" / "20261001-090000-a" / "clone-in-use.txt").exists()
+        assert replayed == [] and fork_check.statuses()["20261001-090000-a"]["status"] == "safe"
+    finally:
+        first.close()
+    assert fork_check.main(["replay", "20261001-090000-a"]) == 0
+    assert replayed == ["20261001-090000-a"]
+
+
+def test_a_resume_stops_the_group_an_earlier_run_left_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F20: a runner killed outright leaves its claude call's group id in the
+    attempt folder; the next run of the job kills that group before clearing."""
+    root = tmp_path / "fc"
+    monkeypatch.setattr(fork_check, "root", lambda: root)
+    _jobs(root, "20261001-090000-a")
+    fork_check.set_status("20261001-090000-a", "replaying", "")
+    leftover = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    attempt = root / "results" / "20261001-090000-a" / "side-1" / "attempt-1"
+    attempt.mkdir(parents=True)
+    (attempt / "claude.pgid").write_text(f"{leftover.pid}\n")
+    monkeypatch.setattr(replay, "replay_pair", _fake_pair([]))
+    try:
+        assert fork_check.main(["replay", "20261001-090000-a"]) == 0
+        assert leftover.wait(timeout=5) == -signal.SIGKILL
+    finally:
+        if leftover.poll() is None:
+            leftover.kill()
+            leftover.wait()
+    assert f"stopped process group {leftover.pid}" in capsys.readouterr().out
+    assert not attempt.exists()
+
+
+def _interrupted_during_the_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interrupt: Callable[[], None]
+) -> None:
+    """Sets up the next claude call: its fake starts a `sleep 60` child (pid in
+    tmp_path / "child.pid"), and the wait is interrupted with `interrupt()` once
+    that child exists."""
+    pidfile = tmp_path / "child.pid"
+    monkeypatch.setenv("FAKE_CLAUDE_SLEEP_CHILD", str(pidfile))
+
+    class InterruptedPopen(subprocess.Popen):
+        def communicate(self, input=None, timeout=None):
+            deadline = time.monotonic() + 30
+            while not pidfile.exists() and self.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            interrupt()
+            return super().communicate(input, timeout=30)
+
+    monkeypatch.setattr(replay, "subprocess", types.SimpleNamespace(**{**vars(subprocess), "Popen": InterruptedPopen}))
+
+
+def _wait_until_gone(pid: int) -> None:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.1)
+    pytest.fail(f"process {pid} outlived the interrupted claude call")
+
+
+def test_ctrl_c_during_a_claude_call_kills_its_process_group(
+    tmp_path: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F20: the child runs in its own session, so the terminal's Ctrl-C never
+    reaches it; the runner kills its whole group before the interrupt goes on."""
+
+    def ctrl_c() -> None:
+        raise KeyboardInterrupt
+
+    _interrupted_during_the_wait(tmp_path, monkeypatch, ctrl_c)
+    pgid_file = tmp_path / "claude.pgid"
+    with pytest.raises(KeyboardInterrupt):
+        replay.run_claude(tmp_path, "sid", "hello", {}, fake_claude, "claude-opus-5-5", pgid_file=pgid_file)
+    _wait_until_gone(int((tmp_path / "child.pid").read_text()))
+    assert not pgid_file.exists()
+
+
+def test_sigterm_during_a_claude_call_kills_its_process_group(
+    tmp_path: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = signal.getsignal(signal.SIGTERM)
+
+    def sigterm() -> None:
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    _interrupted_during_the_wait(tmp_path, monkeypatch, sigterm)
+    with pytest.raises(replay.Terminated):
+        replay.run_claude(tmp_path, "sid", "hello", {}, fake_claude, "claude-opus-5-5")
+    _wait_until_gone(int((tmp_path / "child.pid").read_text()))
+    assert signal.getsignal(signal.SIGTERM) == before
 
 
 def test_an_unknown_or_escaping_id_is_refused_before_anything_is_touched(

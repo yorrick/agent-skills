@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import random
@@ -12,6 +13,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import threading
 import time
 import uuid
 from datetime import datetime
@@ -790,8 +792,56 @@ def _leaked_real_path(new_files: list[Path], prompt: str, leak_forms: list[str])
     return False
 
 
+class Terminated(BaseException):
+    """SIGTERM during a `claude` call, raised so the call's process group is
+    stopped on the way out, as for Ctrl-C."""
+
+
+def _raise_terminated(signum: int, frame: object) -> None:
+    raise Terminated(f"signal {signum}")
+
+
+def _stop_on_sigterm() -> Any:
+    """Turn SIGTERM into Terminated for the length of a call, and return the
+    handler to put back (None off the main thread, where Python cannot set one)."""
+    if threading.current_thread() is not threading.main_thread():
+        return None
+    return signal.signal(signal.SIGTERM, _raise_terminated) or signal.SIG_DFL
+
+
+def _kill_group(pgid: int) -> None:
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(pgid, signal.SIGKILL)
+
+
+def stop_leftover_groups(results: Path) -> list[int]:
+    """Kill the `claude` process groups an earlier run of this job recorded under
+    `results` and never stopped (it was killed outright), if they are still
+    alive. Returns the groups that were."""
+    stopped = []
+    for record in sorted(results.glob("side-*/attempt-*/claude.pgid")):
+        try:
+            pgid = int(record.read_text())
+        except ValueError:
+            continue
+        if pgid <= 1 or pgid == os.getpgrp():
+            continue
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            continue
+        stopped.append(pgid)
+    return stopped
+
+
 def run_claude(
-    clone: Path, session_id: str, prompt: str, env_extra: dict, claude_home: Path, model: str
+    clone: Path,
+    session_id: str,
+    prompt: str,
+    env_extra: dict,
+    claude_home: Path,
+    model: str,
+    pgid_file: Path | None = None,
 ) -> tuple[dict, float, int, bool]:
     """One headless fork of the session, with the same access as the user's own
     session. The prompt is the last argument, after `--`, so a message that
@@ -800,7 +850,10 @@ def run_claude(
     strip a variable it must never inherit. The fourth return value is True
     only for a call this killed after TIMEOUT_SECONDS; the exit code next to it
     is whatever the killed process actually reported (often a negative signal
-    number), never a stand-in like -1, which is also SIGHUP's own code."""
+    number), never a stand-in like -1, which is also SIGHUP's own code. On
+    Ctrl-C, SIGTERM or any other exception during the wait, the call's whole
+    process group is killed before the exception goes on. While the call runs,
+    `pgid_file` (if given) holds its process group id."""
     cmd = [
         os.environ.get("JEV_FORK_CHECK_CLAUDE", "claude"),
         "--resume",
@@ -839,18 +892,33 @@ def run_claude(
     started = time.monotonic()
     # Reason: a new session (not just a new process group) is what lets a timed-out
     # run be killed as a whole, so an MCP or dev server the agent started as a child
-    # of it does not keep running after `claude` itself is gone.
+    # of it does not keep running after `claude` itself is gone. It also keeps the
+    # terminal's Ctrl-C from reaching the child: the runner stops the group itself.
     proc = subprocess.Popen(
         cmd, cwd=clone, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True
     )
+    # Reason: a runner killed outright (SIGKILL, a crash) cannot stop the group; the
+    # next run of the job finds the id here and stops it (`stop_leftover_groups`).
+    if pgid_file is not None:
+        pgid_file.write_text(f"{proc.pid}\n")
+    previous = _stop_on_sigterm()
     timed_out = False
     try:
         stdout, _ = proc.communicate(timeout=TIMEOUT_SECONDS)
         code = proc.returncode
     except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGKILL)
+        _kill_group(proc.pid)
         proc.wait()
         stdout, code, timed_out = "", proc.returncode, True
+    except BaseException:  # Ctrl-C, SIGTERM (as Terminated) or anything else during the wait
+        _kill_group(proc.pid)
+        proc.wait()
+        raise
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
+        if pgid_file is not None:
+            pgid_file.unlink(missing_ok=True)
     wall = time.monotonic() - started
     try:
         data = json.loads(stdout)
@@ -934,7 +1002,9 @@ def _replay_side(
         # Reason: the warm-up forks the same conversation with the same tools
         # and system prompt, so the side's first call can read it from cache.
         before_files = _session_file_names(pdir)
-        warm_data, _, warm_code, warm_timed_out = run_claude(cwd, sid, WARMUP, warmup_env, claude_home, model)
+        warm_data, _, warm_code, warm_timed_out = run_claude(
+            cwd, sid, WARMUP, warmup_env, claude_home, model, pgid_file=dest / "claude.pgid"
+        )
         warm_new_files = _new_session_files(pdir, before_files)
         # Reason: every attempt is scanned, whether it succeeded, crashed or
         # timed out, since a leak can happen before a call ever fails. The scan
@@ -963,7 +1033,9 @@ def _replay_side(
         if warm["unpriced_calls"]:
             return side, "unpriced"
         before_files = _session_file_names(pdir)
-        data, wall, code, job_timed_out = run_claude(cwd, sid, job_prompt, job_env, claude_home, model)
+        data, wall, code, job_timed_out = run_claude(
+            cwd, sid, job_prompt, job_env, claude_home, model, pgid_file=dest / "claude.pgid"
+        )
         job_new_files = _new_session_files(pdir, before_files)
         if _leaked_real_path(job_new_files, job_prompt, leak_forms):
             return side, "a replay used a path into the real repository"

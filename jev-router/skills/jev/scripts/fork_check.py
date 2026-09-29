@@ -18,12 +18,58 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
 import jev_router
 import report
 import usage
+
+EXTERNAL_SHELL = re.compile(
+    r"\bgit\s+push\b|\bgh\s+(pr|issue|release|repo|secret|workflow)\s+(create|merge|edit|close|comment|delete|run|set)"
+    r"|\bgh\s+api\b.*-X\s*(POST|PUT|PATCH|DELETE)|\bvercel\b|\bsupabase\s+(db\s+push|functions\s+deploy)"
+    r"|\bpulumi\s+up\b|\bterraform\s+apply\b|\bcurl\b.*-X\s*(POST|PUT|PATCH|DELETE)|\bhttp\s+(POST|PUT|PATCH|DELETE)\b"
+    r"|\bnpm\s+publish\b|\bdeploy\b",
+    re.IGNORECASE,
+)
+# Reason: an MCP tool is listed unless its name says it only reads; the user decides.
+READ_ONLY_MCP = re.compile(r"__(get|list|search|read|query_logs|fetch|describe|view|find)[_a-z]*$", re.IGNORECASE)
+
+
+def external_actions(turn: list[dict]) -> list[str]:
+    """What a turn did outside the machine: a push, a PR/issue/deploy command, or a
+    non-read MCP tool call. A guide for the user's safe/skip mark, not a guarantee."""
+    found = []
+    for entry in turn:
+        if entry.get("type") != "assistant":
+            continue
+        for block in (entry.get("message") or {}).get("content") or []:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            name, inputs = str(block.get("name")), block.get("input") or {}
+            if name == "Bash" and EXTERNAL_SHELL.search(str(inputs.get("command", ""))):
+                found.append(f"shell: {str(inputs['command'])[:120]}")
+            elif name.startswith("mcp__") and not READ_ONLY_MCP.search(name):
+                found.append(f"MCP: {name}")
+    return found
+
+
+def real_turn(meta: dict, message: str) -> list[dict]:
+    """The real turn in the user's session, plus its subagents' entries in the same
+    time range. Reads the live transcript named by meta.json, not the snapshot's own
+    frozen copy, since only the live one holds what actually followed the prompt."""
+    path = Path(meta["transcript_path"])
+    entries = usage.read_entries(path) if path.exists() else []
+    turn = report.turn_after(entries, usage.prompt_sha(message), near=meta["created"])
+    if not turn:
+        return []
+    stamps = [e["timestamp"] for e in turn if isinstance(e.get("timestamp"), str)]
+    subagents = path.with_suffix("") / "subagents"
+    if stamps and subagents.exists():
+        for f in sorted(subagents.glob("*.jsonl")):
+            turn += [e for e in usage.read_entries(f) if stamps[0] <= str(e.get("timestamp", "")) <= stamps[-1]]
+    return turn
 
 
 def root() -> Path:
@@ -60,6 +106,38 @@ def snapshot_dirs() -> list[Path]:
 
 def cmd_shadow() -> int:
     print(report.shadow_report(jev_router.read_log(), usage.load_prices()))
+    return 0
+
+
+def cmd_list() -> int:
+    """Every finished snapshot, its status, and what its real turn did outside the
+    machine, so the user can decide which jobs are safe to replay with full access."""
+    done = statuses()
+    print("| snapshot | repo | expected saving | status | outside the machine (from the real turn) |")
+    print("|---|---|---|---|---|")
+    for snap in snapshot_dirs():
+        meta = json.loads((snap / "meta.json").read_text())
+        actions = external_actions(real_turn(meta, (snap / "message.txt").read_text()))
+        shown = "; ".join(actions[:3]) + (f"; and {len(actions) - 3} more" if len(actions) > 3 else "")
+        status = done.get(snap.name, {}).get("status", "new")
+        print(
+            f"| {snap.name} | {Path(meta['toplevel']).name} | ${meta['expected_saving']:.2f} | {status} | "
+            f"{shown or 'nothing found'} |"
+        )
+    print(
+        "\nThe list is a guide: a replay can do something the real turn did not. Mark a job safe only if two "
+        "replays in a row could run without an external effect you would mind."
+    )
+    snapshots_dir = root() / "snapshots"
+    abandoned = sorted(snapshots_dir.glob("*.tmp")) if snapshots_dir.exists() else []
+    if abandoned:
+        print(f"\n{len(abandoned)} abandoned snapshot folders (*.tmp) under {snapshots_dir}; safe to delete.")
+    return 0
+
+
+def cmd_mark(sid: str, mark: str, reason: str) -> int:
+    set_status(sid, mark, reason)
+    print(f"{sid}: {mark}")
     return 0
 
 
@@ -107,11 +185,20 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("shadow")
     sub.add_parser("check")
+    sub.add_parser("list")
+    mark = sub.add_parser("mark")
+    mark.add_argument("id")
+    mark.add_argument("mark", choices=("safe", "skip"))
+    mark.add_argument("--reason", default="")
     args = parser.parse_args(argv)
     if args.command == "shadow":
         return cmd_shadow()
     if args.command == "check":
         return cmd_check()
+    if args.command == "list":
+        return cmd_list()
+    if args.command == "mark":
+        return cmd_mark(args.id, args.mark, args.reason)
     return 2
 
 

@@ -818,17 +818,32 @@ def test_replays_never_inherit_the_launching_sessions_markers(
     tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The runner usually runs inside a Claude Code session; its markers must not
-    tie either replay to that session. Everything else is kept."""
+    tie either replay to that session. Everything else is kept, including the
+    auth and provider variables (A6, narrowed)."""
     for name in SESSION_MARKERS:
         monkeypatch.setenv(name, "from-the-launching-session")
+    for name in replay.KEPT_CLAUDE_CODE_VARS:
+        monkeypatch.setenv(name, "1")
     monkeypatch.setenv("CLAUDE_TEST_KEPT", "yes")
     result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
     assert not result["inconclusive"]
     calls = calls_log(tmp_path)
     assert len(calls) == 4
+    assert replay.KEPT_CLAUDE_CODE_VARS == {
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+        "CLAUDE_CODE_SKIP_VERTEX_AUTH",
+    }
     for call in calls:
-        assert not [k for k in call["claude_env"] if k in SESSION_MARKERS or k.startswith("CLAUDE_CODE_")]
-        assert {"CLAUDE_CONFIG_DIR", "CLAUDE_TEST_KEPT"} <= set(call["claude_env"])
+        inherited = set(call["claude_env"])
+        assert not [
+            k
+            for k in inherited
+            if k in SESSION_MARKERS or (k.startswith("CLAUDE_CODE_") and k not in replay.KEPT_CLAUDE_CODE_VARS)
+        ]
+        assert {"CLAUDE_CONFIG_DIR", "CLAUDE_TEST_KEPT", *replay.KEPT_CLAUDE_CODE_VARS} <= inherited
         assert (call["home"], call["path"]) == (os.environ["HOME"], os.environ["PATH"])
 
 

@@ -539,9 +539,18 @@ WARMUP = "Reply with the single word ok and do nothing else."
 ATTEMPTS = 3
 TIMEOUT_SECONDS = 4 * 3600
 LARGE_CONTEXT = 200_000
-# With every CLAUDE_CODE_* variable, what a replay never inherits from the session
-# that launched the runner.
+# With every CLAUDE_CODE_* variable but KEPT_CLAUDE_CODE_VARS, what a replay never
+# inherits from the session that launched the runner.
 SESSION_VARS = {"CLAUDECODE", "CLAUDE_EFFORT", "CLAUDE_PID"}
+# Reason: how the user logs in and which provider serves the model, not markers of
+# the launching session; a replay without them would fail or run elsewhere.
+KEPT_CLAUDE_CODE_VARS = {
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+    "CLAUDE_CODE_SKIP_VERTEX_AUTH",
+}
 # Reason: a path is only ever rewritten (or flagged as leaked) when it is NOT
 # immediately followed by another path-name character, so a shorter checkout
 # path never matches inside a longer, unrelated one (`/x/agent-skills` must
@@ -755,8 +764,13 @@ def run_claude(
     # Reason: the runner itself usually runs inside a Claude Code session, whose
     # own markers (session id, messaging socket and token, child-session and
     # bridge ids, effort, pid) would tie the replay to that session. Everything
-    # else, CLAUDE_CONFIG_DIR, PATH and HOME included, is kept.
-    env = {k: v for k, v in os.environ.items() if k not in SESSION_VARS and not k.startswith("CLAUDE_CODE_")}
+    # else, CLAUDE_CONFIG_DIR, PATH, HOME and the auth and provider variables in
+    # KEPT_CLAUDE_CODE_VARS included, is kept.
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in SESSION_VARS and (not k.startswith("CLAUDE_CODE_") or k in KEPT_CLAUDE_CODE_VARS)
+    }
     env["JEV_ROUTER"] = "off"
     for key, value in env_extra.items():
         if value is None:

@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 import types
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -110,6 +111,30 @@ def test_a_captured_entry_gone_since_is_listed_as_missing(tmp_path: Path, repo: 
     assert not (clone / "build.log").exists()
     restored = json.loads((tmp_path / "r" / "restore.json").read_text())
     assert restored["missing"] == ["build.log"] and "build.log" not in restored["ignored"]
+
+
+def test_an_ignored_entry_touched_after_capture_is_not_copied(tmp_path: Path, repo: Path) -> None:
+    """F19: a file the real turn added inside a captured `.cache/` keeps the whole
+    folder out and lists it; the job stays usable. A dependency folder is
+    copied anyway, since the fingerprint watches it."""
+    (repo / ".gitignore").write_text((repo / ".gitignore").read_text() + ".cache/\n")
+    (repo / ".cache").mkdir()
+    (repo / ".cache" / "a.txt").write_text("cached before\n")
+    (repo / "node_modules" / "pkg").mkdir()
+    (repo / "node_modules" / "pkg" / "index.js").write_text("module.exports = 1;\n")
+    snap = take(tmp_path, repo)
+    later = datetime.fromisoformat(json.loads((snap / "meta.json").read_text())["created"]).timestamp() + 60
+    added = repo / ".cache" / "b.txt"
+    added.write_text("written by the real turn\n")
+    os.utime(added, (later, later))
+    os.utime(repo / "node_modules" / "pkg" / "index.js", (later, later))
+    clone = replay.restore(snap, tmp_path / "r")
+    assert not (clone / ".cache").exists()
+    assert (clone / "node_modules" / "pkg" / "index.js").exists()
+    assert (clone / ".env").read_text() == "TOKEN=x\n"
+    restored = json.loads((tmp_path / "r" / "restore.json").read_text())
+    assert restored["changed_since_capture"] == [".cache"]
+    assert restored["ignored"] == [".env", "node_modules"]
 
 
 def test_a_snapshot_without_its_ignored_entries_is_refused(tmp_path: Path, snap: Path) -> None:

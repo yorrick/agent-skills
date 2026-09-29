@@ -14,6 +14,7 @@ import sys
 import tarfile
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -225,8 +226,10 @@ def restore(snap: Path, dest: Path, *, copy_ignored: bool = True) -> Path:
     meta.json), as they are now in the real checkout, and record what happened
     to them in `dest/restore.json`: `ignored` (copied), `skipped` (nested
     checkouts, virtualenvs and escaping links left out), `missing` (captured but
-    gone since) and `not_captured` (ignored now but new since the capture, never
-    copied: a secret added to info/exclude, a cache, the real turn's output)."""
+    gone since), `not_captured` (ignored now but new since the capture, never
+    copied: a secret added to info/exclude, a cache, the real turn's output) and
+    `changed_since_capture` (captured, but modified after the capture, never
+    copied)."""
     meta = json.loads((snap / "meta.json").read_text())
     top, head = Path(meta["toplevel"]), meta["head"]
     # Reason: a job captured in a worktree the user has since removed can never
@@ -296,9 +299,21 @@ def restore(snap: Path, dest: Path, *, copy_ignored: bool = True) -> Path:
         skipped: list[str] = []
         ignored: list[str] = []
         missing: list[str] = []
+        changed: list[str] = []
+        # Reason: `created` is kept to the second, so only a change from the next
+        # whole second on is surely after the capture; one inside the capture's
+        # own second is not seen (the real turn starts only after the hook).
+        cutoff = datetime.fromisoformat(meta["created"]).timestamp() + 1
         for rel in captured:
             if not os.path.lexists(top / rel):
                 missing.append(rel)
+                continue
+            # Reason (Ruling F19): an entry the real turn (or the user) changed
+            # after the capture is not the state the job started from; it is
+            # left out and listed rather than making the job inconclusive.
+            # Dependency folders are exempt: the fingerprint watches them.
+            if not _in_dependency_folder(rel) and _touched_since(top / rel, cutoff):
+                changed.append(rel)
                 continue
             if os.path.lexists(clone / rel):
                 raise Inconclusive(f"{rel} already exists in the clone")
@@ -327,6 +342,7 @@ def restore(snap: Path, dest: Path, *, copy_ignored: bool = True) -> Path:
             "ignored": sorted(ignored),
             "missing": missing,
             "not_captured": not_captured,
+            "changed_since_capture": changed,
             "ignored_blobs": dict(zip(_blob_ids(clone, contents), contents, strict=True)),
         }
         (dest / "restore.json").write_text(json.dumps(record, indent=2) + "\n")
@@ -411,6 +427,25 @@ CONTENT_MIN_BYTES = 8
 CONTENT_MAX_BYTES = 1 << 20
 
 
+def _in_dependency_folder(rel: str) -> bool:
+    return any(part in snapshot.DEPENDENCY_DIRS for part in Path(rel).parts)
+
+
+def _touched_since(path: Path, cutoff: float) -> bool:
+    """Whether `path`, or anything under it, was modified at or after `cutoff`
+    (a timestamp). Looks without following links: lstat, and os.walk without
+    followlinks."""
+    if os.lstat(path).st_mtime >= cutoff:
+        return True
+    if path.is_symlink() or not path.is_dir():
+        return False
+    for dirpath, dirnames, filenames in os.walk(path):
+        for name in dirnames + filenames:
+            if os.lstat(os.path.join(dirpath, name)).st_mtime >= cutoff:
+                return True
+    return False
+
+
 def _restored_files(clone: Path, ignored: list[str]) -> list[str]:
     """The regular files now under the restored ignored entries, relative to the
     clone, outside dependency folders and between the two content-check sizes.
@@ -424,7 +459,7 @@ def _restored_files(clone: Path, ignored: list[str]) -> list[str]:
 
     for rel in ignored:
         path = clone / rel
-        if not os.path.lexists(path) or any(part in snapshot.DEPENDENCY_DIRS for part in Path(rel).parts):
+        if not os.path.lexists(path) or _in_dependency_folder(rel):
             continue
         if path.is_symlink() or not path.is_dir():
             consider(rel)

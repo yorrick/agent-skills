@@ -37,8 +37,8 @@
     {
       "name": "jev-router",
       "source": "./jev-router",
-      "description": "Asks Jev (via OpenRouter) how big each message is and sends small jobs to a smaller, cheaper model. Off until you turn it on with /jev on.",
-      "version": "0.2.0",
+      "description": "Asks Jev (via OpenRouter) how long each job will run and, in Claude Code, whether a fresh subagent would do it cheaper. Starts in shadow mode. Off until you turn it on with /jev on.",
+      "version": "0.3.0",
       "author": {
         "name": "Yorrick Jansen"
       }

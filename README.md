@@ -209,7 +209,12 @@ not there.
 
 Claude Code and Codex cannot switch the main model per message, so there the main model
 hands the job to a helper subagent and relays its result. opencode can, so there the
-message itself moves onto the helper's model. See
+message itself moves onto the helper's model.
+
+In Claude Code, the router also decides whether a fresh subagent would finish a long job
+for less, since re-reading the whole conversation on every call is most of its cost. It
+starts in shadow mode (decide and log, tell the session nothing) until its fork check
+passes; `/jev mode shadow|capture|live` switches modes. See
 [`jev-router/README.md`](jev-router/README.md).
 
 It is off until you turn it on with `/jev on` (`$jev on` in Codex), and `/jev status`

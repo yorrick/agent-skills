@@ -15,6 +15,11 @@ Show the user the script's output as it is. It already carries the privacy remin
 
 - `on` needs, once, the shell file that exports `OPENROUTER_API_KEY`: add `--key-file <path>`. The path is remembered for later `on`s. If `on` fails because no key file is known, ask the user for the path. Never search for keys and never print one.
 - `classify "<message>" ...` sizes messages without routing anything and prints a table of what Jev picked and how sure it was. Add `--harness codex` or `--harness opencode` to use those harnesses' sizes.
+- `mode shadow|capture|live` (runs `jev_router.py mode ...`) sets the Claude Code cache-aware router's mode: `shadow` decides and logs but tells the session nothing, `capture` also saves a snapshot of each job it would delegate, and `live` tells the session to hand the job to a fresh subagent. Add `--dir <path>` with `capture` to change where snapshots are saved.
+
+## Fork check
+
+The fork check replays the jobs the router selected in `capture` mode, both kept and delegated, to measure real cost, time and quality before turning on `live` mode. Run its commands from `skills/jev/scripts/fork_check.py`, in this order: `check` (restore-check new snapshots), `list` (snapshots and what each real turn did outside the machine), `mark` (mark a snapshot safe or skip to replay), `replay` (restore a marked snapshot into two clones and run keep and delegate), `judge` (a blind Codex verdict on the two results), `publish` (push both results to a private copy and open the comparison PR), `report` (the fork check's pass or fail over its 20 jobs), and `shadow` (shadow-mode decisions against what really happened).
 
 ## What the router does
 

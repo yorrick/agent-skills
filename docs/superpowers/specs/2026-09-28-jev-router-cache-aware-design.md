@@ -93,7 +93,8 @@ end of the file only, so a 30 MB transcript costs the same as a small one:
 - tokens added and produced per call, averaged over the session's last 20 calls;
 - the agent's previous reply, capped at 1,500 characters.
 
-If any of it cannot be read, the router has no opinion.
+If any of it cannot be read, the router has no opinion. A session model this study has
+no price for gets no Jev call either: there is nothing to price the saving against.
 
 ### What the router asks Jev
 
@@ -176,12 +177,14 @@ the jobs the router selects, on the user's own work.
    jobs do not count toward the 20. During the check, the runner also restores each
    new snapshot without running anything and compares it with what was captured, so a
    broken snapshot shows up the same day rather than at replay time.
-1. **Snapshot selected jobs.** With the rule frozen and `"fork_check": true`, whenever
-   the router (still in shadow mode) selects a job, the hook saves a snapshot before the
-   turn runs: a copy of the transcript ending just before the message, the message, and
-   the working copy's state (HEAD, uncommitted changes and untracked files) with a hash
-   of its ignored setup files and installed dependencies. A snapshot is small; no clone
-   or fork exists yet. The user works as usual; the real session is never touched.
+1. **Snapshot selected jobs.** With the rule frozen and the router in `capture` mode,
+   whenever the router (still deciding in shadow) selects a job, the hook saves a
+   snapshot before the turn runs, within a time budget: a copy of the transcript ending
+   just before the message, the message, and the working copy's state (HEAD, uncommitted
+   changes and untracked files) with a hash of its ignored setup files and installed
+   dependencies. It leaves out untracked nested checkouts and worktrees, listed in the
+   snapshot's `meta.json` under `skipped`. A snapshot is small; no clone or fork exists
+   yet. The user works as usual; the real session is never touched.
 2. **The user picks what is safe to replay.** A replay has the same access as the
    user's session, so it would repeat whatever the real turn did outside the machine.
    After the real turn finishes, the runner lists each snapshot with those actions, read
@@ -189,24 +192,37 @@ the jobs the router selects, on the user's own work.
    sent), and the user marks which ones to replay. The list is a guide, not a promise:
    a replay can do something the real turn did not, so the user marks a snapshot only
    if two replays in a row can run without an external effect they would mind, and
-   without the first changing the second's task. The check takes the next 20 marked
-   jobs, follow-ups included; the report counts the skipped ones and why.
+   without the first changing the second's task. The check takes the first 20 jobs ever
+   marked safe, in capture order, follow-ups included; the report counts the skipped ones
+   and why.
 3. **Replay both ways.** A runner restores each marked snapshot into two full clones.
    Nothing is installed: the working copy's ignored files (setup files and installed
    dependencies) are copied in, and if their hash no longer matches the snapshot's, the
-   job is skipped. It saves the transcript copy as a new session of each clone, with its
+   job is inconclusive. Restore never copies a nested checkout, a Python virtualenv (the
+   replay rebuilds it, for example with `uv run`) or a symlink that points outside the
+   repository. It saves the transcript copy as a new session of each clone, with its
    own id, so the user's real session is never resumed, and resumes it headless with
-   `JEV_ROUTER=off` and the same message. The delegate side also gets exactly the note
+   `JEV_ROUTER=off` and the same message, pinned to the captured session's model. The
+   real checkout's paths (the toplevel, its `~` and `$HOME` forms, and the main
+   worktree) are rewritten to the clone's path in the transcript copy and in the job
+   message; a replay whose output still names a path into the real repository makes the
+   job inconclusive and prints a warning. The delegate side also gets exactly the note
    the live router would add; the keep side gets nothing. Replays run like the user's
    session: bypass permissions, the same MCP servers, network and credentials. The one
    difference is that each clone's `origin` is a local bare copy, so a normal push stays
-   local (a push to an explicit URL or another remote still could not be stopped). The
-   two sides run one after the other in random order. When both are done, the runner
+   local (a push to an explicit URL or another remote still could not be stopped). A
+   crash or a changed clone after the warm-up fails that attempt and is retried in a
+   fresh clone; a timeout, an unpriced call or a leaked real path ends the job at once,
+   without running the other side. The two sides run one after the other in random
+   order. When both are done, the runner
    pushes the two results (their final files, committed as they stand, never the ignored setup files copied in) to a private
    copy of the repository on GitHub, one per repository (a fork of a public repository
    would be public), as `replay/<job>/keep` and `replay/<job>/delegate`. It then opens
    a pull request into `replay/<job>/keep` from a branch that starts at keep and holds
-   the delegate side's final files, so the diff is exactly keep versus delegate.
+   the delegate side's final files, so the diff is exactly keep versus delegate. Publish
+   refuses an inconclusive result and refuses any clone that still holds an ignored file
+   restore copied in, whether it is committed, only in the tree, or only in the working
+   copy; it never force-pushes and refuses if the result branches already exist.
 4. **Measure** API-equivalent cost, wall time and calls from the transcripts, subagents
    included, pricing every call by its recorded categories (cache reads, cache writes,
    uncached input, output). Right before each side runs, a one-line throwaway fork of the
@@ -218,7 +234,9 @@ the jobs the router selects, on the user's own work.
 5. **Judge** quality by criteria fixed in advance: the project's tests pass where they
    exist, the job's stated outcome is met, and a blind review compares the two results
    without knowing which side made them. The blind reviewer is never the harness that
-   did the work: Codex judges Claude Code jobs, and Claude judges Codex jobs.
+   did the work: Codex judges Claude Code jobs, and Claude judges Codex jobs. Like
+   publish, the judge refuses an inconclusive result and refuses any clone still holding
+   an ignored file restore copied in.
 
 The check passes when all of the conditions in Goal hold over the 20 jobs. Twenty jobs
 is a practical sample for a personal tool, not a statistical guarantee, so the report

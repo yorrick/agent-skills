@@ -67,6 +67,26 @@ Asking Jev takes a moment: it answered in 0.16 to 0.5 seconds in our probes, and
 waits at most 2 seconds before carrying on without it. When the router is off, the hook costs about
 40 ms.
 
+## Claude Code: cache-aware delegation (0.3)
+
+In Claude Code the router also decides, once per message, whether a fresh subagent would
+finish the job for less. Re-reading the whole conversation on every call is most of a long
+job's cost, and a subagent starts from a brief instead of the full context. It reads the
+session's current context size, its recent per-call cost and Jev's prediction of how many
+calls the job will take, then delegates only when the expected saving is large enough and
+the chance of losing money is low.
+
+It has three modes, set with `/jev mode shadow|capture|live`: `shadow` (the default)
+decides and logs but tells the session nothing; `capture` does the same and also saves a
+snapshot of each job it would delegate; `live` tells the session to hand the job to a
+fresh subagent.
+
+Before `live` mode is turned on, the fork check replays the jobs `capture` selected, both
+kept and delegated, to measure real cost, time and quality on the user's own work. Run its
+commands, in order: `check`, `list`, `mark`, `replay`, `judge`, `publish`, `report`. See
+[the design spec](../docs/superpowers/specs/2026-09-28-jev-router-cache-aware-design.md)
+for the full design and the validation it must pass.
+
 ## Privacy
 
 While the router is on, the text of every message you type goes to OpenRouter and to TypeSafe

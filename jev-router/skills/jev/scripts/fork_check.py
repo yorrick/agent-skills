@@ -77,6 +77,10 @@ def cmd_check() -> int:
         if sid in done:
             continue
         dest = root() / "checks" / sid
+        # Reason: a folder a killed run left behind would otherwise make
+        # `restore`'s `dest.mkdir` fail forever, permanently marking this snapshot
+        # restore_failed instead of retrying it clean next time.
+        shutil.rmtree(dest, ignore_errors=True)
         try:
             clone = replay.restore(snap, dest, copy_ignored=False)
             meta = json.loads((snap / "meta.json").read_text())

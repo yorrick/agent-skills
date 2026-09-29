@@ -2932,6 +2932,11 @@ def test_labels_are_mapped_back_to_keep_and_delegate(tmp_path: Path, snap: Path)
     assert seen["dirs"] == ["A", "B"]
     assert subprocess.run(["git", "-C", str(tmp_path / "j" / "A"), "remote"], capture_output=True,
                           text=True).stdout == ""
+    for letter in ("A", "B"):
+        for f in (tmp_path / "j" / letter / ".git").rglob("*"):
+            if f.is_file():
+                data = f.read_bytes()
+                assert str(tmp_path / "k").encode() not in data and str(tmp_path / "d").encode() not in data
 
 
 def point(keep_cost: float, del_cost: float, prefer: str = "tie", delegate_ok: bool = True) -> dict:
@@ -2987,6 +2992,7 @@ from __future__ import annotations
 
 import json
 import random
+import shutil
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -3064,8 +3070,10 @@ def judge(snap: Path, result: dict, work: Path, *, codex: Callable[[str, Path], 
     work.mkdir(parents=True, exist_ok=True)
     for letter, side in names.items():
         copy_tree(Path(result["sides"][side]["clone"]), work / letter)
-        # Reason: the origin's path would say which replay folder this came from.
+        # Reason: the origin and the reflogs record which replay folder this came
+        # from, which result.json maps to a side; the judge gets neither.
         run("git", "-C", str(work / letter), "remote", "remove", "origin")
+        shutil.rmtree(work / letter / ".git" / "logs", ignore_errors=True)
     raw = parse(codex(PROMPT.format(message=(snap / "message.txt").read_text(), example=EXAMPLE), work))
     verdict = {
         names["A"]: {"tests": raw["A"]["tests"], "outcome_met": raw["A"]["outcome_met"]},

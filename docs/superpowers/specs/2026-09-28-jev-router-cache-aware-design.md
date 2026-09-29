@@ -224,9 +224,10 @@ The check passes when all of the conditions in Goal hold over the 20 jobs. Twent
 is a practical sample for a personal tool, not a statistical guarantee, so the report
 also shows every job: its predicted and real length, both costs, both times and the
 verdict. The 10% condition applies to the 20 selected jobs marked safe to replay;
-skipped jobs have no measured counterfactual. The report also states
-the saving as a share of the whole period's cost (from the shadow log), without a
-threshold, since that share depends on how the user's work mixes long and short jobs.
+skipped jobs have no measured counterfactual. The report also states the saving as a
+share of the cost of the messages the router decided over the period (their main-thread
+cost, from the shadow log), without a threshold, since that share depends on how the
+user's work mixes long and short jobs.
 Codex gets the same check (`codex exec fork`) once it is calibrated.
 
 ## Out of scope

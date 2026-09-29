@@ -175,7 +175,10 @@ the jobs the router selects, on the user's own work.
    user's session, so it would repeat whatever the real turn did outside the machine.
    After the real turn finishes, the runner lists each snapshot with those actions, read
    from the real turn's transcript (pushes, pull requests, MCP writes, deploys, messages
-   sent), and the user marks which ones to replay. The check takes the next 20 marked
+   sent), and the user marks which ones to replay. The list is a guide, not a promise:
+   a replay can do something the real turn did not, so the user marks a snapshot only
+   if two replays in a row can run without an external effect they would mind, and
+   without the first changing the second's task. The check takes the next 20 marked
    jobs, follow-ups included; the report counts the skipped ones and why.
 3. **Replay both ways.** A runner restores each marked snapshot into two full clones.
    Nothing is installed: the working copy's ignored files (setup files and installed
@@ -185,8 +188,9 @@ the jobs the router selects, on the user's own work.
    `JEV_ROUTER=off` and the same message. The delegate side also gets exactly the note
    the live router would add; the keep side gets nothing. Replays run like the user's
    session: bypass permissions, the same MCP servers, network and credentials. The one
-   difference is that each clone's `origin` is a local bare copy, so a replay can never
-   push onto the user's real branch. The two sides run one after the other in random
+   difference is that each clone's `origin` is a local bare copy, so a normal push stays
+   local (a push to an explicit URL or another remote still could not be stopped). The
+   two sides run one after the other in random
    order.
 4. **Measure** API-equivalent cost, wall time and calls from the transcripts, subagents
    included, pricing every call by its recorded categories (cache reads, cache writes,
@@ -204,7 +208,8 @@ the jobs the router selects, on the user's own work.
 The check passes when all of the conditions in Goal hold over the 20 jobs. Twenty jobs
 is a practical sample for a personal tool, not a statistical guarantee, so the report
 also shows every job: its predicted and real length, both costs, both times and the
-verdict. The 10% condition is about the jobs the router selects; the report also states
+verdict. The 10% condition applies to the 20 selected jobs marked safe to replay;
+skipped jobs have no measured counterfactual. The report also states
 the saving as a share of the whole period's cost (from the shadow log), without a
 threshold, since that share depends on how the user's work mixes long and short jobs.
 Codex gets the same check (`codex exec fork`) once it is calibrated.

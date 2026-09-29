@@ -134,6 +134,29 @@ def _refuse_if_source_path_leaked(git_dir: Path, source: Path, label: str) -> No
             raise RuntimeError(f"{label}'s copy still names its source clone, in {f}; refusing")
 
 
+def _refuse_links_into_the_runner(copy: Path, fork_root: Path, label: str) -> None:
+    """A replay runs with full access and can leave a link such as
+    `sides -> <fork root>/results/<id>/result.json`, and following it would tell
+    the judge which side is which. Refuses any symlink in the blind copy that
+    resolves inside the fork-check folder but outside the copy itself. Links
+    that point elsewhere stay: a uv venv's `python` is an absolute link to the
+    interpreter. A link loop leads nowhere and is left alone."""
+    root, own = fork_root.resolve(), copy.resolve()
+    for dirpath, dirnames, filenames in os.walk(copy):
+        for name in dirnames + filenames:
+            path = Path(dirpath) / name
+            if not path.is_symlink():
+                continue
+            try:
+                target = path.resolve()
+            except (RuntimeError, OSError):
+                continue
+            if target.is_relative_to(root) and not target.is_relative_to(own):
+                raise RuntimeError(
+                    f"{label}'s copy holds {path.relative_to(copy)}, a link into the fork-check folder; refusing"
+                )
+
+
 def judge(
     snap: Path, result: dict, work: Path, *, codex: Callable[[str, Path], str] = run_codex, rng: random.Random
 ) -> dict:
@@ -162,6 +185,8 @@ def judge(
         shutil.rmtree(git_dir / "logs", ignore_errors=True)
         (git_dir / "FETCH_HEAD").unlink(missing_ok=True)
         _refuse_if_source_path_leaked(git_dir, source, letter)
+        # Reason: the snapshot lives at <fork root>/snapshots/<id>.
+        _refuse_links_into_the_runner(work / letter, snap.parent.parent, letter)
     raw = parse(codex(PROMPT.format(message=(snap / "message.txt").read_text(), example=EXAMPLE), work))
     verdict = {
         names["A"]: {"tests": raw["A"]["tests"], "outcome_met": raw["A"]["outcome_met"]},

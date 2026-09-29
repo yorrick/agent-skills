@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import types
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -197,6 +198,43 @@ def test_a_restored_env_edited_then_copied_is_refused_with_no_codex_call(tmp_pat
     with pytest.raises(RuntimeError, match=r"config\.txt in the delegate clone holds the content of .* \.env"):
         judge.judge(snap, result, tmp_path / "j", codex=codex, rng=random.Random(1))
     assert calls == []
+
+
+# F14: a replay-made link into the fork-check folder would unblind the judge.
+def _link_case(tmp_path: Path, snap: Path, target: Path) -> tuple[dict, list[str], Callable[[str, Path], str]]:
+    keep = replay.restore(snap, tmp_path / "k")
+    delegate = replay.restore(snap, tmp_path / "d")
+    (delegate / ".venv" / "bin").mkdir(parents=True)  # ignored in the fixture repo
+    (delegate / ".venv" / "bin" / "python").symlink_to(target)
+    calls: list[str] = []
+
+    def codex(prompt: str, work: Path) -> str:
+        calls.append(prompt)
+        return ANSWER
+
+    result = {
+        "id": "x",
+        "sides": {"keep": {"clone": str(keep), "cost": 1.0}, "delegate": {"clone": str(delegate), "cost": 1.0}},
+    }
+    return result, calls, codex
+
+
+def test_a_link_into_the_fork_check_folder_is_refused_with_no_codex_call(tmp_path: Path, snap: Path) -> None:
+    fork_root = snap.parent.parent
+    mapping = fork_root / "results" / snap.name / "result.json"
+    mapping.parent.mkdir(parents=True)
+    mapping.write_text('{"order": ["keep", "delegate"]}\n')
+    result, calls, codex = _link_case(tmp_path, snap, mapping)
+    with pytest.raises(RuntimeError, match=r"\.venv/bin/python, a link into the fork-check folder"):
+        judge.judge(snap, result, tmp_path / "j", codex=codex, rng=random.Random(1))
+    assert calls == []
+
+
+def test_a_link_out_of_the_fork_check_folder_stays(tmp_path: Path, snap: Path) -> None:
+    """A uv venv's `python` is an absolute link to the interpreter, outside the folder."""
+    result, calls, codex = _link_case(tmp_path, snap, tmp_path / "uv-python" / "bin" / "python3.12")
+    verdict = judge.judge(snap, result, tmp_path / "j", codex=codex, rng=random.Random(1))
+    assert len(calls) == 1 and verdict["prefer"] in ("keep", "delegate")
 
 
 # Final Minor 13: a timed-out judge takes the processes it started down with it.

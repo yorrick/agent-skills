@@ -155,8 +155,9 @@ relay. When the router does not delegate, it says nothing.
 
 Until the fork check passes, the router runs in shadow mode (`"mode": "shadow"` in
 `config.json`): it computes and logs the decision, Jev's score, the calibrated
-distribution and the inputs, and tells the session nothing. Shadow mode is how the fork
-check captures its jobs, not a phase before it. A report joins each logged decision
+distribution and the inputs, and tells the session nothing. For Claude Code, shadow
+mode is how the fork check captures its jobs, not a phase before it; Codex first needs a
+shadow period to collect the logs its calibration is fitted on. A report joins each logged decision
 with the number of calls the turn really took and its real cost from the transcript,
 which gives how often the router would select a job, how often the cost model says a
 selected job loses, the router's own cost and latency over the period, and, for Codex,

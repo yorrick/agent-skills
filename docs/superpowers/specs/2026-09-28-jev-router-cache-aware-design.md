@@ -168,7 +168,7 @@ the jobs the router selects, on the user's own work.
 0. **Trial run.** Before the check, one or two jobs are captured and replayed right
    away, end to end, to prove the chain works: the snapshot restores to the same state,
    both sides resume the right conversation, the delegate side really hands the job to
-   a subagent, costs and times are read, and the pull request opens on the fork. Trial
+   a subagent, costs and times are read, and the pull request opens on the private copy. Trial
    jobs do not count toward the 20. During the check, the runner also restores each
    new snapshot without running anything and compares it with what was captured, so a
    broken snapshot shows up the same day rather than at replay time.
@@ -198,7 +198,7 @@ the jobs the router selects, on the user's own work.
    difference is that each clone's `origin` is a local bare copy, so a normal push stays
    local (a push to an explicit URL or another remote still could not be stopped). The
    two sides run one after the other in random order. When both are done, the runner
-   pushes the two results (their final files, committed as they stand) to a private
+   pushes the two results (their final files, committed as they stand, never the ignored setup files copied in) to a private
    copy of the repository on GitHub, one per repository (a fork of a public repository
    would be public), as `replay/<job>/keep` and `replay/<job>/delegate`. It then opens
    a pull request into `replay/<job>/keep` from a branch that starts at keep and holds

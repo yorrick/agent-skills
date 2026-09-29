@@ -45,11 +45,12 @@ EXTERNAL_SHELL = re.compile(
     # httpie: a writing method, or a data item (`k=v`, `k:=json`) that makes it a POST
     r"|\bhttps?\s+(POST|PUT|PATCH|DELETE)\b"
     r"|\bhttps?\s+(?!(?:GET|HEAD|OPTIONS)\b)[^|;&\n]*?\s[\w.\[\]@-]+:?=(?!=)"
-    # any aws command, but only where a command starts: a line start or after ;,
-    # &&, || or |, past any VAR=value assignments (never "AWS" in a message)
-    r"|(?:^|;|&&|\|\|?)\s*(?:[A-Za-z_]\w*=\S*\s+)*(?-i:aws)\s+[a-z]"
+    # any aws command, by the CLI's own `aws <service> <operation>` shape, lower
+    # case, wherever it sits (a loop, `$(...)`, sudo, env, a full path, bash -c),
+    # but not `~/.aws/`, `aws/` or "AWS" in a message
+    r"|(?<![\w.-])(?-i:aws)\s+[a-z][\w-]*\s+[a-z]"
     r"|\bnpm\s+publish\b|\bdeploy\b",
-    re.IGNORECASE | re.MULTILINE,
+    re.IGNORECASE,
 )
 # Reason: an MCP tool is listed unless its name says it only reads; the user decides.
 READ_ONLY_MCP = re.compile(r"__(get|list|search|read|query_logs|fetch|describe|view|find)[_a-z]*$", re.IGNORECASE)

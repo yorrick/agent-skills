@@ -59,6 +59,21 @@ def test_external_actions_name_pushes_prs_deploys_and_mcp_writes() -> None:
         "cd infra && AWS_PROFILE=prod aws s3 ls",
         "make dist | aws s3 cp - s3://bucket/dist.tar",
         "uv run pytest\naws lambda invoke --function-name x out.json",
+        # B1: aws wherever a command can sit, not only at the start of one.
+        "for r in us-east-1 eu-west-1; do aws s3 ls --region $r; done",
+        "if aws sts get-caller-identity; then echo ok; fi",
+        "export TOKEN=$(aws ecr get-login-password)",
+        "(aws s3 ls)",
+        "sudo aws s3 rm s3://bucket/x",
+        "time aws s3 sync dist s3://bucket",
+        "env AWS_PROFILE=prod aws s3 ls",
+        "/usr/local/bin/aws s3 ls",
+        "ls | xargs -I{} aws s3 rm s3://bucket/{}",
+        "make build & aws s3 sync dist s3://bucket",
+        "bash -c 'aws s3 ls'",
+        'AWS_PROFILE="aura prod" aws s3 ls',
+        "timeout 60 aws s3 ls",
+        "{ aws s3 ls; }",
     ],
 )
 def test_external_actions_catch_the_common_writing_forms(command: str) -> None:
@@ -84,6 +99,8 @@ def test_external_actions_catch_the_common_writing_forms(command: str) -> None:
         "curl -x http://proxy:8080 https://example.org/api",
         "git commit -m 'bump AWS region'",
         "grep -rn aws src/",
+        "cat ~/.aws/config",
+        "ls aws/",
     ],
 )
 def test_external_actions_leave_reads_alone(command: str) -> None:

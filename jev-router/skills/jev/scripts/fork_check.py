@@ -241,10 +241,19 @@ def cmd_replay(sid: str | None, trial: bool) -> int:
     done = statuses()
     if sid is None:
         # Reason: jobs marked safe first, then any an interrupted run left in
-        # "replaying", in capture order.
-        names = [p.name for p in snapshot_dirs()]
+        # "replaying", in capture order. A job ever replayed as a trial never
+        # counts, so a normal replay of it would be wasted; `replay ID --trial`
+        # still resumes one.
+        trials = {e["id"] for e in _status_history() if e["status"] == "replaying" and e["reason"] == "trial"}
+        names = [p.name for p in snapshot_dirs() if p.name not in trials]
         todo = [n for n in names if done.get(n, {}).get("status") == "safe"]
-        todo += [n for n in names if done.get(n, {}).get("status") == "replaying" and not _still_running(n)]
+        for name in names:
+            if done.get(name, {}).get("status") != "replaying":
+                continue
+            if _still_running(name):
+                print(f"{name}: skipped, another runner is replaying it right now.")
+            else:
+                todo.append(name)
         if not todo:
             print("No snapshot is marked safe and waiting, or left half-replayed. Mark one with: mark ID safe")
             return 1

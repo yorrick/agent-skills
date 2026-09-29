@@ -1261,6 +1261,38 @@ def test_a_job_left_replaying_by_an_interrupted_run_can_be_resumed(
     assert fork_check.statuses()["20261001-090000-a"]["status"] == "replayed"
 
 
+def test_next_never_takes_a_trial_job_and_names_the_running_ones_it_skips(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """B2: a job with a trial replay anywhere in its history never enters the
+    `--next` queue (a normal replay of it can never count), while `replay ID
+    --trial` still resumes it; each job skipped because its runner is alive
+    gets one line."""
+    root = tmp_path / "fc"
+    monkeypatch.setattr(fork_check, "root", lambda: root)
+    _jobs(root, "20261001-080000-t1", "20261001-083000-t2", "20261001-090000-r", "20261001-100000-s")
+    fork_check.set_status("20261001-080000-t1", "safe")
+    fork_check.set_status("20261001-080000-t1", "replaying", "trial")  # an interrupted trial
+    fork_check.set_status("20261001-083000-t2", "replaying", "trial")
+    fork_check.set_status("20261001-083000-t2", "safe")  # marked safe again after its trial
+    fork_check.set_status("20261001-090000-r", "replaying", "")
+    fork_check.set_status("20261001-100000-s", "safe")
+    replayed: list[str] = []
+    monkeypatch.setattr(replay, "replay_pair", _fake_pair(replayed))
+    running = _hold_lock(root, "20261001-090000-r")
+    try:
+        assert fork_check.main(["replay", "--next"]) == 0
+        out = capsys.readouterr().out
+        assert out.count("skipped, another runner is replaying it right now") == 1
+        assert "20261001-090000-r: skipped" in out
+        assert fork_check.main(["replay", "--next"]) == 1
+    finally:
+        running.close()
+    assert replayed == ["20261001-100000-s"]
+    assert fork_check.main(["replay", "20261001-080000-t1", "--trial"]) == 0
+    assert replayed == ["20261001-100000-s", "20261001-080000-t1"]
+
+
 def test_a_second_runner_of_the_same_job_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

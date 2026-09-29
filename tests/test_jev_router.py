@@ -589,6 +589,74 @@ def test_mode_command_sets_the_mode_and_capture_dir(home: Path, jev: FakeJev, tm
     assert "snapshot" in result.stdout
 
 
+def test_capture_mode_snapshots_a_job_it_would_delegate(home: Path, jev: FakeJev, tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.email=t@e",
+            "-c",
+            "user.name=T",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ],
+        check=True,
+    )
+    switch_on(home, jev, mode="capture", fork_check_dir=str(tmp_path / "fc"))
+    jev.raw_answers = steps_answers(3.5)
+    transcript = home.parent / "claude-transcript.jsonl"
+    transcript.write_text(json.dumps(assistant("r1", read=800_000, text="Ready.")) + "\n")
+    calibration = home.parent / "calibration.json"
+    calibration.write_text(json.dumps(CALIBRATION))
+    payload = {"prompt": "build it", "session_id": "sess-1", "transcript_path": str(transcript), "cwd": str(repo)}
+    result = run(
+        home,
+        jev,
+        "hook",
+        "claude",
+        stdin=json.dumps(payload),
+        env={"JEV_ROUTER_CALIBRATION": str(calibration), "PATH": "/usr/bin:/bin:/opt/homebrew/bin"},
+    )
+    assert result.stdout == ""
+    (event,) = log(home)
+    assert (tmp_path / "fc" / "snapshots" / event["snapshot"] / "meta.json").exists()
+
+
+def test_capture_mode_records_a_failed_snapshot_without_blocking_the_message(
+    home: Path, jev: FakeJev, tmp_path: Path
+) -> None:
+    """A snapshot fails outside a git repository; the hook still prints nothing in
+    capture mode, and the event notes the failure instead of a snapshot id."""
+    not_a_repo = tmp_path / "plain"
+    not_a_repo.mkdir()
+    switch_on(home, jev, mode="capture", fork_check_dir=str(tmp_path / "fc"))
+    jev.raw_answers = steps_answers(3.5)
+    transcript = home.parent / "claude-transcript.jsonl"
+    transcript.write_text(json.dumps(assistant("r1", read=800_000, text="Ready.")) + "\n")
+    calibration = home.parent / "calibration.json"
+    calibration.write_text(json.dumps(CALIBRATION))
+    payload = {"prompt": "build it", "session_id": "sess-1", "transcript_path": str(transcript), "cwd": str(not_a_repo)}
+    result = run(
+        home,
+        jev,
+        "hook",
+        "claude",
+        stdin=json.dumps(payload),
+        env={"JEV_ROUTER_CALIBRATION": str(calibration), "PATH": "/usr/bin:/bin:/opt/homebrew/bin"},
+    )
+    assert result.stdout == ""
+    (event,) = log(home)
+    assert "snapshot_error" in event and "snapshot" not in event
+
+
 # --- status ------------------------------------------------------------------------
 
 

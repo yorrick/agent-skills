@@ -44,6 +44,7 @@ from typing import TypeVar
 # Reason: sibling modules, found because `uv run --script` puts this folder first on sys.path.
 import delegation
 import session as sessions
+import snapshot
 import usage
 
 # Reason: Jev itself, through OpenRouter's Decisions API. Not `typesafe/jev-router`,
@@ -570,6 +571,9 @@ def interactive(harness: str, payload: dict) -> bool:
 def route_cache_aware(config: dict, payload: dict, prompt: str) -> str:
     """Claude Code: price keeping the job against a fresh subagent. Only `live` mode
     tells the session anything; `shadow` and `capture` only log."""
+    # Reason: capture mode's snapshot gets a 6 s budget of the hook's own 8 s
+    # timeout, leaving the rest for startup, the Jev call and logging.
+    started = time.monotonic()
     mode = config.get("mode", "shadow")
     event: dict = {
         "harness": "claude",
@@ -628,6 +632,13 @@ def route_cache_aware(config: dict, payload: dict, prompt: str) -> str:
         )
         if decision.delegate:
             note = delegate_note(tier, decision, current.context)
+    if note and mode == "capture":
+        try:
+            event["snapshot"] = snapshot.take_snapshot(
+                fork_check_dir(config), payload, prompt, note, event, deadline=started + 6.0
+            )
+        except Exception as exc:  # a failed snapshot never touches the message
+            event["snapshot_error"] = error_label(exc) if not isinstance(exc, snapshot.SnapshotError) else str(exc)
     record(event)
     return hook_json(note) if note and mode == "live" else ""
 

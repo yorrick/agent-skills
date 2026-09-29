@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -91,7 +92,12 @@ def test_publish_pushes_both_results_and_opens_the_compare_pr(tmp_path: Path, re
     pr = next(c for c in calls if c[:2] == ("pr", "create"))
     assert pr[pr.index("--base") + 1] == f"replay/{sid}/keep"
     assert pr[pr.index("--head") + 1] == f"replay/{sid}/compare"
-    assert chr(0x2014) not in pr[pr.index("--body") + 1]
+    body = pr[pr.index("--body") + 1]
+    assert chr(0x2014) not in body
+    # Ruling F4: the job's message (it can hold a credential) is never published;
+    # the body names the snapshot and where its message is kept locally.
+    assert "build it" not in body
+    assert sid in body and str(snap / "message.txt") in body
 
 
 # Ruling T12a: a restored ignored file must never be published, even if the
@@ -155,6 +161,68 @@ def test_non_ascii_ignored_name_is_refused_even_after_the_clone_stops_ignoring_i
     with pytest.raises(RuntimeError, match="clé.env"):
         publish.publish(snap, result, gh=_gh(calls), remote=str(remote))
     assert git(remote, "branch", "-a").strip() == ""
+
+
+# Ruling F5: a restored ignored file's content under another name is refused too.
+def test_a_copy_of_a_restored_env_under_another_name_is_refused(tmp_path: Path, repo: Path, snap: Path) -> None:
+    keep, delegate, remote, sid, result = _setup(tmp_path, repo, snap)
+    shutil.copy(keep / ".env", keep / "config.txt")  # the replay copied the secret where git does not ignore it
+    calls: list[tuple[str, ...]] = []
+    with pytest.raises(RuntimeError, match=r"config\.txt in the keep clone holds the content of .* \.env"):
+        publish.publish(snap, result, gh=_gh(calls), remote=str(remote))
+    assert git(remote, "branch", "-a").strip() == ""  # nothing was pushed
+    assert not any(c[:2] == ("pr", "create") for c in calls)
+
+
+def test_a_copy_committed_then_removed_is_still_refused(tmp_path: Path, repo: Path, snap: Path) -> None:
+    """Found among the objects the replay's own commits introduced."""
+    keep, delegate, remote, sid, result = _setup(tmp_path, repo, snap)
+    shutil.copy(delegate / ".env", delegate / "settings.ini")
+    git(delegate, "add", "settings.ini")
+    git(delegate, "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-qm", "the replay committed a copy")
+    git(delegate, "rm", "-q", "settings.ini")
+    git(delegate, "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-qm", "and removed it again")
+    calls: list[tuple[str, ...]] = []
+    with pytest.raises(RuntimeError, match=r"settings\.ini in the delegate clone"):
+        publish.publish(snap, result, gh=_gh(calls), remote=str(remote))
+    assert git(remote, "branch", "-a").strip() == ""
+
+
+def test_an_ignored_file_matching_content_already_in_the_start_state_is_not_refused(tmp_path: Path, repo: Path) -> None:
+    """`cp .env.example .env`: the tracked example already holds that content,
+    so publishing it leaks nothing new and must not refuse every job."""
+    (repo / ".env.example").write_text("TOKEN=x\n")  # the same bytes as the fixture's .env
+    git(repo, "add", ".env.example")
+    git(repo, "commit", "-qm", "an example env")
+    git(repo, "remote", "add", "origin", "git@github.com:acme/shop.git")
+    transcript = write(tmp_path / "t.jsonl", [typed("start"), assistant("r1")])
+    sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "build it", "N", EVENT)
+    snap = tmp_path / "fc" / "snapshots" / sid
+    keep, delegate = replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d")
+    remote = tmp_path / "copy.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    sides = {"cost": 1.0, "wall_seconds": 60, "calls": 10, "delegated": True}
+    result = {
+        "id": sid,
+        "sides": {"keep": {**sides, "clone": str(keep)}, "delegate": {**sides, "clone": str(delegate)}},
+    }
+    calls: list[tuple[str, ...]] = []
+    assert publish.publish(snap, result, gh=_gh(calls), remote=str(remote)) == "https://x/pull/1"
+
+
+# Final Minor 7: the clone's own git hooks never run during publish.
+def test_the_clones_git_hooks_never_run(tmp_path: Path, repo: Path, snap: Path) -> None:
+    keep, delegate, remote, sid, result = _setup(tmp_path, repo, snap)
+    ran = tmp_path / "hooks-ran.txt"
+    for clone in (keep, delegate):
+        for hook in ("pre-commit", "commit-msg", "post-commit", "pre-push", "reference-transaction"):
+            path = clone / ".git" / "hooks" / hook
+            path.write_text(f"#!/bin/sh\necho {hook} >> {ran}\nexit 1\n")
+            path.chmod(0o755)
+    calls: list[tuple[str, ...]] = []
+    assert publish.publish(snap, result, gh=_gh(calls), remote=str(remote)) == "https://x/pull/1"
+    assert not ran.exists()
+    assert git(remote, "show", f"replay/{sid}/compare:RESULT.txt") == "delegate\n"
 
 
 def test_restored_ignored_raises_when_restore_json_is_missing(tmp_path: Path) -> None:

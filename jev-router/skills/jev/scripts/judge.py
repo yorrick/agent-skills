@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import shutil
+import signal
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -44,40 +46,50 @@ End your reply with one line of JSON, shaped like this example, and nothing afte
 """
 
 
+TIMEOUT_SECONDS = 2 * 3600
+
+
 def run_codex(prompt: str, work: Path) -> str:
+    """One blind Codex run in `work`. `JEV_FORK_CHECK_CODEX` names another
+    executable, for tests. On a failure, the error carries an excerpt of
+    codex's stderr, which is what explains it."""
     out = work / "verdict.md"
+    cmd = [
+        os.environ.get("JEV_FORK_CHECK_CODEX", "codex"),
+        "exec",
+        "-m",
+        "gpt-6-sol",
+        "-c",
+        "model_reasoning_effort=max",
+        "--disable",
+        "hooks",
+        "--sandbox",
+        "workspace-write",
+        "--skip-git-repo-check",
+        "-C",
+        str(work),
+        "-o",
+        str(out),
+        "-",
+    ]
+    # Reason: a new session, so a timeout kills codex together with the test
+    # runs and servers it started, the way a timed-out replay is killed.
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
     try:
-        subprocess.run(
-            [
-                "codex",
-                "exec",
-                "-m",
-                "gpt-6-sol",
-                "-c",
-                "model_reasoning_effort=max",
-                "--disable",
-                "hooks",
-                "--sandbox",
-                "workspace-write",
-                "--skip-git-repo-check",
-                "-C",
-                str(work),
-                "-o",
-                str(out),
-                "-",
-            ],
-            input=prompt,
-            text=True,
-            capture_output=True,
-            timeout=2 * 3600,
-            check=True,
-        )
-    except subprocess.CalledProcessError as exc:
-        # Reason: CalledProcessError's own str() names the exit code and the
-        # command, never the stderr that explains it; a short excerpt of that
-        # is what actually tells cmd_judge (and the person reading its output)
-        # why codex failed.
-        raise RuntimeError(f"codex exec failed: {(exc.stderr or '').strip()[:500]}") from exc
+        _, stderr = proc.communicate(prompt, timeout=TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        raise RuntimeError(f"codex exec timed out after {TIMEOUT_SECONDS} s") from None
+    if proc.returncode != 0:
+        raise RuntimeError(f"codex exec failed: {(stderr or '').strip()[:500]}")
     return out.read_text()
 
 

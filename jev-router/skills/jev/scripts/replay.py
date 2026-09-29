@@ -8,6 +8,7 @@ import random
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tarfile
@@ -373,6 +374,101 @@ def _status_paths(output: str) -> list[str]:
     return [e[3:] for e in output.split("\0") if e]
 
 
+def _tree(clone: Path, ref: str) -> list[tuple[str, str, str]]:
+    """(type, object id, path) of every entry in `ref`'s tree, read with `-z`."""
+    out = run("git", "-C", str(clone), "ls-tree", "-r", "-z", ref)
+    entries = []
+    for line in out.split("\0"):
+        if line:
+            info, path = line.split("\t", 1)
+            _, kind, oid = info.split()
+            entries.append((kind, oid, path))
+    return entries
+
+
+# The content check covers restored ignored files of this size: under 8 bytes is
+# too little to be a secret worth refusing a job for, and over 1 MB is a build
+# output or a cache, not a credential.
+CONTENT_MIN_BYTES = 8
+CONTENT_MAX_BYTES = 1 << 20
+
+
+def _restored_files(clone: Path, ignored: list[str]) -> list[str]:
+    """The regular files now under the restored ignored entries, relative to the
+    clone, outside dependency folders and between the two content-check sizes.
+    Nothing here follows a symlink."""
+    found: list[str] = []
+
+    def consider(rel: str) -> None:
+        st = os.lstat(clone / rel)
+        if stat.S_ISREG(st.st_mode) and CONTENT_MIN_BYTES <= st.st_size <= CONTENT_MAX_BYTES and "\n" not in rel:
+            found.append(rel)
+
+    for rel in ignored:
+        path = clone / rel
+        if not os.path.lexists(path) or any(part in snapshot.DEPENDENCY_DIRS for part in Path(rel).parts):
+            continue
+        if path.is_symlink() or not path.is_dir():
+            consider(rel)
+            continue
+        for dirpath, dirnames, filenames in os.walk(path):
+            dirnames[:] = [name for name in dirnames if name not in snapshot.DEPENDENCY_DIRS]
+            base = os.path.relpath(dirpath, clone)
+            for name in filenames:
+                consider(f"{base}/{name}")
+    return found
+
+
+def _blob_ids(clone: Path, paths: list[str]) -> list[str]:
+    """The git blob id of each of `paths` (relative to the clone), in one call."""
+    if not paths:
+        return []
+    result = subprocess.run(
+        ["git", "-C", str(clone), "hash-object", "--stdin-paths"],
+        input="".join(f"{p}\n" for p in paths),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"git hash-object failed: {result.stderr.strip()[:300]}")
+    return result.stdout.split()
+
+
+def _refuse_if_content_leaked(
+    clone: Path, ignored: list[str], tree: list[tuple[str, str, str]], status: list[str], label: str
+) -> None:
+    """Refuses if a restored ignored file's exact content shows up under another
+    path: in HEAD's tree, in any object the replay's commits introduced, or in a
+    working-tree file `git status` lists. A replay that copies `.env` to
+    `config.txt` would otherwise publish the secret, or show it to the judge,
+    under a name no path check knows."""
+    secret_paths = _restored_files(clone, ignored)
+    if not secret_paths:
+        return
+    worktree = [p for p in status if (clone / p).is_file() and not (clone / p).is_symlink() and "\n" not in p]
+    hashed = _blob_ids(clone, secret_paths + worktree)
+    secrets = dict(zip(hashed[: len(secret_paths)], secret_paths, strict=True))
+    # Reason: content already in the start state is published anyway (it sits in
+    # the base history or the start tree), so matching it leaks nothing new; a
+    # `.env` copied from a tracked `.env.example` must not refuse every job.
+    for kind, oid, _ in _tree(clone, "refs/jev/start"):
+        if kind == "blob":
+            secrets.pop(oid, None)
+    if not secrets:
+        return
+    introduced = run("git", "-C", str(clone), "rev-list", "--objects", "refs/jev/start..HEAD")
+    candidates = [(oid, path) for kind, oid, path in tree if kind == "blob"]
+    for line in introduced.splitlines():
+        oid, _, path = line.partition(" ")
+        candidates.append((oid, path or "(no path)"))
+    candidates += list(zip(hashed[len(secret_paths) :], worktree, strict=True))
+    for oid, path in candidates:
+        if oid in secrets:
+            raise RuntimeError(
+                f"{path} in the {label} clone holds the content of the restored ignored file {secrets[oid]}; refusing"
+            )
+
+
 def refuse_if_ignored_leaked(clone: Path, ignored: list[str], label: str) -> None:
     """Refuses if any of `ignored` (or anything under it) is committed at HEAD, was
     ever touched between `refs/jev/start` (where the replay began) and HEAD, or
@@ -381,7 +477,9 @@ def refuse_if_ignored_leaked(clone: Path, ignored: list[str], label: str) -> Non
     ignore rules cannot be trusted; only what `restore` actually copied in can.
     The working-tree check is what catches this before anything is ever
     committed, which matters to the judge: it never commits, so an un-ignored
-    `.env` would otherwise show nowhere else.
+    `.env` would otherwise show nowhere else. Then the same places are checked
+    for a restored ignored file's content under another name
+    (`_refuse_if_content_leaked`).
 
     All three listings are read with `-z`: without it, git quotes a path that
     holds a non-ASCII byte, a `"`, a backslash or a control character, so the
@@ -389,8 +487,7 @@ def refuse_if_ignored_leaked(clone: Path, ignored: list[str], label: str) -> Non
     and the check would silently miss it."""
     if not ignored:
         return
-    tree_out = run("git", "-C", str(clone), "ls-tree", "-r", "--name-only", "-z", "HEAD")
-    tree = [p for p in tree_out.split("\0") if p]
+    tree = _tree(clone, "HEAD")
     # --diff-merges=m: a path introduced only by how a merge resolved a
     # conflict is still listed, not skipped as merges normally are.
     history_out = run(
@@ -399,10 +496,11 @@ def refuse_if_ignored_leaked(clone: Path, ignored: list[str], label: str) -> Non
     history = [p for p in history_out.split("\0") if p]
     status_out = run("git", "-C", str(clone), "status", "--porcelain", "-z", "--untracked-files=all", "--no-renames")
     status = _status_paths(status_out)
-    for path in tree + history + status:
+    for path in [p for _, _, p in tree] + history + status:
         hit = _matches_ignored(path, ignored)
         if hit:
             raise RuntimeError(f"{hit} would be published or shown from the {label} clone (found as {path}); refusing")
+    _refuse_if_content_leaked(clone, ignored, tree, status, label)
 
 
 DEFAULT_CLAUDE_HOME = Path.home() / ".claude"

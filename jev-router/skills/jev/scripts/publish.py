@@ -11,8 +11,10 @@ from pathlib import Path
 
 from replay import IDENTITY, refuse_if_ignored_leaked, refuse_if_unusable, restored_ignored, run, run_on_source
 
-MESSAGE_LIMIT = 2000
 LOGIN_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
+# Reason: the clone's own git hooks (husky, pre-commit) could reformat the result
+# after the judge saw it, or reject the commit or the push outright.
+NO_HOOKS = ("-c", "core.hooksPath=/dev/null")
 
 
 def run_gh(*args: str) -> str:
@@ -36,7 +38,7 @@ def commit_all(clone: Path, message: str) -> None:
     # (`.env`, a dependency directory) out, by checking against what `restore`
     # recorded, not against the clone's own (possibly tampered) ignore rules.
     run("git", "-C", str(clone), "add", "-A")
-    run("git", "-C", str(clone), *IDENTITY, "commit", "-q", "--allow-empty", "-m", message)
+    run("git", "-C", str(clone), *NO_HOOKS, *IDENTITY, "commit", "-q", "--allow-empty", "-m", message)
 
 
 def _refuse_if_branches_exist(url: str, copy: str, sid: str) -> None:
@@ -53,15 +55,15 @@ def _refuse_if_branches_exist(url: str, copy: str, sid: str) -> None:
 
 
 def _pr_body(sid: str, snap: Path, k: dict, d: dict) -> str:
-    message = (snap / "message.txt").read_text()
-    if len(message) > MESSAGE_LIMIT:
-        message = message[:MESSAGE_LIMIT] + "\n...(truncated)"
+    """Numbers and the snapshot id only. The job's own message is never quoted:
+    a message can hold a credential, and the body is published."""
     return (
         f"Fork check {sid}. The base branch holds the keep result; this pull request shows the delegate result "
         f"against it.\n\nKeep: ${k['cost']:.2f}, {k['wall_seconds']:.0f} s, {k['calls']} calls. "
         f"Delegate: ${d['cost']:.2f}, {d['wall_seconds']:.0f} s, {d['calls']} calls"
         f"{'' if d.get('delegated') else ', and the session kept the job instead of handing it off'}.\n\n"
-        "The job:\n\n" + "\n".join(f"> {line}" for line in message.splitlines())
+        f"The job's message stays on the machine that ran the check, in the local snapshot folder: "
+        f"{snap / 'message.txt'}"
     )
 
 
@@ -93,15 +95,25 @@ def publish(snap: Path, result: dict, *, gh: Callable[..., str] = run_gh, remote
         commit_all(clone, f"jev fork check {sid}: result")
         refuse_if_ignored_leaked(clone, ignored[side], side)
     for side, clone in (("keep", keep), ("delegate", delegate)):
-        run("git", "-C", str(clone), "push", "-q", url, f"HEAD:refs/heads/replay/{sid}/{side}")
+        run("git", "-C", str(clone), *NO_HOOKS, "push", "-q", url, f"HEAD:refs/heads/replay/{sid}/{side}")
     # The comparison commit is built without checking anything out, so neither
     # clone's files change after the replay.
-    run("git", "-C", str(keep), "fetch", "-q", str(delegate), "HEAD")
+    run("git", "-C", str(keep), *NO_HOOKS, "fetch", "-q", str(delegate), "HEAD")
     tree = run("git", "-C", str(keep), "rev-parse", "FETCH_HEAD^{tree}").strip()
     compare = run(
-        "git", "-C", str(keep), *IDENTITY, "commit-tree", tree, "-p", "HEAD", "-m", f"jev fork check {sid}: comparison"
+        "git",
+        "-C",
+        str(keep),
+        *NO_HOOKS,
+        *IDENTITY,
+        "commit-tree",
+        tree,
+        "-p",
+        "HEAD",
+        "-m",
+        f"jev fork check {sid}: comparison",
     ).strip()
-    run("git", "-C", str(keep), "push", "-q", url, f"{compare}:refs/heads/replay/{sid}/compare")
+    run("git", "-C", str(keep), *NO_HOOKS, "push", "-q", url, f"{compare}:refs/heads/replay/{sid}/compare")
     return gh(
         "pr",
         "create",

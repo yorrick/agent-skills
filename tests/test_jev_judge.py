@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import random
+import shutil
 import subprocess
 import sys
+import time
+import types
 from pathlib import Path
 
 import pytest
@@ -129,6 +133,69 @@ def test_a_clone_that_stopped_ignoring_env_is_refused_with_no_codex_call(
     with pytest.raises(RuntimeError, match=r"\.env"):
         judge.judge(snap, result, tmp_path / "j", codex=codex, rng=random.Random(1))
     assert calls == []
+
+
+# Ruling F5: the judge never sees a restored ignored file's content under another name.
+def test_a_copy_of_a_restored_env_is_refused_with_no_codex_call(tmp_path: Path, snap: Path) -> None:
+    keep = replay.restore(snap, tmp_path / "k")
+    delegate = replay.restore(snap, tmp_path / "d")
+    shutil.copy(delegate / ".env", delegate / "config.txt")  # untracked, never committed: the judge never commits
+    calls: list[str] = []
+
+    def codex(prompt: str, work: Path) -> str:
+        calls.append(prompt)
+        return ANSWER
+
+    result = {
+        "id": "x",
+        "sides": {"keep": {"clone": str(keep), "cost": 1.0}, "delegate": {"clone": str(delegate), "cost": 1.0}},
+    }
+    with pytest.raises(RuntimeError, match=r"config\.txt in the delegate clone holds the content of .* \.env"):
+        judge.judge(snap, result, tmp_path / "j", codex=codex, rng=random.Random(1))
+    assert calls == []
+    assert not (tmp_path / "j").exists()
+
+
+# Final Minor 13: a timed-out judge takes the processes it started down with it.
+def fake_codex(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, script: str) -> None:
+    exe = tmp_path / "fake-codex"
+    exe.write_text("#!/bin/sh\n" + script)
+    exe.chmod(0o755)
+    monkeypatch.setenv("JEV_FORK_CHECK_CODEX", str(exe))
+
+
+def test_a_judge_timeout_kills_codex_and_everything_it_started(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pidfile = tmp_path / "child.pid"
+    fake_codex(tmp_path, monkeypatch, f"sleep 60 &\necho $! > {pidfile}\nsleep 60\n")
+
+    class StartsTheClockOnceTheChildRuns(subprocess.Popen):
+        def communicate(self, input=None, timeout=None):
+            deadline = time.monotonic() + 30
+            while not pidfile.exists() and self.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            return super().communicate(input, timeout=0.2)
+
+    monkeypatch.setattr(
+        judge, "subprocess", types.SimpleNamespace(**{**vars(subprocess), "Popen": StartsTheClockOnceTheChildRuns})
+    )
+    with pytest.raises(RuntimeError, match="timed out"):
+        judge.run_codex("judge this", tmp_path)
+    child = int(pidfile.read_text())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail("the test process codex started outlived the judge's timeout")
+
+
+def test_a_codex_failure_names_its_stderr(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_codex(tmp_path, monkeypatch, "echo 'model not available' >&2\nexit 3\n")
+    with pytest.raises(RuntimeError, match="codex exec failed: model not available"):
+        judge.run_codex("judge this", tmp_path)
 
 
 def point(keep_cost: float, del_cost: float, prefer: str = "tie", delegate_ok: bool = True) -> dict:

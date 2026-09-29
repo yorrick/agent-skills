@@ -11,8 +11,9 @@ somewhere else.
 The design aims for the simplest thing that reaches that goal: the harness's own
 subagents, one Jev call per message, and a small real-world check.
 
-Success, measured in the fork check (Validation) on the next 20 code jobs the router
-selects that the check can replay (exclusions counted), with its rule frozen beforehand, and with the router's own cost and added
+Success, measured in the fork check (Validation) on the next 20 jobs the router selects
+that the user marks safe to replay (skips counted), with its rule frozen beforehand,
+and with the router's own cost and added
 latency on every message of the check period counted against delegation: delegating
 costs at least 10% less in total than keeping; delegated results are as good (no
 delegated result fails a test or its stated outcome where the kept one passes, and a
@@ -143,10 +144,8 @@ subagent with a fresh context:
 - **Codex:** `spawn_agent` with the tier's `model` and `reasoning_effort` and
   `fork_turns: "none"`. The default, `all`, copies the whole conversation.
 
-The parent delegates only briefable code jobs within the fork check's replay scope
-(reading, editing, tests, local commands, cross-AI reviews). It keeps jobs that need
-the user in the loop, an MCP server, a live service or anything else the replay blocks;
-a later check can widen this. The helper runs with the session's own permissions, like any subagent the user
+The parent keeps the job only when the work needs the user in the loop or cannot be
+briefed. The helper runs with the session's own permissions, like any subagent the user
 already runs. The brief tells it not to commit, push, open pull requests or deploy, and
 to report what is left; the parent reviews the changes and does those steps after the
 relay. When the router does not delegate, it says nothing.
@@ -171,37 +170,33 @@ the jobs the router selects, on the user's own work.
    turn runs: a copy of the transcript ending just before the message, the message, and
    the working copy's state (HEAD, uncommitted changes and untracked files) with a hash
    of its ignored setup files and installed dependencies. The user works as usual; the
-   real session is never touched. The check takes the next 20 selected jobs it can
-   replay, follow-ups included, with no picking.
-2. **Replay both ways.** The check covers code jobs: reading, editing, running tests and
-   local commands, and cross-AI reviews. A runner restores each snapshot into two full
-   clones, each with an `origin` that is a local bare copy. Nothing is installed: the
-   working copy's ignored files (setup files and installed dependencies) are copied in,
-   and if their hash no longer matches the snapshot's, the job is inconclusive.
-   It saves the transcript copy as a new session of each clone, with its own id, so the
-   user's real session is never resumed, and resumes it headless with `JEV_ROUTER=off`
-   and the same message. The delegate side also gets exactly the note the live router
-   would add; the keep side gets nothing. Replays run inside the harness's own
-   confinement (Claude Code with its sandbox on, where sandboxed commands run without
-   asking, and edits accepted only inside the clone; Codex with `--sandbox
-   workspace-write`) and without MCP servers, so they write only inside the clone and
-   the harnesses' own state directories, and reach no host but the model APIs they use
-   (their own and a cross-AI reviewer's). Pushes go to the local origin, and both sides
-   are told to stop before a pull request or deploy and are judged on their work up to
-   there. A job that needs anything the replay blocks (an MCP server, another host, a
-   live service, a missing dependency) is inconclusive and replaced by the next selected
-   job; the report states how many were replaced. The two sides run one after the
-   other in random order.
-3. **Measure** API-equivalent cost, wall time and calls from the transcripts, subagents
+   real session is never touched.
+2. **The user picks what is safe to replay.** A replay has the same access as the
+   user's session, so it would repeat whatever the real turn did outside the machine.
+   After the real turn finishes, the runner lists each snapshot with those actions, read
+   from the real turn's transcript (pushes, pull requests, MCP writes, deploys, messages
+   sent), and the user marks which ones to replay. The check takes the next 20 marked
+   jobs, follow-ups included; the report counts the skipped ones and why.
+3. **Replay both ways.** A runner restores each marked snapshot into two full clones.
+   Nothing is installed: the working copy's ignored files (setup files and installed
+   dependencies) are copied in, and if their hash no longer matches the snapshot's, the
+   job is skipped. It saves the transcript copy as a new session of each clone, with its
+   own id, so the user's real session is never resumed, and resumes it headless with
+   `JEV_ROUTER=off` and the same message. The delegate side also gets exactly the note
+   the live router would add; the keep side gets nothing. Replays run like the user's
+   session: bypass permissions, the same MCP servers, network and credentials. The one
+   difference is that each clone's `origin` is a local bare copy, so a replay can never
+   push onto the user's real branch. The two sides run one after the other in random
+   order.
+4. **Measure** API-equivalent cost, wall time and calls from the transcripts, subagents
    included, pricing every call by its recorded categories (cache reads, cache writes,
    uncached input, output). Right before each side runs, a one-line throwaway fork of the
-   same transcript, under the same confinement and with no tools, warms the cache, and a
-   pair is scored only when both sides' first
-   calls read the prefix from cache; otherwise it is rerun. Every run is scored on what
+   same transcript, with no tools, warms the cache, and a pair is scored only when both
+   sides' first calls read the prefix from cache; otherwise it is rerun. Every run is scored on what
    it really cost and took, including a parent that kept a job it was told to delegate;
    the report counts these overrides. The shadow log's Jev cost and latency over every
    message in the check period are added to the delegate side.
-4. **Judge** quality by criteria fixed in advance: the project's tests pass where they
+5. **Judge** quality by criteria fixed in advance: the project's tests pass where they
    exist, the job's stated outcome is met, and a blind review compares the two results
    without knowing which side made them. The blind reviewer is never the harness that
    did the work: Codex judges Claude Code jobs, and Claude judges Codex jobs.

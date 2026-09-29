@@ -31,25 +31,6 @@ def git(repo: Path, *args: str) -> str:
     return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout
 
 
-@pytest.fixture
-def repo(tmp_path: Path) -> Path:
-    r = tmp_path / "work" / "app"
-    r.mkdir(parents=True)
-    git(r, "init", "-q", "-b", "main")
-    git(r, "config", "user.email", "t@example.com")
-    git(r, "config", "user.name", "T")
-    (r / ".gitignore").write_text("node_modules/\n.venv/\n.env\n__pycache__/\n")
-    (r / "app.py").write_text("print('v1')\n")
-    git(r, "add", ".")
-    git(r, "commit", "-qm", "init")
-    (r / "app.py").write_text("print('v2')\n")  # uncommitted change
-    (r / "notes.md").write_text("draft\n")  # untracked
-    (r / "node_modules").mkdir()
-    (r / "node_modules" / ".package-lock.json").write_text("{}")
-    (r / ".env").write_text("TOKEN=x\n")
-    return r
-
-
 def payload(repo: Path, transcript: Path) -> dict:
     return {"session_id": "abcdef1234", "transcript_path": str(transcript), "cwd": str(repo)}
 

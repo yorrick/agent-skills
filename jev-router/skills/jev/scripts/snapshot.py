@@ -94,14 +94,20 @@ def trim_before_prompt(data: bytes, prompt: str) -> bytes:
     return data
 
 
-def ignored_fingerprint(top: Path, deadline: float | None = None) -> str:
-    """Changes when installed dependencies or `.env` files change, not when caches do."""
+def ignored_entries(top: Path, *, deadline: float | None = None) -> list[str]:
+    """Every path `git status` reports as ignored (files and directories both),
+    relative to `top`. Shared by the snapshot's fingerprint and a replay's copy of
+    ignored setup files, so the two never disagree on what "ignored" means."""
     listing = _git_bytes(
         top, "status", "--ignored", "--porcelain=v1", "-z", "--untracked-files=normal", deadline=deadline
     )
-    ignored = sorted(e[3:].decode().rstrip("/") for e in listing.split(b"\0") if e.startswith(b"!! "))
+    return sorted(e[3:].decode().rstrip("/") for e in listing.split(b"\0") if e.startswith(b"!! "))
+
+
+def ignored_fingerprint(top: Path, deadline: float | None = None) -> str:
+    """Changes when installed dependencies or `.env` files change, not when caches do."""
     digest = hashlib.sha256()
-    for rel in ignored:
+    for rel in ignored_entries(top, deadline=deadline):
         path = top / rel
         name = path.name
         if name in DEPENDENCY_DIRS:

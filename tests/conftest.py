@@ -1,9 +1,12 @@
 """Fixtures shared across the fork-check test files: a git repo with uncommitted,
-untracked and ignored files, and a snapshot taken of it."""
+untracked and ignored files, and a snapshot taken of it. Every test also runs
+with its own Claude Code home, and fails if it wrote into the real one."""
 
 from __future__ import annotations
 
+import re
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -14,6 +17,47 @@ sys.path.insert(0, str(SCRIPTS))
 import snapshot  # noqa: E402
 from test_jev_snapshot import EVENT, git, payload, write  # noqa: E402
 from test_jev_usage import assistant, typed  # noqa: E402
+
+# Reason: read once at import, before any test can monkeypatch Path.home or HOME.
+REAL_PROJECTS = Path.home() / ".claude" / "projects"
+
+
+def _real_project_names() -> set[str]:
+    """Names only: the guard never reads what is inside the user's sessions."""
+    return {p.name for p in REAL_PROJECTS.iterdir()} if REAL_PROJECTS.is_dir() else set()
+
+
+@pytest.fixture(scope="session")
+def _real_projects_seen(tmp_path_factory: pytest.TempPathFactory) -> tuple[set[str], str]:
+    """The real `~/.claude/projects` listing when the session starts, and the
+    name prefix any folder a test wrote there would carry: Claude Code names a
+    project folder after its working directory, and every test's working copy
+    and clone lives under this session's pytest temp root."""
+    return _real_project_names(), re.sub(r"[^A-Za-z0-9-]", "-", str(tmp_path_factory.getbasetemp()))
+
+
+@pytest.fixture(autouse=True)
+def _isolated_claude_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test gets its own Claude Code home. `fork_check replay` uses
+    CLAUDE_CONFIG_DIR when set and the real `~/.claude` otherwise, so without
+    this a replay test installs sessions (fake usage that cost tools would
+    count as real spend) into the user's own projects folder. A test that
+    passes its own home, or sets the variable itself, still wins."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
+
+
+@pytest.fixture(autouse=True)
+def _no_writes_to_the_real_claude_projects(_real_projects_seen: tuple[set[str], str]) -> Iterator[None]:
+    """Fails the test that made a new folder under the real `~/.claude/projects`.
+    Only names under this session's temp root count, so a real Claude Code
+    session that starts in a new directory while the suite runs is never
+    blamed on a test."""
+    yield
+    seen, prefix = _real_projects_seen
+    new = sorted(name for name in _real_project_names() - seen if name.startswith(prefix))
+    seen.update(new)
+    if new:
+        pytest.fail(f"this test wrote into the real {REAL_PROJECTS}: {new}")
 
 
 @pytest.fixture

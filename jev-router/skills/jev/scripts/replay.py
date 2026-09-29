@@ -327,7 +327,7 @@ def install_session(snap: Path, clone: Path, claude_home: Path) -> str:
     meta = json.loads((snap / "meta.json").read_text())
     tops = _worktree_paths(meta)
     new = str(uuid.uuid4())
-    lines = []
+    lines, decoded = [], []
     for raw_line in (snap / "transcript.jsonl").read_text().splitlines():
         line = _rewrite_real_paths(raw_line, tops, clone)
         try:
@@ -336,14 +336,17 @@ def install_session(snap: Path, clone: Path, claude_home: Path) -> str:
             raise Inconclusive(f"a transcript line did not parse as JSON: {exc}") from exc
         if isinstance(entry, dict) and "sessionId" in entry:
             entry["sessionId"] = new
-        # Reason: ensure_ascii=False, so a non-ASCII leaked path in `content`
-        # below is still there to find, not hidden behind a \uXXXX escape.
-        lines.append(json.dumps(entry, ensure_ascii=False))
-    content = "\n".join(lines) + "\n"
-    _refuse_if_leaked(content, _real_path_forms(tops))
+        # Reason: the leak check reads the ensure_ascii=False text, so a
+        # non-ASCII real path is still there to find, not hidden behind a
+        # \uXXXX escape. The file gets JSON's default escaping instead: a lone
+        # surrogate (Claude Code stores one when it cuts text mid-emoji) has no
+        # UTF-8 encoding, so writing it unescaped would raise.
+        decoded.append(json.dumps(entry, ensure_ascii=False))
+        lines.append(json.dumps(entry))
+    _refuse_if_leaked("\n".join(decoded), _real_path_forms(tops))
     target = project_dir(claude_home, workdir(meta, clone))
     target.mkdir(parents=True, exist_ok=True)
-    (target / f"{new}.jsonl").write_text(content)
+    (target / f"{new}.jsonl").write_text("\n".join(lines) + "\n")
     return new
 
 
@@ -550,11 +553,13 @@ def _replay_side(
         before_files = _session_file_names(pdir)
         warm_data, _, warm_code, warm_timed_out = run_claude(cwd, sid, WARMUP, warmup_env, claude_home, model)
         warm_new_files = _new_session_files(pdir, before_files)
-        _verify_reported_session(warm_data.get("session_id"), warm_new_files)
         # Reason: every attempt is scanned, whether it succeeded, crashed or
-        # timed out, since a leak can happen before a call ever fails.
+        # timed out, since a leak can happen before a call ever fails. The scan
+        # comes before the session-id check, so a call whose reported id does
+        # not match is still scanned rather than lost to that error.
         if _leaked_real_path(warm_new_files, WARMUP, leak_forms):
             return side, "a replay used a path into the real repository"
+        _verify_reported_session(warm_data.get("session_id"), warm_new_files)
         if warm_timed_out:
             return side, "timed out"
         if warm_code != 0 or warm_data.get("is_error"):
@@ -577,9 +582,9 @@ def _replay_side(
         before_files = _session_file_names(pdir)
         data, wall, code, job_timed_out = run_claude(cwd, sid, job_prompt, job_env, claude_home, model)
         job_new_files = _new_session_files(pdir, before_files)
-        _verify_reported_session(data.get("session_id"), job_new_files)
         if _leaked_real_path(job_new_files, job_prompt, leak_forms):
             return side, "a replay used a path into the real repository"
+        _verify_reported_session(data.get("session_id"), job_new_files)
         if job_timed_out:
             return side, "timed out"
         if code != 0 or data.get("is_error"):

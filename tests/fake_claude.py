@@ -20,8 +20,12 @@ Env vars the tests use to steer it:
   FAKE_CLAUDE_UNPRICED_WARMUP  the same, but for the warm-up call.
   FAKE_CLAUDE_LEAK_PATH=<path>  the job call's tool input names this path, simulating an
                             incomplete path rewrite.
+  FAKE_CLAUDE_LEAK_PATH_WARMUP=<path>  the same, but for the warm-up call.
+  FAKE_CLAUDE_WRONG_SESSION_ID=<warmup|job>  that call's JSON result names a session id it
+                            never wrote, while its real session file is written as usual.
   FAKE_CLAUDE_SLEEP_CHILD=<path>  spawns a detached `sleep 60`, writes its pid to the named
-                            file, then sleeps itself, for any call. Short-circuits everything else.
+                            file, logs the call (with hung=true), then sleeps itself, for any
+                            call. Short-circuits everything else.
   FAKE_CLAUDE_SLEEP_CHILD_JOB=<path>  the same, but only for the job call, so the warm-up
                             succeeds normally first.
   FAKE_CLAUDE_HANG_AFTER_WRITE  the job call writes its session file (and any injected leak) and
@@ -61,6 +65,9 @@ if not sleep_pidfile and not warm:
 if sleep_pidfile:
     child = subprocess.Popen(["sleep", "60"])
     Path(sleep_pidfile).write_text(str(child.pid))
+    # Reason: logged only once the pid file exists, so a test can wait for this
+    # line before starting a timeout clock that would otherwise race the write.
+    log(hung=True)
     time.sleep(60)
     sys.exit(0)  # never reached in the test: the parent kills the whole group first
 
@@ -117,7 +124,8 @@ if note and not warm:
         )
         + "\n"
     )
-if not warm and (leak_path := os.environ.get("FAKE_CLAUDE_LEAK_PATH")):
+leak_path = os.environ.get("FAKE_CLAUDE_LEAK_PATH_WARMUP" if warm else "FAKE_CLAUDE_LEAK_PATH")
+if leak_path:
     content.append({"type": "tool_use", "id": "t2", "name": "Edit", "input": {"file_path": f"{leak_path}/app.py"}})
 
 if not cold_warmup:
@@ -153,6 +161,8 @@ if not warm and os.environ.get("FAKE_CLAUDE_HANG_AFTER_WRITE") == "1":
     # simulates a run the caller's timeout has to kill, not a clean exit.
     time.sleep(60)
 result: dict = {"type": "result", "session_id": new, "result": "ok"}
+if os.environ.get("FAKE_CLAUDE_WRONG_SESSION_ID") == ("warmup" if warm else "job"):
+    result["session_id"] = str(uuid.uuid4())
 if not warm and os.environ.get("FAKE_CLAUDE_ERROR_RESULT") == "1":
     result["is_error"] = True
 print(json.dumps(result))

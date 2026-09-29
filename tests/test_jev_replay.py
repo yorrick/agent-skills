@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -50,20 +52,85 @@ def test_changed_dependencies_make_the_job_inconclusive(tmp_path: Path, repo: Pa
         replay.restore(snap, tmp_path / "r")
 
 
-def test_source_info_exclude_ignores_carry_into_the_clone(tmp_path: Path, repo: Path, snap: Path) -> None:
+def take(tmp_path: Path, repo: Path) -> Path:
+    """A snapshot of `repo` as it is now, for a test that sets the repo up first."""
+    transcript = write(tmp_path / "t.jsonl", [typed("start"), assistant("r1")])
+    sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "build it", "N", EVENT)
+    return tmp_path / "fc" / "snapshots" / sid
+
+
+def exclude_file(repo: Path) -> Path:
+    common = git(repo, "rev-parse", "--git-common-dir").strip()
+    return (Path(common) if Path(common).is_absolute() else repo / common) / "info" / "exclude"
+
+
+def test_source_info_exclude_ignores_carry_into_the_clone(tmp_path: Path, repo: Path) -> None:
     """A file matched only by the source's `.git/info/exclude` (never committed, so
     a plain clone never sees it) still needs to end up ignored in the clone too, or
     `git add -A` later would publish it."""
-    common = git(repo, "rev-parse", "--git-common-dir").strip()
-    common_dir = Path(common) if Path(common).is_absolute() else repo / common
-    (common_dir / "info" / "exclude").write_text("secret.local\n")
-    (repo / "secret.local").write_text("shh\n")  # the user moved on after the snapshot
-    clone = replay.restore(snap, tmp_path / "r")
+    exclude_file(repo).write_text("secret.local\n")
+    (repo / "secret.local").write_text("shh\n")
+    clone = replay.restore(take(tmp_path, repo), tmp_path / "r")
     assert (clone / "secret.local").read_text() == "shh\n"
     assert git(clone, "status", "--porcelain").splitlines() == [" M app.py", "?? notes.md"]
 
 
-def test_nested_checkout_under_an_ignored_directory_is_pruned(tmp_path: Path, repo: Path, snap: Path) -> None:
+# --- Ruling F3': only the ignored entries captured with the snapshot are copied ----
+
+
+def test_a_file_added_to_info_exclude_after_capture_is_not_copied(tmp_path: Path, repo: Path, snap: Path) -> None:
+    exclude_file(repo).write_text("secret.local\n")
+    (repo / "secret.local").write_text("shh\n")  # the user moved on after the snapshot
+    clone = replay.restore(snap, tmp_path / "r")
+    assert not (clone / "secret.local").exists()
+    assert (clone / ".env").read_text() == "TOKEN=x\n"  # captured, still copied
+    restored = json.loads((tmp_path / "r" / "restore.json").read_text())
+    assert restored["not_captured"] == ["secret.local"]
+    assert restored["ignored"] == [".env", "node_modules"] and restored["missing"] == []
+
+
+def test_a_new_cache_is_not_copied_and_does_not_make_the_job_inconclusive(
+    tmp_path: Path, repo: Path, snap: Path
+) -> None:
+    cache = repo / ".pytest_cache"
+    (cache / "v").mkdir(parents=True)
+    (cache / ".gitignore").write_text("*\n")  # what pytest writes, so git ignores the whole folder
+    (cache / "v" / "lastfailed").write_text("{}\n")
+    clone = replay.restore(snap, tmp_path / "r")
+    assert not (clone / ".pytest_cache").exists()
+    assert json.loads((tmp_path / "r" / "restore.json").read_text())["not_captured"] == [".pytest_cache"]
+
+
+def test_a_captured_entry_gone_since_is_listed_as_missing(tmp_path: Path, repo: Path) -> None:
+    (repo / ".gitignore").write_text((repo / ".gitignore").read_text() + "*.log\n")
+    (repo / "build.log").write_text("old build\n")
+    snap = take(tmp_path, repo)
+    (repo / "build.log").unlink()  # the user moved on after the snapshot
+    clone = replay.restore(snap, tmp_path / "r")
+    assert not (clone / "build.log").exists()
+    restored = json.loads((tmp_path / "r" / "restore.json").read_text())
+    assert restored["missing"] == ["build.log"] and "build.log" not in restored["ignored"]
+
+
+def test_a_snapshot_without_its_ignored_entries_is_refused(tmp_path: Path, snap: Path) -> None:
+    meta = json.loads((snap / "meta.json").read_text())
+    del meta["ignored_entries"]
+    (snap / "meta.json").write_text(json.dumps(meta))
+    with pytest.raises(replay.Inconclusive, match="no list of ignored entries"):
+        replay.restore(snap, tmp_path / "r")
+    assert not (tmp_path / "r").exists()
+
+
+def test_a_captured_entry_already_in_the_clone_is_still_refused(tmp_path: Path, snap: Path) -> None:
+    """The collision check stays as a backstop, here reached with a tampered list."""
+    meta = json.loads((snap / "meta.json").read_text())
+    meta["ignored_entries"] = [*meta["ignored_entries"], "notes.md"]  # notes.md comes from the tar
+    (snap / "meta.json").write_text(json.dumps(meta))
+    with pytest.raises(replay.Inconclusive, match="notes.md already exists in the clone"):
+        replay.restore(snap, tmp_path / "r")
+
+
+def test_nested_checkout_under_an_ignored_directory_is_pruned(tmp_path: Path, repo: Path) -> None:
     """`.claude/worktrees/` is a common ignore pattern, and a linked worktree
     inside it has a `.git` file with an absolute `gitdir:` back at the real
     repository. Any git command run inside a copy of it would then touch the
@@ -71,7 +138,7 @@ def test_nested_checkout_under_an_ignored_directory_is_pruned(tmp_path: Path, re
     (repo / ".gitignore").write_text((repo / ".gitignore").read_text() + ".claude/worktrees/\n")
     (repo / ".claude").mkdir()
     git(repo, "worktree", "add", "-q", "-b", "wt", str(repo / ".claude" / "worktrees" / "wt"))
-    clone = replay.restore(snap, tmp_path / "r")
+    clone = replay.restore(take(tmp_path, repo), tmp_path / "r")
     assert not (clone / ".claude" / "worktrees" / "wt").exists()
     restored = json.loads((tmp_path / "r" / "restore.json").read_text())
     assert restored["skipped"] == [".claude/worktrees/wt"]
@@ -116,7 +183,7 @@ def test_force_added_tracked_file_survives_the_start_commit(tmp_path: Path, repo
 
 
 def test_symlinked_ignored_entry_through_a_parent_dir_leaves_the_real_dirs_untouched(
-    tmp_path: Path, repo: Path, snap: Path
+    tmp_path: Path, repo: Path
 ) -> None:
     """repro.py mode "parent": an ignore pattern can match a symlink to a
     directory entirely outside the repository that itself holds a nested
@@ -130,8 +197,8 @@ def test_symlinked_ignored_entry_through_a_parent_dir_leaves_the_real_dirs_untou
     (ext / "venv").mkdir()
     (ext / "venv" / "pyvenv.cfg").write_text("home=/x\n")
     (repo / ".gitignore").write_text((repo / ".gitignore").read_text() + "data\n")
-    (repo / "data").symlink_to(ext)  # the user moved on after the snapshot
-    clone = replay.restore(snap, tmp_path / "r")
+    (repo / "data").symlink_to(ext)
+    clone = replay.restore(take(tmp_path, repo), tmp_path / "r")
     assert (ext / "subrepo").exists()
     assert (ext / "venv").exists()
     assert not (clone / "data").exists()
@@ -139,7 +206,7 @@ def test_symlinked_ignored_entry_through_a_parent_dir_leaves_the_real_dirs_untou
     assert restored["skipped"] == ["data"]
 
 
-def test_symlinked_special_dir_is_skipped_without_raising(tmp_path: Path, repo: Path, snap: Path) -> None:
+def test_symlinked_special_dir_is_skipped_without_raising(tmp_path: Path, repo: Path) -> None:
     """repro.py mode "self": the symlink points directly at a special dir (here a
     nested checkout; a symlinked `.venv` or an `npm link`ed package is the same
     shape). Deleting through a symlink like that used to raise a raw OSError;
@@ -149,8 +216,8 @@ def test_symlinked_special_dir_is_skipped_without_raising(tmp_path: Path, repo: 
     git(ext / "subrepo", "init", "-q")
     (ext / "subrepo" / "precious.txt").write_text("user work\n")
     (repo / ".gitignore").write_text((repo / ".gitignore").read_text() + "data\n")
-    (repo / "data").symlink_to(ext / "subrepo")  # the user moved on after the snapshot
-    clone = replay.restore(snap, tmp_path / "r")
+    (repo / "data").symlink_to(ext / "subrepo")
+    clone = replay.restore(take(tmp_path, repo), tmp_path / "r")
     assert (ext / "subrepo").exists()
     assert not (clone / "data").exists()
     restored = json.loads((tmp_path / "r" / "restore.json").read_text())
@@ -187,59 +254,197 @@ def test_stray_git_guard_rejects_a_surviving_nested_checkout(tmp_path: Path) -> 
         replay._reject_stray_checkouts(clone)
 
 
-# --- fix round 2: ignore-rule drift the porcelain diff alone cannot see (Ruling T9b, drift.py) ---
+# --- ignore-rule drift after the capture (Ruling T9b, then F3') ------------------------
+# A path that became ignored only after the capture is not in the captured list, so
+# restore never copies it: the clone keeps the snapshot's own version, which is the
+# faithful one, and the path is listed under "not_captured".
 
 
-def test_ignored_untracked_file_edited_after_the_snapshot_is_inconclusive(tmp_path: Path, repo: Path) -> None:
+def test_untracked_file_ignored_and_edited_after_the_snapshot_keeps_its_captured_version(
+    tmp_path: Path, repo: Path
+) -> None:
     """drift.py mode "untracked-file": a file untracked and not ignored at
-    snapshot time (captured in untracked.tar) becomes ignored and is edited
-    afterward. `git status --porcelain` shows the same "?? scratch.txt" line
-    before and after copying regardless of content, so only checking that the
-    ignored path does not already exist in the clone catches this."""
+    snapshot time (captured in untracked.tar) becomes ignored and is edited."""
     (repo / "scratch.txt").write_text("v1\n")
-    transcript = write(tmp_path / "t.jsonl", [typed("start"), assistant("r1")])
-    sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "build it", "N", EVENT)
-    snap = tmp_path / "fc" / "snapshots" / sid
+    snap = take(tmp_path, repo)
     (repo / ".gitignore").write_text((repo / ".gitignore").read_text() + "scratch.txt\n")
     (repo / "scratch.txt").write_text("v2 AFTER SNAPSHOT\n")  # the user moved on after the snapshot
-    with pytest.raises(replay.Inconclusive, match="already exists in the clone"):
-        replay.restore(snap, tmp_path / "r")
+    clone = replay.restore(snap, tmp_path / "r")
+    assert (clone / "scratch.txt").read_text() == "v1\n"
+    assert json.loads((tmp_path / "r" / "restore.json").read_text())["not_captured"] == ["scratch.txt"]
 
 
-def test_ignored_untracked_dir_edited_after_the_snapshot_is_inconclusive(tmp_path: Path, repo: Path) -> None:
-    """drift.py mode "untracked-dir": an untracked directory captured in the tar
-    is later matched by an ignore pattern. Copying it again on top would produce
-    a `notes/notes/a.md` duplicate that `git status --porcelain` also cannot
-    see, since it still collapses the whole directory into one "?? notes/"
-    line."""
+def test_untracked_dir_ignored_and_edited_after_the_snapshot_keeps_its_captured_version(
+    tmp_path: Path, repo: Path
+) -> None:
+    """drift.py mode "untracked-dir": copying the folder again on top would have
+    made a `notes/notes/a.md` duplicate that `git status --porcelain` cannot see."""
     (repo / "notes").mkdir()
     (repo / "notes" / "a.md").write_text("v1\n")
-    transcript = write(tmp_path / "t.jsonl", [typed("start"), assistant("r1")])
-    sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "build it", "N", EVENT)
-    snap = tmp_path / "fc" / "snapshots" / sid
+    snap = take(tmp_path, repo)
     (repo / ".gitignore").write_text((repo / ".gitignore").read_text() + "notes/\n")
     (repo / "notes" / "a.md").write_text("v2 AFTER SNAPSHOT\n")  # the user moved on after the snapshot
-    with pytest.raises(replay.Inconclusive, match="already exists in the clone"):
-        replay.restore(snap, tmp_path / "r")
+    clone = replay.restore(snap, tmp_path / "r")
+    assert (clone / "notes" / "a.md").read_text() == "v1\n"
+    assert not (clone / "notes" / "notes").exists()
+    assert json.loads((tmp_path / "r" / "restore.json").read_text())["not_captured"] == ["notes"]
 
 
-def test_modified_tracked_file_later_ignored_and_edited_is_inconclusive(tmp_path: Path, repo: Path) -> None:
+def test_modified_tracked_file_later_ignored_and_edited_keeps_its_captured_version(tmp_path: Path, repo: Path) -> None:
     """drift.py mode "modified-tracked": a file tracked and modified at snapshot
-    time (captured in changes.diff) is later untracked, ignored and edited
-    again. `git status --porcelain` shows the same " M config.json" line before
-    and after copying regardless of which modified content is on disk."""
+    time (captured in changes.diff) is later untracked, ignored and edited."""
     (repo / "config.json").write_text("{}\n")
     git(repo, "add", "config.json")
     git(repo, "commit", "-qm", "add config")
     (repo / "config.json").write_text('{"v": 1}\n')  # snapshot-time uncommitted change
-    transcript = write(tmp_path / "t.jsonl", [typed("start"), assistant("r1")])
-    sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "build it", "N", EVENT)
-    snap = tmp_path / "fc" / "snapshots" / sid
+    snap = take(tmp_path, repo)
     git(repo, "rm", "-q", "--cached", "config.json")
     (repo / ".gitignore").write_text((repo / ".gitignore").read_text() + "config.json\n")
     (repo / "config.json").write_text('{"v": 2, "AFTER": "SNAPSHOT"}\n')  # the user moved on after the snapshot
-    with pytest.raises(replay.Inconclusive, match="already exists in the clone"):
+    clone = replay.restore(snap, tmp_path / "r")
+    assert (clone / "config.json").read_text() == '{"v": 1}\n'
+    assert json.loads((tmp_path / "r" / "restore.json").read_text())["not_captured"] == ["config.json"]
+
+
+# --- Ruling F1: a symlink in the start state that points out of the clone ------------
+
+
+@pytest.mark.parametrize(("name", "how"), [("data", "absolute"), ("up", "../.."), ("data", "staged")])
+def test_a_symlink_out_of_the_clone_is_inconclusive(tmp_path: Path, repo: Path, name: str, how: str) -> None:
+    """A committed `data -> <absolute path>` would let a replay write straight
+    through it into the real checkout, and the leak scan would never see the
+    real path spelled out; `up -> ../..` escapes by climbing instead. One only
+    staged, not committed, reaches the clone through changes.diff instead."""
+    ext = tmp_path / "ext"
+    ext.mkdir()
+    (repo / name).symlink_to(ext if how in ("absolute", "staged") else how)
+    git(repo, "add", name)
+    if how != "staged":
+        git(repo, "commit", "-qm", "a link")
+    snap = take(tmp_path, repo)
+    with pytest.raises(replay.Inconclusive, match=f"the symlink {name} points outside the clone"):
         replay.restore(snap, tmp_path / "r")
+    assert list(ext.iterdir()) == []
+
+
+def test_a_tracked_symlink_inside_the_clone_is_kept(tmp_path: Path, repo: Path) -> None:
+    (repo / "docs").mkdir()
+    (repo / "docs" / "main.py").symlink_to(Path("..") / "app.py")
+    git(repo, "add", "docs")
+    git(repo, "commit", "-qm", "a link")
+    clone = replay.restore(take(tmp_path, repo), tmp_path / "r")
+    assert os.readlink(clone / "docs" / "main.py") == str(Path("..") / "app.py")
+
+
+# --- the Task 9 minors (final fix wave A2) --------------------------------------------
+
+
+def test_a_link_that_climbs_above_the_top_and_comes_back_is_not_copied(tmp_path: Path, repo: Path) -> None:
+    """`../../app/app.py` from `app/node_modules` resolves inside the source, but
+    only by going through the folder's own name: in a clone named `repo` it
+    points at a sibling `app` folder outside the clone."""
+    link = repo / "node_modules" / "back"
+    link.symlink_to(Path("..") / ".." / repo.name / "app.py")
+    assert not replay._resolves_inside(repo, link)
+    clone = replay.restore(take(tmp_path, repo), tmp_path / "r")
+    assert not os.path.lexists(clone / "node_modules" / "back")
+    assert json.loads((tmp_path / "r" / "restore.json").read_text())["skipped"] == ["node_modules/back"]
+
+
+def test_a_copy_through_a_folder_linked_out_of_the_clone_is_refused(
+    tmp_path: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defense in depth behind F1: a folder on the way to a captured entry is a
+    link out of the clone (planted here after F1's check ran), so the copy
+    would write through it."""
+    (repo / "logs").mkdir()
+    (repo / "logs" / "keep.txt").write_text("tracked\n")
+    (repo / ".gitignore").write_text((repo / ".gitignore").read_text() + "*.log\n")
+    git(repo, "add", "logs", ".gitignore")
+    git(repo, "commit", "-qm", "logs")
+    (repo / "logs" / "a.log").write_text("log line\n")
+    snap = take(tmp_path, repo)
+    assert "logs/a.log" in json.loads((snap / "meta.json").read_text())["ignored_entries"]
+    ext = tmp_path / "ext"
+    ext.mkdir()
+
+    def plant_link(clone: Path, env: dict) -> None:
+        shutil.rmtree(clone / "logs")
+        (clone / "logs").symlink_to(ext)
+
+    monkeypatch.setattr(replay, "_refuse_escaping_links", plant_link)
+    with pytest.raises(replay.Inconclusive, match="through a link out of the clone"):
+        replay.restore(snap, tmp_path / "r")
+    assert list(ext.iterdir()) == []
+
+
+def test_a_read_only_folder_opened_up_for_an_exclusion_still_gets_its_children(tmp_path: Path, repo: Path) -> None:
+    """The folder is opened up because it holds a nested checkout; its mode is
+    applied only after its children are copied, or a read-only one refuses them."""
+    vendor = repo / "vendor"
+    (vendor / "sub").mkdir(parents=True)
+    git(vendor / "sub", "init", "-q")
+    (vendor / "lib.txt").write_text("lib\n")
+    (repo / ".gitignore").write_text((repo / ".gitignore").read_text() + "vendor/\n")
+    vendor.chmod(0o555)
+    copied = tmp_path / "r" / "repo" / "vendor"
+    try:
+        clone = replay.restore(take(tmp_path, repo), tmp_path / "r")
+        assert (clone / "vendor" / "lib.txt").read_text() == "lib\n"
+        assert not (clone / "vendor" / "sub").exists()
+        assert stat.S_IMODE((clone / "vendor").stat().st_mode) == 0o555
+    finally:
+        vendor.chmod(0o755)
+        if copied.exists():
+            copied.chmod(0o755)
+
+
+def test_a_link_that_cannot_be_resolved_is_unsafe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Python 3.12's `Path.resolve()` raises RuntimeError on a symlink loop."""
+    top = tmp_path / "top"
+    top.mkdir()
+    (top / "x").write_text("x\n")
+    (top / "l").symlink_to("x")
+    assert replay._resolves_inside(top, top / "l")
+
+    def loop(self: Path, strict: bool = False) -> Path:
+        raise RuntimeError(f"Symlink loop from {self}")
+
+    with monkeypatch.context() as m:
+        m.setattr(Path, "resolve", loop)
+        safe = replay._resolves_inside(top, top / "l")
+    assert not safe
+
+
+def test_a_symlink_loop_in_an_ignored_folder_never_breaks_restore(tmp_path: Path, repo: Path) -> None:
+    (repo / "node_modules" / "a").symlink_to("b")
+    (repo / "node_modules" / "b").symlink_to("a")
+    clone = replay.restore(take(tmp_path, repo), tmp_path / "r")
+    assert (clone / ".env").read_text() == "TOKEN=x\n"
+
+
+# --- final Minor 8: git calls on the real checkout take no optional lock --------------
+
+
+def test_every_git_call_on_the_real_checkout_takes_no_optional_lock(
+    tmp_path: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[list[str], dict | None]] = []
+    real_run = subprocess.run
+
+    def recording_run(args: list[str], *rest: object, **kwargs: object) -> subprocess.CompletedProcess:
+        calls.append(([str(a) for a in args], kwargs.get("env")))  # type: ignore[arg-type]
+        return real_run(args, *rest, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(subprocess, "run", recording_run)
+    snap = take(tmp_path, repo)
+    clone = replay.restore(snap, tmp_path / "r")
+    replay.install_session(snap, clone, tmp_path / "claude-home")
+    monkeypatch.undo()
+    tops = {str(repo), str(repo.resolve())}
+    on_source = [env for args, env in calls if args[0] == "git" and tops & set(args)]
+    assert len(on_source) >= 10
+    assert all(env is not None and env.get("GIT_OPTIONAL_LOCKS") == "0" for env in on_source)
 
 
 def test_check_marks_a_good_snapshot_restore_ok(tmp_path: Path, snap: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -597,6 +802,36 @@ def test_keep_side_never_inherits_a_stray_note_file_env_var(
     assert any(c["note"] == str(snap / "note.txt") for c in calls)
 
 
+SESSION_MARKERS = (
+    "CLAUDECODE",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_BRIDGE_SESSION_ID",
+    "CLAUDE_EFFORT",
+    "CLAUDE_PID",
+)
+
+
+def test_replays_never_inherit_the_launching_sessions_markers(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The runner usually runs inside a Claude Code session; its markers must not
+    tie either replay to that session. Everything else is kept."""
+    for name in SESSION_MARKERS:
+        monkeypatch.setenv(name, "from-the-launching-session")
+    monkeypatch.setenv("CLAUDE_TEST_KEPT", "yes")
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert not result["inconclusive"]
+    calls = calls_log(tmp_path)
+    assert len(calls) == 4
+    for call in calls:
+        assert not [k for k in call["claude_env"] if k in SESSION_MARKERS or k.startswith("CLAUDE_CODE_")]
+        assert {"CLAUDE_CONFIG_DIR", "CLAUDE_TEST_KEPT"} <= set(call["claude_env"])
+        assert (call["home"], call["path"]) == (os.environ["HOME"], os.environ["PATH"])
+
+
 def test_install_session_refuses_a_transcript_line_that_does_not_parse(tmp_path: Path, repo: Path) -> None:
     transcript = write(tmp_path / "t.jsonl", [typed("start"), assistant("r1")])
     lines = transcript.read_text().splitlines()
@@ -889,6 +1124,28 @@ def test_cmd_replay_marks_safe_replay_failed_and_clears_partial_results(
     status = fork_check.statuses()[snap.name]
     assert status["status"] == "replay_failed" and "disk full" in status["reason"]
     assert not leftover.exists()
+
+
+def test_an_unknown_or_escaping_id_is_refused_before_anything_is_touched(
+    tmp_path: Path, snap: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`replay` deletes results/<id> before it starts: a typo, or an id holding
+    `../`, must never reach that, nor any other command that takes an id."""
+    root = tmp_path / "fc"
+    monkeypatch.setattr(fork_check, "root", lambda: root)
+    precious = root / "x"  # what results/../x names
+    precious.mkdir()
+    (precious / "keep.txt").write_text("mine\n")
+    stray = root / "results" / "20990101-000000-nope"
+    stray.mkdir(parents=True)
+    for sid in ("../x", "20990101-000000-nope"):
+        fork_check.set_status(sid, "safe")  # as `mark` used to accept any id
+        for command in (["replay", sid], ["mark", sid, "safe"], ["judge", sid], ["publish", sid]):
+            assert fork_check.main(command) == 1
+    assert (precious / "keep.txt").read_text() == "mine\n"
+    assert stray.exists()
+    assert len((root / "status.jsonl").read_text().splitlines()) == 2  # `mark` wrote nothing
+    assert "../x is not a snapshot id" in capsys.readouterr().out
 
 
 def test_replay_requires_either_id_or_next() -> None:

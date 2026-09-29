@@ -34,13 +34,12 @@ from pathlib import Path
 import usage
 
 MAX_UNTRACKED_BYTES = 50_000_000
-# Reason: package managers touch these when packages come and go (site-packages'
-# own modification time changes when a package directory is added or removed).
-# Cheap by design: a change inside one package that leaves them alone goes unseen.
+# Reason: package managers touch these when packages come and go. Cheap by design:
+# a change inside one package that leaves them alone goes unseen. Python
+# virtualenvs are not here: a replay never copies one (`uv run` rebuilds it in the
+# clone), so a change to the real one must not make a job inconclusive.
 DEPENDENCY_DIRS = {
     "node_modules": (".package-lock.json", ".modules.yaml", ".yarn-state.yml"),
-    ".venv": ("pyvenv.cfg", "lib/python*/site-packages"),
-    "venv": ("pyvenv.cfg", "lib/python*/site-packages"),
 }
 
 
@@ -59,13 +58,23 @@ def _time_left(deadline: float | None) -> float:
     return min(10, left)
 
 
+def git_env() -> dict[str, str]:
+    """The environment of every git call on the user's real checkout. Without
+    GIT_OPTIONAL_LOCKS=0, `git status` and `git diff` refresh the index and take
+    `.git/index.lock` to save it, which fails a `git add` that the user's own
+    session runs at the same moment."""
+    return {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}
+
+
 def git(cwd: Path, *args: str, deadline: float | None = None) -> str:
     return _git_bytes(cwd, *args, deadline=deadline).decode()
 
 
 def _git_bytes(cwd: Path, *args: str, deadline: float | None = None) -> bytes:
     try:
-        result = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, timeout=_time_left(deadline))
+        result = subprocess.run(
+            ["git", "-C", str(cwd), *args], capture_output=True, timeout=_time_left(deadline), env=git_env()
+        )
     except subprocess.TimeoutExpired:
         raise SnapshotError("snapshot ran out of time") from None
     if result.returncode != 0:
@@ -104,10 +113,14 @@ def ignored_entries(top: Path, *, deadline: float | None = None) -> list[str]:
     return sorted(e[3:].decode().rstrip("/") for e in listing.split(b"\0") if e.startswith(b"!! "))
 
 
-def ignored_fingerprint(top: Path, deadline: float | None = None) -> str:
-    """Changes when installed dependencies or `.env` files change, not when caches do."""
+def ignored_fingerprint(top: Path, deadline: float | None = None, *, entries: list[str] | None = None) -> str:
+    """Changes when installed dependencies or `.env` files change, not when caches do.
+
+    `entries` are the ignored paths to look at, by default what git lists now. A
+    restore passes the snapshot's own list instead: it copies only those, so an
+    entry created after the capture must not change the answer."""
     digest = hashlib.sha256()
-    for rel in ignored_entries(top, deadline=deadline):
+    for rel in ignored_entries(top, deadline=deadline) if entries is None else entries:
         path = top / rel
         name = path.name
         if name in DEPENDENCY_DIRS:
@@ -173,6 +186,10 @@ def take_snapshot(
             for p in untracked:
                 _time_left(deadline)  # raises once nothing is left
                 tar.add(top / p.decode(), arcname=p.decode(), recursive=False)
+        # Reason: restore copies only these entries, so a file ignored after the
+        # capture (a new secret, a cache, the real turn's own build output) never
+        # reaches a replay. Paths only, from the listing the fingerprint needs anyway.
+        entries = ignored_entries(top, deadline=deadline)
         meta = {
             "id": sid,
             "created": now.isoformat(timespec="seconds"),
@@ -182,7 +199,8 @@ def take_snapshot(
             "toplevel": str(top),
             "head": head,
             "branch": branch,
-            "ignored_fingerprint": ignored_fingerprint(top, deadline=deadline),
+            "ignored_fingerprint": ignored_fingerprint(top, entries=entries),
+            "ignored_entries": entries,
             "skipped": skipped,
             "prompt_cut": prompt_cut,
             **{

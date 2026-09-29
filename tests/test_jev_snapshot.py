@@ -48,6 +48,8 @@ def test_snapshot_holds_the_conversation_and_the_working_copy(tmp_path: Path, re
     assert meta["head"] == git(repo, "rev-parse", "HEAD").strip()
     assert meta["branch"] == "main" and meta["toplevel"] == str(repo.resolve())
     assert meta["helper"] == "jev-router:large" and meta["context"] == 803_010
+    # Ruling F3': the ignored entries a restore may copy, paths only.
+    assert meta["ignored_entries"] == [".env", "node_modules"]
     assert (d / "message.txt").read_text() == "build it"
     assert (d / "note.txt").read_text() == "NOTE"
     assert "print('v2')" in (d / "changes.diff").read_text()
@@ -96,13 +98,25 @@ def test_snapshot_keeps_the_earlier_identical_prompt_even_with_a_later_one(tmp_p
     assert kept == "".join(json.dumps(e) + "\n" for e in before)
 
 
-def test_fingerprint_sees_python_packages_come_and_go(repo: Path) -> None:
+def test_fingerprint_ignores_virtualenvs_but_sees_node_packages(repo: Path) -> None:
+    """A replay never copies a virtualenv (`uv run` rebuilds it), so a change to
+    the real one must not make a job inconclusive; node_modules is copied."""
     packages = repo / ".venv" / "lib" / "python3.12" / "site-packages"
     packages.mkdir(parents=True)
     (repo / ".venv" / "pyvenv.cfg").write_text("home = /x\n")
     before = snapshot.ignored_fingerprint(repo)
     (packages / "requests").mkdir()
+    (repo / ".venv" / "pyvenv.cfg").write_text("home = /somewhere/else\n")
+    assert snapshot.ignored_fingerprint(repo) == before
+    (repo / "node_modules" / ".package-lock.json").write_text('{"packages": {}}')
     assert snapshot.ignored_fingerprint(repo) != before
+
+
+def test_fingerprint_over_a_given_list_skips_entries_outside_it(repo: Path) -> None:
+    before = snapshot.ignored_fingerprint(repo, entries=["node_modules"])
+    (repo / ".env").write_text("TOKEN=y\n")
+    assert snapshot.ignored_fingerprint(repo, entries=["node_modules"]) == before
+    assert snapshot.ignored_fingerprint(repo, entries=[".env", "node_modules"]) != before
 
 
 def test_fingerprint_follows_dependencies_and_env_files_only(repo: Path) -> None:
@@ -181,7 +195,7 @@ def test_a_failure_after_the_tmp_folder_exists_still_leaves_nothing_behind(
     other file written, so failing there exercises cleanup of a `.tmp` folder that
     is not empty, unlike the deadline-already-past case above."""
 
-    def boom(top: Path, deadline: float | None = None) -> str:
+    def boom(top: Path, deadline: float | None = None, **kwargs: object) -> str:
         raise RuntimeError("boom")
 
     monkeypatch.setattr(snapshot, "ignored_fingerprint", boom)

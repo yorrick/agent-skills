@@ -40,6 +40,8 @@ def test_external_actions_name_pushes_prs_deploys_and_mcp_writes() -> None:
 
 def test_marks_are_recorded_and_the_latest_wins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(fork_check, "root", lambda: tmp_path)
+    (tmp_path / "snapshots" / "20261001-100000-abc").mkdir(parents=True)
+    (tmp_path / "snapshots" / "20261001-100000-abc" / "meta.json").write_text("{}")
     assert fork_check.main(["mark", "20261001-100000-abc", "skip", "--reason", "writes to production"]) == 0
     assert fork_check.main(["mark", "20261001-100000-abc", "safe"]) == 0
     assert fork_check.statuses()["20261001-100000-abc"]["status"] == "safe"

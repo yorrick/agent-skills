@@ -9,7 +9,7 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from replay import IDENTITY, refuse_if_ignored_leaked, refuse_if_unusable, restored_ignored, run
+from replay import IDENTITY, refuse_if_ignored_leaked, refuse_if_unusable, restored_ignored, run, run_on_source
 
 MESSAGE_LIMIT = 2000
 LOGIN_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
@@ -73,7 +73,7 @@ def publish(snap: Path, result: dict, *, gh: Callable[..., str] = run_gh, remote
     # Built before any gh mutation or push, so a body it cannot build (or a body
     # GitHub would reject) is caught before anything is created or pushed.
     body = _pr_body(sid, snap, k, d)
-    origin = run("git", "-C", meta["toplevel"], "remote", "get-url", "origin").strip()
+    origin = run_on_source("git", "-C", meta["toplevel"], "remote", "get-url", "origin").strip()
     login = gh("api", "user", "--jq", ".login").strip()
     if not login or not LOGIN_PATTERN.match(login):
         raise RuntimeError(f"gh reported an unusable login: {login!r}")

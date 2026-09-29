@@ -367,6 +367,12 @@ def main(argv: list[str] | None = None) -> int:
     judge_parser.add_argument("id")
     sub.add_parser("report")
     args = parser.parse_args(argv)
+    # Reason: an id becomes a path under results/ and blind/, which replay deletes
+    # and recreates; a typo, or an id holding `../`, must never reach that.
+    sid = getattr(args, "id", None)
+    if sid is not None and sid not in {p.name for p in snapshot_dirs()}:
+        print(f"{sid} is not a snapshot id; `list` shows them.")
+        return 1
     if args.command == "shadow":
         return cmd_shadow()
     if args.command == "check":

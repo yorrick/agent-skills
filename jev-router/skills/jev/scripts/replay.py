@@ -49,6 +49,13 @@ def run(*args: str, cwd: Path | None = None, env: dict | None = None) -> str:
     return result.stdout
 
 
+def run_on_source(*args: str) -> str:
+    """A git call that reads the user's real checkout. It runs with
+    GIT_OPTIONAL_LOCKS=0 (`snapshot.git_env`), so it never takes
+    `.git/index.lock` away from a `git add` the user's own session is running."""
+    return run(*args, env=snapshot.git_env())
+
+
 def copy_tree(source: Path, target: Path) -> None:
     """A copy-on-write clone on macOS, so node_modules costs no time or space."""
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -56,19 +63,66 @@ def copy_tree(source: Path, target: Path) -> None:
     run("cp", *flags, str(source), str(target))
 
 
-def _resolves_inside(top: Path, link: Path) -> bool:
-    """True only for a symlink that is relative and whose target, resolved from
-    the link's own directory, stays inside `top`. An absolute link, or one that
-    escapes `top`, is never safe to keep as a link in a disposable clone."""
-    raw = os.readlink(link)
+def _climbs_out(parent_rel: str, raw: str) -> bool:
+    """Read as text, with no lookup on disk: whether a link target is absolute,
+    or its `..` steps climb above the top of the tree, counted from
+    `parent_rel` (the folder holding the link, relative to that top). A target
+    can climb out and come back in by name (`../app/x` from the top of `app`):
+    it resolves inside the source, but in a clone with another name it points
+    somewhere else."""
     if os.path.isabs(raw):
-        return False
-    target = (link.parent / raw).resolve()
+        return True
+    norm = os.path.normpath(os.path.join(parent_rel, raw))
+    return norm == ".." or norm.startswith("../")
+
+
+def _inside(root: Path, path: Path) -> bool:
+    """Whether `path`, with every link followed, lands inside `root`. A link
+    loop counts as outside: Python 3.12 raises RuntimeError on one."""
     try:
-        target.relative_to(top.resolve())
-    except ValueError:
+        path.resolve().relative_to(root.resolve())
+    except (ValueError, RuntimeError, OSError):
         return False
     return True
+
+
+def _resolves_inside(top: Path, link: Path) -> bool:
+    """True only for a symlink that is relative, never climbs above `top` on
+    its way, and whose target, resolved from the link's own directory, stays
+    inside `top`. Any other link is never safe to keep in a disposable clone."""
+    raw = os.readlink(link)
+    if _climbs_out(os.path.relpath(link.parent, top), raw):
+        return False
+    return _inside(top, link.parent / raw)
+
+
+def _refuse_escaping_links(clone: Path, env: dict) -> None:
+    """Every symlink in the start state (checked out, applied from the diff or
+    extracted from the tar: the start index `env` names lists them all) must
+    point inside the clone. A committed `data -> /Users/me/work/app/data`
+    would otherwise let a replay write straight through it into the real
+    checkout, and the leak scan would never see the real path spelled out.
+    Each target is read from its blob, as git recorded it, and checked both as
+    text and as resolved on disk."""
+    listing = run("git", "-C", str(clone), "ls-files", "-s", "-z", env=env)
+    links = [(e.split("\t", 1)[1], e.split()[1]) for e in listing.split("\0") if e.startswith("120000 ")]
+    if not links:
+        return
+    blobs = subprocess.run(
+        ["git", "-C", str(clone), "cat-file", "--batch"],
+        input="".join(f"{oid}\n" for _, oid in links).encode(),
+        capture_output=True,
+    )
+    if blobs.returncode != 0:
+        raise RuntimeError(f"git cat-file failed: {blobs.stderr.decode(errors='replace').strip()[:300]}")
+    out, pos = blobs.stdout, 0
+    for path, _ in links:
+        header_end = out.index(b"\n", pos)
+        size = int(out[pos:header_end].split()[2])
+        target = os.fsdecode(out[header_end + 1 : header_end + 1 + size])
+        pos = header_end + 2 + size
+        if _climbs_out(os.path.dirname(path) or ".", target) or not _inside(clone, clone / path):
+            raise Inconclusive(f"the symlink {path} points outside the clone ({target})")
 
 
 def _collect_exclusions(top: Path, rel: str) -> set[str]:
@@ -116,9 +170,9 @@ def _copy_selective(top: Path, rel: str, target: Path, excluded: set[str]) -> No
     """Copy `top/rel` into `target`, honoring `excluded` (paths relative to
     `top`, from `_collect_exclusions`): a path in it is skipped outright. A path
     that is an ancestor of an excluded one cannot be copied whole (`cp` cannot
-    leave part of a directory out), so it is opened up instead: `mkdir`, keep its
-    mode, then recurse into each child with `os.scandir`. Anything else is copied
-    in one shot with `copy_tree`, which is what keeps this cheap on a
+    leave part of a directory out), so it is opened up instead: `mkdir`, recurse
+    into each child with `os.scandir`, then keep its mode. Anything else is
+    copied in one shot with `copy_tree`, which is what keeps this cheap on a
     copy-on-write filesystem."""
     if rel in excluded:
         return
@@ -126,9 +180,11 @@ def _copy_selective(top: Path, rel: str, target: Path, excluded: set[str]) -> No
     prefix = f"{rel}/"
     if any(path.startswith(prefix) for path in excluded):
         target.mkdir(parents=True, exist_ok=True)
-        shutil.copymode(source, target)
         for child in os.scandir(source):
             _copy_selective(top, f"{rel}/{child.name}", target / child.name, excluded)
+        # Reason: after the children, never before: a read-only folder's mode
+        # would refuse them.
+        shutil.copymode(source, target)
     else:
         copy_tree(source, target)
 
@@ -150,7 +206,7 @@ def _copy_info_exclude(top: Path, clone: Path) -> None:
     otherwise show up untracked in the clone, and a later `git add -A` would
     publish it. `--git-common-dir` resolves against `top` because it may be
     relative, and in a linked worktree it points at the main checkout's `.git`."""
-    common = run("git", "-C", str(top), "rev-parse", "--git-common-dir").strip()
+    common = run_on_source("git", "-C", str(top), "rev-parse", "--git-common-dir").strip()
     common_dir = Path(common) if Path(common).is_absolute() else top / common
     source = common_dir / "info" / "exclude"
     if source.exists():
@@ -160,19 +216,35 @@ def _copy_info_exclude(top: Path, clone: Path) -> None:
 
 
 def restore(snap: Path, dest: Path, *, copy_ignored: bool = True) -> Path:
+    """Rebuild the snapshot's working copy in `dest/repo`. With `copy_ignored`,
+    also copy in the ignored entries the snapshot captured (paths recorded in
+    meta.json), as they are now in the real checkout, and record what happened
+    to them in `dest/restore.json`: `ignored` (copied), `skipped` (nested
+    checkouts, virtualenvs and escaping links left out), `missing` (captured but
+    gone since) and `not_captured` (ignored now but new since the capture, never
+    copied: a secret added to info/exclude, a cache, the real turn's output)."""
     meta = json.loads((snap / "meta.json").read_text())
     top, head = Path(meta["toplevel"]), meta["head"]
-    if copy_ignored and snapshot.ignored_fingerprint(top) != meta["ignored_fingerprint"]:
-        raise Inconclusive("dependencies or .env files changed since the snapshot")
+    captured: list[str] = []
+    if copy_ignored:
+        if "ignored_entries" not in meta:
+            raise Inconclusive(
+                "the snapshot records no list of ignored entries (it predates this runner), so it cannot be replayed"
+            )
+        captured = meta["ignored_entries"]
+        # Reason: only the captured entries are ever copied, so only they count;
+        # a new ignored file cannot make the job inconclusive.
+        if snapshot.ignored_fingerprint(top, entries=captured) != meta["ignored_fingerprint"]:
+            raise Inconclusive("dependencies or .env files changed since the snapshot")
     dest.mkdir(parents=True)
     bare, clone = dest / "origin.git", dest / "repo"
-    run("git", "clone", "-q", "--bare", str(top), str(bare))
+    run_on_source("git", "clone", "-q", "--bare", str(top), str(bare))
     # Reason: the bare copy has already fetched everything it needs; dropping
     # "origin" leaves it with no configured path back to the source.
     run("git", "-C", str(bare), "remote", "remove", "origin")
     branch = meta["branch"] if meta["branch"] != "HEAD" else "jev-snapshot"
     if subprocess.run(["git", "-C", str(bare), "cat-file", "-e", head], capture_output=True).returncode != 0:
-        run("git", "-C", str(bare), "fetch", "-q", str(top), head)
+        run_on_source("git", "-C", str(bare), "fetch", "-q", str(top), head)
     # Reason: the branch may have moved on since the snapshot; point it back so the
     # clone checks out exactly the snapshot's commit.
     run("git", "-C", str(bare), "update-ref", f"refs/heads/{branch}", head)
@@ -200,27 +272,35 @@ def restore(snap: Path, dest: Path, *, copy_ignored: bool = True) -> Path:
     start = run(
         "git", "-C", str(clone), *IDENTITY, "commit-tree", tree, "-p", head, "-m", "jev fork check: start"
     ).strip()
+    _refuse_escaping_links(clone, env)
     run("git", "-C", str(clone), "update-ref", "refs/jev/start", start)
     if copy_ignored:
-        # Reason: the ignore list is the source's current one, which may have
-        # drifted since the snapshot. `git status --porcelain` cannot see that on
+        # Reason: without drift an ignored path can never already exist in the
+        # clone (the clone holds only the tracked tree and the tar's non-ignored
+        # untracked files), and `git status --porcelain` cannot see such drift on
         # its own: it drops file content, and it collapses an untracked directory
-        # into one line regardless of what ends up nested inside it. But without
-        # drift an ignored path can never already exist in the clone (the clone
-        # holds only the tracked tree and the tar's non-ignored untracked files),
-        # so checking that directly catches what the status text cannot.
-        # `--untracked-files=all` is kept as a second check, since it still
-        # widens what the comparison can see.
+        # into one line regardless of what ends up nested inside it. The direct
+        # check catches what the status text cannot; `--untracked-files=all` is
+        # kept as a second check, since it still widens what the comparison sees.
         before = run("git", "-C", str(clone), "status", "--porcelain", "--untracked-files=all")
         skipped: list[str] = []
         ignored: list[str] = []
-        for rel in snapshot.ignored_entries(top):
+        missing: list[str] = []
+        for rel in captured:
+            if not os.path.lexists(top / rel):
+                missing.append(rel)
+                continue
             if os.path.lexists(clone / rel):
-                raise Inconclusive(f"{rel} already exists in the clone; ignore rules changed since the snapshot")
+                raise Inconclusive(f"{rel} already exists in the clone")
+            # Reason: a folder on the way could be a link out of the clone, and
+            # the copy would write through it.
+            if not _inside(clone, (clone / rel).parent):
+                raise Inconclusive(f"{rel} would be copied through a link out of the clone")
             excluded = _collect_exclusions(top, rel)
             _copy_selective(top, rel, clone / rel, excluded)
             skipped.extend(excluded)
             ignored.append(rel)
+        not_captured = sorted(set(snapshot.ignored_entries(top)) - set(captured))
         after = run("git", "-C", str(clone), "status", "--porcelain", "--untracked-files=all")
         if after != before:
             raise Inconclusive("ignored files changed since the snapshot")
@@ -229,9 +309,13 @@ def restore(snap: Path, dest: Path, *, copy_ignored: bool = True) -> Path:
         # ".env") lets a later publish step refuse to push one of them even if
         # the clone's own ignore rules later change or are force-added around,
         # since the replay runs with bypass permissions and can rewrite them.
-        (dest / "restore.json").write_text(
-            json.dumps({"skipped": sorted(skipped), "ignored": sorted(ignored)}, indent=2) + "\n"
-        )
+        record = {
+            "skipped": sorted(skipped),
+            "ignored": sorted(ignored),
+            "missing": missing,
+            "not_captured": not_captured,
+        }
+        (dest / "restore.json").write_text(json.dumps(record, indent=2) + "\n")
     return clone
 
 
@@ -321,6 +405,9 @@ WARMUP = "Reply with the single word ok and do nothing else."
 ATTEMPTS = 3
 TIMEOUT_SECONDS = 4 * 3600
 LARGE_CONTEXT = 200_000
+# With every CLAUDE_CODE_* variable, what a replay never inherits from the session
+# that launched the runner.
+SESSION_VARS = {"CLAUDECODE", "CLAUDE_EFFORT", "CLAUDE_PID"}
 # Reason: a path is only ever rewritten (or flagged as leaked) when it is NOT
 # immediately followed by another path-name character, so a shorter checkout
 # path never matches inside a longer, unrelated one (`/x/agent-skills` must
@@ -358,7 +445,7 @@ def _worktree_paths(meta: dict) -> list[str]:
     prefix of it and must be replaced second so it cannot swallow a
     toplevel-only occurrence first."""
     top = meta["toplevel"]
-    common = run("git", "-C", top, "rev-parse", "--git-common-dir").strip()
+    common = run_on_source("git", "-C", top, "rev-parse", "--git-common-dir").strip()
     common_dir = Path(common) if Path(common).is_absolute() else Path(top) / common
     main = str(common_dir.parent.resolve())
     return [top] if main == top else [top, main]
@@ -531,7 +618,11 @@ def run_claude(
         "--",
         prompt,
     ]
-    env = dict(os.environ)
+    # Reason: the runner itself usually runs inside a Claude Code session, whose
+    # own markers (session id, messaging socket and token, child-session and
+    # bridge ids, effort, pid) would tie the replay to that session. Everything
+    # else, CLAUDE_CONFIG_DIR, PATH and HOME included, is kept.
+    env = {k: v for k, v in os.environ.items() if k not in SESSION_VARS and not k.startswith("CLAUDE_CODE_")}
     env["JEV_ROUTER"] = "off"
     for key, value in env_extra.items():
         if value is None:

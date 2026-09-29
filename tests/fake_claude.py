@@ -31,7 +31,8 @@ Env vars the tests use to steer it:
   FAKE_CLAUDE_HANG_AFTER_WRITE  the job call writes its session file (and any injected leak) and
                             RESULT.txt as usual, logs the call, then hangs before printing its
                             JSON result: a timeout whose transcript is still there to scan.
-  FAKE_CLAUDE_LOG           appends each call's details to a file.
+  FAKE_CLAUDE_LOG           appends each call's details to a file, including the names of the
+                            CLAUDE* variables it inherited, and its HOME and PATH.
 """
 
 import json
@@ -55,7 +56,16 @@ note = os.environ.get("JEV_ROUTER_NOTE_FILE")
 def log(**extra: object) -> None:
     if path := os.environ.get("FAKE_CLAUDE_LOG"):
         with open(path, "a") as handle:
-            entry = {"args": args, "cwd": os.getcwd(), "note": note, "router": os.environ.get("JEV_ROUTER"), **extra}
+            entry = {
+                "args": args,
+                "cwd": os.getcwd(),
+                "note": note,
+                "router": os.environ.get("JEV_ROUTER"),
+                "claude_env": sorted(k for k in os.environ if k.startswith("CLAUDE")),
+                "home": os.environ.get("HOME"),
+                "path": os.environ.get("PATH"),
+                **extra,
+            }
             handle.write(json.dumps(entry) + "\n")
 
 

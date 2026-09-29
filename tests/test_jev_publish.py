@@ -199,10 +199,17 @@ def test_cmd_publish_refuses_without_a_verdict(
 ) -> None:
     monkeypatch.setattr(fork_check, "root", lambda: tmp_path)
     sid = "20261001-100000-abc"
+    _bare_snapshot(tmp_path, sid)
     (tmp_path / "results" / sid).mkdir(parents=True)
     (tmp_path / "results" / sid / "result.json").write_text("{}")
     assert fork_check.main(["publish", sid]) == 1
     assert "Judge" in capsys.readouterr().out
+
+
+def _bare_snapshot(root: Path, sid: str) -> None:
+    """Just enough of a snapshot folder for the runner to accept `sid`."""
+    (root / "snapshots" / sid).mkdir(parents=True)
+    (root / "snapshots" / sid / "meta.json").write_text("{}")
 
 
 def test_internal_visibility_is_also_refused(tmp_path: Path, repo: Path, snap: Path) -> None:
@@ -272,6 +279,7 @@ def test_cmd_publish_leaves_the_status_alone_on_an_inconclusive_result(
 ) -> None:
     monkeypatch.setattr(fork_check, "root", lambda: tmp_path)
     sid = "20261001-100000-abc"
+    _bare_snapshot(tmp_path, sid)
     fork_check.set_status(sid, "inconclusive", "no model recorded")
     results_dir = tmp_path / "results" / sid
     results_dir.mkdir(parents=True)

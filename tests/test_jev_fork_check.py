@@ -56,6 +56,9 @@ def test_external_actions_name_pushes_prs_deploys_and_mcp_writes() -> None:
         "gh api -X POST repos/acme/shop/issues",
         "gh api repos/acme/shop/issues -f title=bug",
         "aws s3 cp build s3://bucket/ --recursive",
+        "cd infra && AWS_PROFILE=prod aws s3 ls",
+        "make dist | aws s3 cp - s3://bucket/dist.tar",
+        "uv run pytest\naws lambda invoke --function-name x out.json",
     ],
 )
 def test_external_actions_catch_the_common_writing_forms(command: str) -> None:
@@ -75,6 +78,12 @@ def test_external_actions_catch_the_common_writing_forms(command: str) -> None:
         "gh api repos/acme/shop",
         "gh api -X GET search/issues -f q=bug",
         "gh api --method=get repos/acme/shop",
+        # N4: curl's flags are case-sensitive, and aws counts only as a command.
+        "curl -D headers.txt https://example.org/api",
+        "curl -f https://example.org/api",
+        "curl -x http://proxy:8080 https://example.org/api",
+        "git commit -m 'bump AWS region'",
+        "grep -rn aws src/",
     ],
 )
 def test_external_actions_leave_reads_alone(command: str) -> None:

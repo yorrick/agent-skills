@@ -37,13 +37,17 @@ EXTERNAL_SHELL = re.compile(
     r"|\bgh\s+api\b(?!.*(?:-X|--method)\s*=?\s*['\"]?GET\b).*\s(?:-f|-F|--field|--raw-field|--input)\b"
     r"|\bvercel\b|\bsupabase\s+(db\s+push|functions\s+deploy)|\bpulumi\s+up\b|\bterraform\s+apply\b"
     # curl with a writing method, or with a body (a POST by default)
-    r"|\bcurl\b.*(?:-X|--request)\s*=?\s*['\"]?(POST|PUT|PATCH|DELETE)"
-    r"|\bcurl\b.*\s(?:-d|--data(?:-raw|-binary|-urlencode)?|--json|-F|--form)\b"
+    # (flags case-sensitive: `-D` dumps headers, `-f` fails quietly, `-x` is a proxy)
+    r"|\bcurl\b.*(?-i:-X|--request)\s*=?\s*['\"]?(POST|PUT|PATCH|DELETE)"
+    r"|\bcurl\b.*\s(?-i:-d|--data(?:-raw|-binary|-urlencode)?|--json|-F|--form)\b"
     # httpie: a writing method, or a data item (`k=v`, `k:=json`) that makes it a POST
     r"|\bhttps?\s+(POST|PUT|PATCH|DELETE)\b"
     r"|\bhttps?\s+(?!(?:GET|HEAD|OPTIONS)\b)[^|;&\n]*?\s[\w.\[\]@-]+:?=(?!=)"
-    r"|\baws\s+[a-z]|\bnpm\s+publish\b|\bdeploy\b",
-    re.IGNORECASE,
+    # any aws command, but only where a command starts: a line start or after ;,
+    # &&, || or |, past any VAR=value assignments (never "AWS" in a message)
+    r"|(?:^|;|&&|\|\|?)\s*(?:[A-Za-z_]\w*=\S*\s+)*(?-i:aws)\s+[a-z]"
+    r"|\bnpm\s+publish\b|\bdeploy\b",
+    re.IGNORECASE | re.MULTILINE,
 )
 # Reason: an MCP tool is listed unless its name says it only reads; the user decides.
 READ_ONLY_MCP = re.compile(r"__(get|list|search|read|query_logs|fetch|describe|view|find)[_a-z]*$", re.IGNORECASE)

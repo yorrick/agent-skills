@@ -341,6 +341,12 @@ def test_the_period_starts_when_capture_started_if_known() -> None:
     points = [point(1.0, 0.8)]  # captured at 10:00
     assert report.period_events(events, points) == [during]
     assert report.period_events(events, points, "2026-10-01T08:00:00+00:00") == [early, during]
+    # N3: the earlier of the two starts the period, so a capture_started set after
+    # the first scored job never drops the calls in between.
+    assert report.period_events(events, points, "2026-10-01T10:30:00+00:00") == [during]
+    between = {"version": 3, "ts": "2026-10-01T10:15:00+00:00", "cost": 0.1}
+    later_points = [point(1.0, 0.8), {**point(1.0, 0.8), "meta": {"id": "y", "created": "2026-10-01T11:00:00+00:00"}}]
+    assert report.period_events([between], later_points, "2026-10-01T10:30:00+00:00") == [between]
     # check_report counts the same period: 0.8 + 1.0 + 0.5 delegate against 1.0 keep.
     text, _ = report.check_report(points, events, [], [], capture_started="2026-10-01T08:00:00+00:00")
     assert "delegate $2.30 with Jev's cost over the period included" in text

@@ -38,13 +38,15 @@ def turn_after(entries: list[dict], sha: str, near: str | None = None) -> list[d
 
 
 def period_events(events: list[dict], points: list[dict], started: str | None = None) -> list[dict]:
-    """Every cache-aware hook event of the check, from `started` (when capture mode
-    was set, so Jev's calls before the first scored job count too) or, without it,
-    from the first scored job's capture, to the last one's plus a minute: the last
-    hook logs its event just after its snapshot."""
+    """Every cache-aware hook event of the check, from whichever came first of
+    `started` (when capture mode was set, so Jev's calls before the first scored
+    job count too) and the first scored job's capture, to the last one's plus a
+    minute: the last hook logs its event just after its snapshot."""
     if not points:
         return []
-    first = datetime.fromisoformat(started or points[0]["meta"]["created"])
+    first = datetime.fromisoformat(points[0]["meta"]["created"])
+    if started:
+        first = min(first, datetime.fromisoformat(started))
     last = datetime.fromisoformat(points[-1]["meta"]["created"]) + timedelta(seconds=60)
     return [e for e in events if e.get("version") == 3 and (t := _when(str(e.get("ts", "")))) and first <= t <= last]
 

@@ -243,6 +243,25 @@ def test_marking_a_stuck_job_inconclusive_frees_its_slot(
     assert "20261001-110000-c" in out
 
 
+def test_a_judged_job_stays_scored_whatever_it_is_marked_later(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """N2 (Ruling T13c): a result and a verdict count as scored whatever the later
+    status or marks, and no later job takes the slot."""
+    monkeypatch.setenv("JEV_ROUTER_HOME", str(tmp_path))
+    monkeypatch.setattr(report, "POINTS", 2)
+    _judged("20261001-090000-a", "2026-10-01T09:00:00+00:00")
+    assert fork_check.main(["mark", "20261001-090000-a", "skip", "--reason", "second thoughts"]) == 0
+    _judged("20261001-100000-b", "2026-10-01T10:00:00+00:00")
+    assert fork_check.main(["mark", "20261001-100000-b", "inconclusive", "--reason", "looked odd"]) == 0
+    _judged("20261001-110000-c", "2026-10-01T11:00:00+00:00")
+    assert fork_check.main(["report"]) == 0
+    out = capsys.readouterr().out
+    assert "Jobs judged: 2 of 2. Skipped by you: 0. Inconclusive: 0." in out
+    assert "20261001-090000-a" in out and "20261001-100000-b" in out
+    assert "20261001-110000-c" not in out
+
+
 def test_skipped_and_inconclusive_are_counted_only_within_the_window(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

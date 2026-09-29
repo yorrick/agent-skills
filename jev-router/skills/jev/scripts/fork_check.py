@@ -328,12 +328,14 @@ def cmd_report() -> int:
     """The first 20 eligible jobs in capture order (Ruling T13c): jobs ever marked
     safe and never replayed as a trial (the trial flag comes from the status
     history, so it holds even for a trial replay that raised). Each job lands in
-    exactly one place: inconclusive when its status or its result says so (a
-    replay, a restore that refused, or `mark ID inconclusive`); scored when it
-    has a result and a verdict, whatever its later status (a publish that then
-    failed does not undo a job the judge already scored); waiting otherwise, so
-    a later job never silently takes an earlier one's slot. Skipped and
-    inconclusive jobs are counted and listed only up to the 20th eligible job."""
+    exactly one place: scored when it has a result and a verdict, whatever its
+    later status or marks (a failed publish, or a later `skip` or
+    `inconclusive` mark, never undoes a job the judge already scored);
+    otherwise skipped when its latest mark is `skip`; inconclusive when its
+    status or its result says so (a replay, a restore that refused, or `mark ID
+    inconclusive`); waiting otherwise, so a later job never silently takes an
+    earlier one's slot. Skipped and inconclusive jobs are counted and listed
+    only up to the 20th eligible job."""
     history = _status_history()
     done = statuses()
     ever_safe = {entry["id"] for entry in history if entry["status"] == "safe"}
@@ -346,28 +348,30 @@ def cmd_report() -> int:
         if len(points) + len(waiting) == report.POINTS:
             break
         sid = snap.name
+        if sid in trials:
+            continue
         status = done.get(sid, {})
+        out = root() / "results" / sid
+        result = json.loads((out / "result.json").read_text()) if (out / "result.json").exists() else None
+        if sid in ever_safe and result is not None and (out / "verdict.json").exists():
+            points.append(
+                {
+                    "meta": json.loads((snap / "meta.json").read_text()),
+                    "result": result,
+                    "verdict": json.loads((out / "verdict.json").read_text()),
+                }
+            )
+            continue
         if status.get("status") == "skip":
             skipped.append((sid, status.get("reason", "")))
             continue
-        if sid not in ever_safe or sid in trials:
+        if sid not in ever_safe:
             continue
-        out = root() / "results" / sid
-        result = json.loads((out / "result.json").read_text()) if (out / "result.json").exists() else None
         if status.get("status") == "inconclusive" or (result is not None and result.get("inconclusive")):
             reason = status.get("reason") or (result or {}).get("reason", "")
             inconclusive.append((sid, reason))
             continue
-        if result is None or status.get("status") == "replay_failed" or not (out / "verdict.json").exists():
-            waiting.append(sid)
-            continue
-        points.append(
-            {
-                "meta": json.loads((snap / "meta.json").read_text()),
-                "result": result,
-                "verdict": json.loads((out / "verdict.json").read_text()),
-            }
-        )
+        waiting.append(sid)
     events = jev_router.read_log()
     started = jev_router.load_config().get("capture_started")
     period = report.period_events(events, points, started)

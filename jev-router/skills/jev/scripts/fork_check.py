@@ -183,6 +183,7 @@ def cmd_check() -> int:
 
 def cmd_replay(sid: str | None, trial: bool) -> int:
     import random
+    import shutil
 
     import replay
 
@@ -197,6 +198,10 @@ def cmd_replay(sid: str | None, trial: bool) -> int:
         print(f"{sid} is not marked safe; mark it first.")
         return 1
     snap, out = root() / "snapshots" / sid, root() / "results" / sid
+    # Reason: a previous run that ended in replay_failed may have left partial
+    # clones here; restore()'s dest.mkdir(parents=True) would fail forever
+    # otherwise, permanently jamming this snapshot.
+    shutil.rmtree(out, ignore_errors=True)
     try:
         configured = os.environ.get("CLAUDE_CONFIG_DIR")
         claude_home = Path(configured) if configured else replay.DEFAULT_CLAUDE_HOME
@@ -205,15 +210,26 @@ def cmd_replay(sid: str | None, trial: bool) -> int:
         set_status(sid, "inconclusive", str(exc))
         print(f"{sid}: inconclusive ({exc})")
         return 0
+    except Exception as exc:
+        set_status(sid, "replay_failed", str(exc)[:200])
+        print(f"{sid}: replay failed ({exc})")
+        return 1
     result["trial"] = trial
+    out.mkdir(parents=True, exist_ok=True)
     (out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
-    reason = "never warm, or a call had no price" if result["inconclusive"] else ""
+    reason = result.get("reason", "")
     set_status(sid, "inconclusive" if result["inconclusive"] else "replayed", reason)
+    if reason:
+        print(f"{sid}: inconclusive ({reason})")
+    if reason == "a replay used a path into the real repository":
+        print(f"WARNING: {sid} replay used a path into the real repository; discarded.")
     for name in result["order"]:
-        s = result["sides"][name]
+        s = result["sides"].get(name)
+        if s is None:
+            continue
         print(
-            f"{name}: ${s['cost']:.2f}, {s['wall_seconds']:.0f} s, {s['calls']} calls, warm={s['warm']}"
-            + ("" if name == "keep" else f", handed to the helper={s['delegated']}")
+            f"{name}: ${s.get('cost', 0.0):.2f}, {s.get('wall_seconds', 0.0):.0f} s, {s.get('calls', 0)} calls, "
+            f"warm={s['warm']}" + ("" if name == "keep" else f", handed to the helper={s.get('delegated', False)}")
         )
     return 0
 
@@ -229,8 +245,9 @@ def main(argv: list[str] | None = None) -> int:
     mark.add_argument("mark", choices=("safe", "skip"))
     mark.add_argument("--reason", default="")
     rep = sub.add_parser("replay")
-    rep.add_argument("id", nargs="?")
-    rep.add_argument("--next", action="store_true")
+    target = rep.add_mutually_exclusive_group(required=True)
+    target.add_argument("id", nargs="?")
+    target.add_argument("--next", action="store_true")
     rep.add_argument("--trial", action="store_true")
     args = parser.parse_args(argv)
     if args.command == "shadow":

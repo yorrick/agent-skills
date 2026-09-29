@@ -7,6 +7,7 @@ import os
 import random
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -230,6 +231,11 @@ DEFAULT_CLAUDE_HOME = Path.home() / ".claude"
 WARMUP = "Reply with the single word ok and do nothing else."
 ATTEMPTS = 3
 TIMEOUT_SECONDS = 4 * 3600
+LARGE_CONTEXT = 200_000
+# Reason: a path is only ever rewritten (or flagged as leaked) up to this
+# boundary, so a shorter checkout path never matches inside a longer,
+# unrelated one (`/x/agent-skills` must not touch `/x/agent-skills-other`).
+_PATH_BOUNDARY = r'(?=[/"\s\\]|$)'
 
 
 def project_dir(claude_home: Path, cwd: Path) -> Path:
@@ -246,21 +252,65 @@ def workdir(meta: dict, clone: Path) -> Path:
         return clone
 
 
+def _worktree_paths(meta: dict) -> list[str]:
+    """The checkout's own toplevel, plus (for a linked worktree) the main
+    worktree's path: the parent of `git rev-parse --git-common-dir` resolved
+    against the toplevel. Toplevel first, since the main path is usually a
+    prefix of it and must be replaced second so it cannot swallow a
+    toplevel-only occurrence first."""
+    top = meta["toplevel"]
+    common = run("git", "-C", top, "rev-parse", "--git-common-dir").strip()
+    common_dir = Path(common) if Path(common).is_absolute() else Path(top) / common
+    main = str(common_dir.parent.resolve())
+    return [top] if main == top else [top, main]
+
+
+def _path_spellings(path: str) -> list[str]:
+    """`path` itself, plus its `~/...` and `$HOME/...` spellings when it sits
+    under the home directory."""
+    spellings = [path]
+    home = str(Path.home())
+    if path == home or path.startswith(home + "/"):
+        rest = path[len(home) :]
+        spellings += ["~" + rest, "$HOME" + rest]
+    return spellings
+
+
+def _real_path_forms(meta: dict) -> list[str]:
+    """The real checkout's own absolute and `~` spellings (never the `$HOME`
+    form, and never the clone): what a leaked tool-call input would still
+    contain if a rewrite were incomplete."""
+    return [form for top in _worktree_paths(meta) for form in _path_spellings(top)[:2]]
+
+
+def _rewrite_real_paths(text: str, meta: dict, clone: Path) -> str:
+    """Every spelling of the checkout's own path, and of the main worktree's
+    path when this is a linked worktree, rewritten to `clone`, matched only on
+    a path boundary."""
+    replacement = str(clone)
+    for top in _worktree_paths(meta):
+        for form in _path_spellings(top):
+            text = re.sub(re.escape(form) + _PATH_BOUNDARY, lambda _m: replacement, text)
+    return text
+
+
 def install_session(snap: Path, clone: Path, claude_home: Path) -> str:
     """Copy the snapshot's conversation in as a new session of the clone.
 
-    Every mention of the original checkout's path becomes the clone's path, so an
-    agent that reuses an absolute path from the conversation edits the clone,
-    never the user's real working copy."""
+    Every mention of the original checkout's path (absolute, `~/...`,
+    `$HOME/...`, and the main worktree's own path if this is a linked
+    worktree) becomes the clone's path, so an agent that reuses one of those
+    paths from the conversation edits the clone, never the user's real
+    working copy."""
     meta = json.loads((snap / "meta.json").read_text())
     new = str(uuid.uuid4())
     lines = []
-    for line in (snap / "transcript.jsonl").read_text().splitlines():
-        line = line.replace(meta["toplevel"], str(clone))
+    for raw_line in (snap / "transcript.jsonl").read_text().splitlines():
+        line = _rewrite_real_paths(raw_line, meta, clone)
         try:
             entry = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+        except json.JSONDecodeError as exc:
+            raise Inconclusive(f"a transcript line no longer parsed after rewriting its paths: {exc}") from exc
         if isinstance(entry, dict) and "sessionId" in entry:
             entry["sessionId"] = new
         lines.append(json.dumps(entry))
@@ -270,42 +320,94 @@ def install_session(snap: Path, clone: Path, claude_home: Path) -> str:
     return new
 
 
+def _leaked_real_path(claude_home: Path, cwd: Path, session_id: str, forms: list[str]) -> bool:
+    """Whether any tool call in `session_id`'s main or subagent transcripts
+    still names the real checkout, by any of `forms`. A hit means the rewrite
+    in `install_session` was incomplete and, since replays run with bypass
+    permissions, the job may have edited the user's real working copy."""
+    if not session_id or not forms:
+        return False
+    pdir = project_dir(claude_home, cwd)
+    paths = [pdir / f"{session_id}.jsonl", *sorted((pdir / session_id / "subagents").glob("*.jsonl"))]
+    for path in paths:
+        if not path.exists():
+            continue
+        for entry in usage.read_entries(path):
+            if entry.get("type") != "assistant":
+                continue
+            for block in (entry.get("message") or {}).get("content") or []:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    text = json.dumps(block.get("input") or {})
+                    if any(form in text for form in forms):
+                        return True
+    return False
+
+
 def run_claude(
-    clone: Path, session_id: str, prompt: str, env_extra: dict, claude_home: Path
+    clone: Path, session_id: str, prompt: str, env_extra: dict, claude_home: Path, model: str
 ) -> tuple[dict, float, int]:
-    """One headless fork of the session, with the same access as the user's own session."""
+    """One headless fork of the session, with the same access as the user's own
+    session. The prompt is the last argument, after `--`, so a message that
+    starts with `-` is never parsed as an option. A key in `env_extra` mapped
+    to None is removed from the environment instead of set, so a side can
+    strip a variable it must never inherit."""
     cmd = [
         os.environ.get("JEV_FORK_CHECK_CLAUDE", "claude"),
         "--resume",
         session_id,
         "--fork-session",
         "-p",
-        prompt,
         "--output-format",
         "json",
         "--permission-mode",
         "bypassPermissions",
+        "--model",
+        model,
+        "--",
+        prompt,
     ]
-    env = {**os.environ, "JEV_ROUTER": "off", **env_extra}
+    env = dict(os.environ)
+    env["JEV_ROUTER"] = "off"
+    for key, value in env_extra.items():
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = value
     # Reason: setting CLAUDE_CONFIG_DIR, even to the default, moves where Claude Code
     # reads its settings and MCP servers, so it is set only for a test home.
     if claude_home != DEFAULT_CLAUDE_HOME:
         env["CLAUDE_CONFIG_DIR"] = str(claude_home)
     started = time.monotonic()
-    proc = subprocess.run(cmd, cwd=clone, env=env, capture_output=True, text=True, timeout=TIMEOUT_SECONDS)
+    # Reason: a new session (not just a new process group) is what lets a timed-out
+    # run be killed as a whole, so an MCP or dev server the agent started as a child
+    # of it does not keep running after `claude` itself is gone.
+    proc = subprocess.Popen(
+        cmd, cwd=clone, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True
+    )
+    try:
+        stdout, _ = proc.communicate(timeout=TIMEOUT_SECONDS)
+        code = proc.returncode
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        stdout, code = "", -1
     wall = time.monotonic() - started
     try:
-        data = json.loads(proc.stdout)
+        data = json.loads(stdout)
     except json.JSONDecodeError:
         data = {}
-    return (data if isinstance(data, dict) else {}), wall, proc.returncode
+    return (data if isinstance(data, dict) else {}), wall, code
 
 
 def measure(claude_home: Path, clone: Path, session_id: str, prompt: str, helper: str) -> dict:
     pdir = project_dir(claude_home, clone)
     path = pdir / f"{session_id}.jsonl"
     entries = usage.read_entries(path) if session_id and path.exists() else []
-    starts = [i for i, e in enumerate(entries) if usage.is_typed(e) and usage.entry_text(e) == prompt.strip()]
+    target = prompt.strip()
+    # Reason: a real headless prompt carries no `origin` (that field marks a
+    # person typing in an interactive session), so the prompt turn is found by
+    # its type and text alone, not `usage.is_typed`.
+    starts = [i for i, e in enumerate(entries) if e.get("type") == "user" and usage.entry_text(e) == target]
     turn = entries[starts[-1] :] if starts else []
     main = usage.calls(turn)
     subs = (
@@ -338,46 +440,88 @@ def measure(claude_home: Path, clone: Path, session_id: str, prompt: str, helper
     }
 
 
+def _replay_side(
+    snap: Path, work: Path, claude_home: Path, meta: dict, prompt: str, model: str, name: str, position: int
+) -> tuple[dict, str]:
+    """Run one side (keep or delegate) up to ATTEMPTS times, each in a fresh
+    clone, until the warm-up proves the cache is hot and the job neither
+    crashes nor touches the real checkout. Returns the last attempt's result
+    and, if the side never became scoreable, why."""
+    note_env = (
+        {"JEV_ROUTER_NOTE_FILE": str(snap / "note.txt")} if name == "delegate" else {"JEV_ROUTER_NOTE_FILE": None}
+    )
+    leak_forms = _real_path_forms(meta)
+    side: dict = {}
+    reason = ""
+    for attempt in range(1, ATTEMPTS + 1):
+        # Reason: folders are named by run order, which is random, so a path
+        # never tells the judge which side made a result.
+        dest = work / f"side-{position}" / f"attempt-{attempt}"
+        clone = restore(snap, dest)
+        sid = install_session(snap, clone, claude_home)
+        cwd = workdir(meta, clone)
+        restored = dest / "restore.json"
+        skipped = json.loads(restored.read_text())["skipped"] if restored.exists() else []
+        side = {"attempt": attempt, "clone": str(clone), "warm": False, "skipped": skipped}
+        before_status = run("git", "-C", str(clone), "status", "--porcelain", "-uall")
+        before_head = run("git", "-C", str(clone), "rev-parse", "HEAD").strip()
+        # Reason: the warm-up forks the same conversation with the same tools
+        # and system prompt, so the side's first call can read it from cache.
+        warm_data, _, warm_code = run_claude(cwd, sid, WARMUP, note_env, claude_home, model)
+        if warm_code != 0 or warm_data.get("is_error"):
+            reason = "crashed"
+            continue
+        after_status = run("git", "-C", str(clone), "status", "--porcelain", "-uall")
+        after_head = run("git", "-C", str(clone), "rev-parse", "HEAD").strip()
+        if after_status != before_status or after_head != before_head:
+            reason = "warm-up changed the clone"
+            continue
+        warm = measure(claude_home, cwd, str(warm_data.get("session_id") or ""), WARMUP, "")
+        if warm["calls"] == 0 or warm["unpriced_calls"]:
+            reason = "never warm"
+            continue
+        data, wall, code = run_claude(cwd, sid, prompt, note_env, claude_home, model)
+        if code != 0 or data.get("is_error"):
+            reason = "crashed"
+            continue
+        session_id = str(data.get("session_id") or "")
+        if _leaked_real_path(claude_home, cwd, session_id, leak_forms):
+            return side, "a replay used a path into the real repository"
+        m = measure(claude_home, cwd, session_id, prompt, meta["helper"])
+        side = {
+            "attempt": attempt,
+            "clone": str(clone),
+            "session_id": data.get("session_id"),
+            "wall_seconds": round(wall, 1),
+            "exit_code": code,
+            "warm": True,
+            "skipped": skipped,
+            **m,
+        }
+        return side, ""
+    return side, reason
+
+
 def replay_pair(snap: Path, work: Path, claude_home: Path, rng: random.Random) -> dict:
     """Keep and delegate, one after the other in random order, each in a fresh clone
-    with a verified warm cache. A cold side is rerun in a new clone."""
+    with a verified warm cache. Once one side is inconclusive, the other never runs:
+    it cannot change the answer, and every attempt costs real time and money."""
     meta = json.loads((snap / "meta.json").read_text())
-    prompt = (snap / "message.txt").read_text()
     order = ["keep", "delegate"]
     rng.shuffle(order)
+    if not meta.get("model"):
+        return {"id": meta["id"], "order": order, "sides": {}, "inconclusive": True, "reason": "no model recorded"}
+    model = meta["model"] + ("[1m]" if (meta.get("context") or 0) > LARGE_CONTEXT else "")
+    prompt = (snap / "message.txt").read_text()
     sides: dict[str, dict] = {}
+    reason = ""
     for position, name in enumerate(order, 1):
-        side: dict = {}
-        for attempt in range(1, ATTEMPTS + 1):
-            # Reason: folders are named by run order, which is random, so a path
-            # never tells the judge which side made a result.
-            dest = work / f"side-{position}" / f"attempt-{attempt}"
-            clone = restore(snap, dest)
-            sid = install_session(snap, clone, claude_home)
-            cwd = workdir(meta, clone)
-            # Reason: the warm-up forks the same conversation with the same tools
-            # and system prompt, so the side's first call can read it from cache.
-            warm_data, _, _ = run_claude(cwd, sid, WARMUP, {}, claude_home)
-            warm = measure(claude_home, cwd, str(warm_data.get("session_id") or ""), WARMUP, "")
-            extra = {"JEV_ROUTER_NOTE_FILE": str(snap / "note.txt")} if name == "delegate" else {}
-            data, wall, code = run_claude(cwd, sid, prompt, extra, claude_home)
-            m = measure(claude_home, cwd, str(data.get("session_id") or ""), prompt, meta["helper"])
-            is_warm = warm["calls"] > 0 and m["first_cache_read"] >= 0.99 * warm["first_context"] - 2_000
-            restored = dest / "restore.json"
-            skipped = json.loads(restored.read_text())["skipped"] if restored.exists() else []
-            side = {
-                "attempt": attempt,
-                "clone": str(clone),
-                "session_id": data.get("session_id"),
-                "wall_seconds": round(wall, 1),
-                "exit_code": code,
-                "warm": is_warm,
-                "skipped": skipped,
-                **m,
-            }
-            if is_warm:
-                break
+        side, side_reason = _replay_side(snap, work, claude_home, meta, prompt, model, name, position)
         sides[name] = side
+        if side_reason:
+            reason = side_reason
+            break
     # Reason: a call with no price would count as free and flatter one side.
-    comparable = all(s["warm"] and not s["unpriced_calls"] for s in sides.values())
-    return {"id": meta["id"], "order": order, "sides": sides, "inconclusive": not comparable}
+    if not reason and any(s.get("unpriced_calls") for s in sides.values()):
+        reason = "unpriced"
+    return {"id": meta["id"], "order": order, "sides": sides, "inconclusive": bool(reason), "reason": reason}

@@ -15,6 +15,7 @@ sys.path.insert(0, str(SCRIPTS))
 import fork_check  # noqa: E402
 import replay  # noqa: E402
 import snapshot  # noqa: E402
+import usage  # noqa: E402
 from test_jev_snapshot import EVENT, git, payload, write  # noqa: E402
 from test_jev_usage import assistant, typed  # noqa: E402
 
@@ -270,6 +271,14 @@ def fake_claude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path / "claude-home"
 
 
+def calls_log(tmp_path: Path) -> list[dict]:
+    return [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
+
+
+def prompt_of(call: dict) -> str:
+    return call["args"][call["args"].index("--") + 1]
+
+
 def test_install_session_rewrites_paths_and_ids(tmp_path: Path, repo: Path, snap: Path) -> None:
     clone = replay.restore(snap, tmp_path / "r")
     sid = replay.install_session(snap, clone, tmp_path / "claude-home")
@@ -281,7 +290,7 @@ def test_install_session_rewrites_paths_and_ids(tmp_path: Path, repo: Path, snap
 
 def test_pair_runs_both_sides_and_only_delegate_gets_the_note(tmp_path: Path, snap: Path, fake_claude: Path) -> None:
     result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
-    assert not result["inconclusive"]
+    assert not result["inconclusive"] and result["reason"] == ""
     keep, delegate = result["sides"]["keep"], result["sides"]["delegate"]
     assert keep["warm"] and delegate["warm"]
     assert delegate["delegated"] is True and keep["delegated"] is False
@@ -290,17 +299,263 @@ def test_pair_runs_both_sides_and_only_delegate_gets_the_note(tmp_path: Path, sn
     assert keep["skipped"] == []
     under_work = [str(Path(side["clone"]).relative_to(tmp_path / "work")) for side in (keep, delegate)]
     assert not any("keep" in p or "delegate" in p for p in under_work)
-    calls = [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
+    calls = calls_log(tmp_path)
     assert all(c["router"] == "off" for c in calls)
-    assert [c["note"] is not None for c in calls if not c["args"][c["args"].index("-p") + 1].startswith("Reply")] == [
+    assert [c["note"] is not None for c in calls if not prompt_of(c).startswith("Reply")] == [
         name == "delegate" for name in result["order"]
     ]
+    # Ruling T11e-i: the subagent's call is counted in the delegate side's cost, not
+    # just its call count.
+    p = usage.load_prices()["claude-opus-5-5"]
+    main_cost = 5 * p.inp + 100_000 * p.read + 200 * p.w1h + 50 * p.out
+    sub_cost = 5 * p.inp + 25_000 * p.w1h + 500 * p.out
+    assert keep["cost"] == pytest.approx(main_cost)
+    assert delegate["cost"] == pytest.approx(main_cost + sub_cost)
 
 
-def test_cold_side_is_retried_then_inconclusive(
+def test_model_is_pinned_with_the_1m_suffix_for_a_large_context(tmp_path: Path, snap: Path, fake_claude: Path) -> None:
+    """Ruling T11b: EVENT's context (803,010) is over the 1m threshold, so every
+    call, warm-up and job alike, must be pinned to the snapshot's own model with
+    the [1m] suffix, not whatever the replay environment's settings would pick."""
+    replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    calls = calls_log(tmp_path)
+    assert calls
+    for c in calls:
+        assert "--model" in c["args"]
+        assert c["args"][c["args"].index("--model") + 1] == "claude-opus-5-5[1m]"
+
+
+def test_missing_model_makes_the_pair_inconclusive_without_running_anything(
+    tmp_path: Path, repo: Path, fake_claude: Path
+) -> None:
+    event = {k: v for k, v in EVENT.items() if k != "model"}
+    transcript = write(tmp_path / "t.jsonl", [typed("start"), assistant("r1")])
+    sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "build it", "N", event)
+    snap = tmp_path / "fc" / "snapshots" / sid
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert result["inconclusive"] and result["reason"] == "no model recorded"
+    assert result["sides"] == {}
+    assert not (tmp_path / "calls.jsonl").exists()
+
+
+def test_crashed_job_is_retried_then_inconclusive(
     tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("FAKE_CLAUDE_COLD", "1")
+    monkeypatch.setenv("FAKE_CLAUDE_CRASH", "1")
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert result["inconclusive"] and result["reason"] == "crashed"
+    # Ruling T11e-h: once the first side is inconclusive, the second never runs.
+    first = result["order"][0]
+    assert list(result["sides"]) == [first]
+    assert result["sides"][first]["attempt"] == replay.ATTEMPTS
+
+
+def test_dirty_warmup_discards_the_attempt_and_is_retried(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FAKE_CLAUDE_DIRTY_WARMUP", "1")
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert result["inconclusive"] and result["reason"] == "warm-up changed the clone"
+    first = result["order"][0]
+    assert list(result["sides"]) == [first]
+    assert result["sides"][first]["attempt"] == replay.ATTEMPTS
+
+
+def test_cold_warmup_never_runs_the_job(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FAKE_CLAUDE_COLD_WARMUP", "1")
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert result["inconclusive"] and result["reason"] == "never warm"
+    first = result["order"][0]
+    assert list(result["sides"]) == [first]
+    assert result["sides"][first]["attempt"] == replay.ATTEMPTS
+    calls = calls_log(tmp_path)
+    assert calls and all(prompt_of(c).startswith("Reply") for c in calls)
+
+
+def test_cold_attempt_is_retried_then_the_next_attempt_is_scored(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FAKE_CLAUDE_COLD_WARMUP_ONCE", str(tmp_path / "warmup_seen"))
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert not result["inconclusive"]
+    first, second = result["order"]
+    assert result["sides"][first]["attempt"] == 2
+    assert result["sides"][second]["attempt"] == 1
+
+
+def test_unpriced_call_makes_the_pair_inconclusive(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FAKE_CLAUDE_UNPRICED", "1")
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert result["inconclusive"] and result["reason"] == "unpriced"
+
+
+def test_leaked_real_path_makes_the_pair_inconclusive_and_stops_the_second_side(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    meta = json.loads((snap / "meta.json").read_text())
+    monkeypatch.setenv("FAKE_CLAUDE_LEAK_PATH", meta["toplevel"])
     result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
     assert result["inconclusive"]
-    assert {s["attempt"] for s in result["sides"].values()} == {replay.ATTEMPTS}
+    assert result["reason"] == "a replay used a path into the real repository"
+    assert len(result["sides"]) == 1
+
+
+def test_replay_pair_never_touches_the_real_repository(
+    tmp_path: Path, repo: Path, snap: Path, fake_claude: Path
+) -> None:
+    before_status = git(repo, "status", "--porcelain")
+    before_head = git(repo, "rev-parse", "HEAD").strip()
+    replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert git(repo, "status", "--porcelain") == before_status
+    assert git(repo, "rev-parse", "HEAD").strip() == before_head
+
+
+def test_prompt_starting_with_a_dash_is_never_parsed_as_an_option(
+    tmp_path: Path, snap: Path, fake_claude: Path
+) -> None:
+    (snap / "message.txt").write_text("- do the thing")
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert not result["inconclusive"]
+    keep = result["sides"]["keep"]
+    assert Path(keep["clone"], "RESULT.txt").read_text() == "done by keep\n"
+
+
+def test_keep_side_never_inherits_a_stray_note_file_env_var(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("JEV_ROUTER_NOTE_FILE", "/should/not/leak")
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert not result["inconclusive"]
+    calls = calls_log(tmp_path)
+    assert all(c["note"] != "/should/not/leak" for c in calls)
+    assert any(c["note"] == str(snap / "note.txt") for c in calls)
+
+
+def test_install_session_refuses_a_transcript_line_that_does_not_parse(tmp_path: Path, repo: Path) -> None:
+    transcript = write(tmp_path / "t.jsonl", [typed("start"), assistant("r1")])
+    lines = transcript.read_text().splitlines()
+    lines[0] = "not json at all"  # corrupt the earliest line; the latest stays a cut point
+    transcript.write_text("\n".join(lines) + "\n")
+    sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "build it", "N", EVENT)
+    snap = tmp_path / "fc" / "snapshots" / sid
+    clone = replay.restore(snap, tmp_path / "r")
+    with pytest.raises(replay.Inconclusive, match="no longer parsed"):
+        replay.install_session(snap, clone, tmp_path / "claude-home")
+
+
+def test_install_session_rewrites_the_main_worktree_and_home_forms_but_not_a_similar_path(
+    tmp_path: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling T11a: a session from a linked worktree also names the main checkout
+    (e.g. reading a symlinked CLAUDE.md), sometimes as `~/...`. Both must be rewritten
+    to the clone, and a merely similarly-named path must be left untouched."""
+    wt = repo / ".claude" / "worktrees" / "x"
+    git(repo, "worktree", "add", "-q", "-b", "wt", str(wt))
+    real_repo, real_wt = repo.resolve(), wt.resolve()
+    # Reason: this must NOT be rewritten, even though it shares real_repo's own
+    # path as a literal text prefix.
+    other = real_repo.parent / (real_repo.name + "-other")
+    other.mkdir(parents=True, exist_ok=True)
+    home = real_repo.parent
+    tilde_repo = "~/" + real_repo.name
+    transcript = write(
+        tmp_path / "t.jsonl",
+        [
+            typed("start"),
+            assistant(
+                "r1",
+                text=(
+                    f"Edited {real_wt}/app.py; see {real_repo}/CLAUDE.md; "
+                    f"also {tilde_repo}/tilde.py; keep {other}/keep.py"
+                ),
+            ),
+        ],
+    )
+    sid = snapshot.take_snapshot(tmp_path / "fc", payload(wt, transcript), "build it", "N", EVENT)
+    snap = tmp_path / "fc" / "snapshots" / sid
+    monkeypatch.setattr(Path, "home", lambda: home)
+    clone = replay.restore(snap, tmp_path / "r")
+    new_sid = replay.install_session(snap, clone, tmp_path / "claude-home")
+    text = (replay.project_dir(tmp_path / "claude-home", clone) / f"{new_sid}.jsonl").read_text()
+    assert f"{real_wt}/app.py" not in text
+    assert f"{real_repo}/CLAUDE.md" not in text
+    assert f"{tilde_repo}/tilde.py" not in text
+    assert f"Edited {clone}/app.py" in text
+    assert f"see {clone}/CLAUDE.md" in text
+    assert f"also {clone}/tilde.py" in text
+    assert f"{other}/keep.py" in text
+
+
+def test_cmd_replay_marks_safe_replayed(tmp_path: Path, snap: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(fork_check, "root", lambda: tmp_path / "fc")
+    assert fork_check.main(["mark", snap.name, "safe"]) == 0
+    monkeypatch.setattr(
+        replay,
+        "replay_pair",
+        lambda *a, **k: {
+            "id": snap.name,
+            "order": ["keep", "delegate"],
+            "sides": {
+                "keep": {"cost": 0.1, "wall_seconds": 1.0, "calls": 1, "warm": True, "delegated": False},
+                "delegate": {"cost": 0.05, "wall_seconds": 1.0, "calls": 2, "warm": True, "delegated": True},
+            },
+            "inconclusive": False,
+            "reason": "",
+        },
+    )
+    assert fork_check.main(["replay", snap.name]) == 0
+    assert fork_check.statuses()[snap.name]["status"] == "replayed"
+
+
+def test_cmd_replay_marks_safe_inconclusive_with_reason(
+    tmp_path: Path, snap: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(fork_check, "root", lambda: tmp_path / "fc")
+    assert fork_check.main(["mark", snap.name, "safe"]) == 0
+    monkeypatch.setattr(
+        replay,
+        "replay_pair",
+        lambda *a, **k: {
+            "id": snap.name,
+            "order": ["keep"],
+            "sides": {"keep": {"attempt": 3, "clone": "x", "warm": False, "skipped": []}},
+            "inconclusive": True,
+            "reason": "crashed",
+        },
+    )
+    assert fork_check.main(["replay", snap.name]) == 0
+    status = fork_check.statuses()[snap.name]
+    assert status["status"] == "inconclusive" and status["reason"] == "crashed"
+
+
+def test_cmd_replay_marks_safe_replay_failed_and_clears_partial_results(
+    tmp_path: Path, snap: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(fork_check, "root", lambda: tmp_path / "fc")
+    assert fork_check.main(["mark", snap.name, "safe"]) == 0
+    leftover = tmp_path / "fc" / "results" / snap.name
+    leftover.mkdir(parents=True)
+    (leftover / "stray.txt").write_text("x\n")
+
+    def boom(*a: object, **k: object) -> dict:
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(replay, "replay_pair", boom)
+    assert fork_check.main(["replay", snap.name]) == 1
+    status = fork_check.statuses()[snap.name]
+    assert status["status"] == "replay_failed" and "disk full" in status["reason"]
+    assert not leftover.exists()
+
+
+def test_replay_requires_either_id_or_next() -> None:
+    with pytest.raises(SystemExit):
+        fork_check.main(["replay"])
+
+
+def test_replay_rejects_both_id_and_next() -> None:
+    with pytest.raises(SystemExit):
+        fork_check.main(["replay", "some-id", "--next"])

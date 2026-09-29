@@ -645,13 +645,24 @@ def route_cache_aware(config: dict, payload: dict, prompt: str) -> str:
     return hook_json(note) if note and mode == "live" else ""
 
 
+def is_job(prompt: str) -> bool:
+    """Slash commands and skill invocations (including `/jev off`) are
+    instructions to the harness, not jobs to size. So is a background task's
+    completion notice, which Claude Code delivers through this same hook
+    (verified: a subagent's own prompt never fires it, but its notice does)."""
+    return bool(prompt) and prompt[0] not in "/$" and not prompt.startswith(SYSTEM_TURN_PREFIXES)
+
+
 def route(harness: str, stdin: str) -> str:
     """What the hook prints: a hand-off, or '' for "carry on as if I wasn't here"."""
     # Reason: a fork-check replay must see exactly the note the live router gave
     # when the job was captured, and nothing else, so it never asks Jev again.
+    # Only for a job, like the live router: the helper's completion notice comes
+    # through this hook too, and the note again would hand the job off twice.
     note_file = os.environ.get("JEV_ROUTER_NOTE_FILE")
     if note_file:
-        return hook_json(Path(note_file).read_text()) if harness == "claude" else ""
+        prompt = str(json.loads(stdin).get("prompt") or "").strip()
+        return hook_json(Path(note_file).read_text()) if harness == "claude" and is_job(prompt) else ""
     if os.environ.get("JEV_ROUTER") == "off":
         return ""
     config = load_config()
@@ -663,11 +674,7 @@ def route(harness: str, stdin: str) -> str:
     if os.environ.get("JEV_ROUTER") != "on" and not interactive(harness, payload):
         return ""
     prompt = str(payload.get("prompt") or "").strip()
-    # Reason: slash commands and skill invocations (including `/jev off`) are
-    # instructions to the harness, not jobs to size. So is a background task's
-    # completion notice, which Claude Code delivers through this same hook
-    # (verified: a subagent's own prompt never fires it, but its notice does).
-    if not prompt or prompt[0] in "/$" or prompt.startswith(SYSTEM_TURN_PREFIXES):
+    if not is_job(prompt):
         return ""
     if harness == "claude":
         return route_cache_aware(config, payload, prompt)

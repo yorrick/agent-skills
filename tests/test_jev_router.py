@@ -324,6 +324,18 @@ def test_note_file_is_printed_verbatim_without_asking_jev(home: Path, jev: FakeJ
     assert log(home) == []
 
 
+def test_note_file_is_never_printed_for_a_notice_or_a_command(home: Path, jev: FakeJev, tmp_path: Path) -> None:
+    """Final Important 2: in the delegate replay, the helper's completion notice
+    comes through the same hook; the note again would hand the job off twice."""
+    note = tmp_path / "note.txt"
+    note.write_text("Jev router: hand this job to the `jev-router:large` subagent.")
+    env = {"JEV_ROUTER": "off", "JEV_ROUTER_NOTE_FILE": str(note)}
+    notice = "<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n</task-notification>"
+    for prompt in (notice, "/jev status", "$jev status", "   "):
+        assert hook(home, jev, harness="claude", prompt=prompt, attended="0", env=env) == ""
+    assert jev.requests == [] and log(home) == []
+
+
 # --- never in the way ----------------------------------------------------------------
 
 
@@ -389,6 +401,24 @@ def test_the_log_never_keeps_what_jev_said(home: Path, jev: FakeJev, routed: boo
         jev.raw_answers = {"size": {"type": "choice", "choice": "SECRET-PROJECT-X"}}
     hook(home, jev, prompt="rename SECRET-PROJECT-X")
     assert "SECRET" not in (home / "log.jsonl").read_text()
+
+
+@pytest.mark.parametrize("usable", [True, False])
+def test_the_claude_code_log_never_keeps_the_reply_or_what_jev_said(home: Path, jev: FakeJev, usable: bool) -> None:
+    """The version-3 path: neither the previous reply ("Ready.") nor any string
+    Jev returned reaches the event, whether or not the answer is usable."""
+    switch_on(home, jev)
+    jev.model = "customer/SECRET-PROJECT-X"
+    answers = steps_answers(3.5)
+    if not usable:
+        answers["size"]["choice"] = "SECRET-PROJECT-X"
+    jev.raw_answers = answers
+    claude_hook(home, jev, prompt="rename SECRET-PROJECT-X in the export")
+    (event,) = log(home)
+    assert event["version"] == 3
+    assert event["outcome"] == ("delegate" if usable else "error")
+    text = (home / "log.jsonl").read_text()
+    assert "SECRET" not in text and "Ready." not in text and "export" not in text
 
 
 def test_status_counts_an_answered_call_that_reported_no_cost(home: Path, jev: FakeJev) -> None:

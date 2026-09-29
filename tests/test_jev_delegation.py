@@ -51,6 +51,31 @@ def test_a_rare_very_long_job_does_not_carry_the_decision() -> None:
     assert not d.delegate
 
 
+@pytest.mark.parametrize(
+    ("keep", "delegate", "passes"),
+    [
+        # Each list is one cost per call count in the calibration sample.
+        ((1.0,) * 5, (0.75,) * 5, True),  # saving exactly $0.25 (25% of keep)
+        ((1.0,) * 5, (0.7501,) * 5, False),  # just under $0.25
+        ((20.0,) * 5, (17.0,) * 5, True),  # saving exactly 15% of keep ($3.00)
+        ((20.0,) * 5, (17.01,) * 5, False),  # just under 15%
+        ((20.0,) * 5, (10.0, 10.0, 10.0, 10.0, 20.5), True),  # loss probability exactly 20%
+        ((20.0,) * 5, (10.0, 10.0, 10.0, 20.5, 20.5), False),  # 40%
+    ],
+)
+def test_the_gates_hold_at_their_exact_boundaries(
+    monkeypatch: pytest.MonkeyPatch, keep: tuple[float, ...], delegate: tuple[float, ...], passes: bool
+) -> None:
+    """Decision D3's gates are inclusive: saving >= $0.25, saving >= 15% of the
+    expected keep cost, loss probability <= 20%. The two cost functions are
+    replaced by exact figures, keyed by the call count they are asked about."""
+    calls = (1, 2, 3, 4, 5)
+    monkeypatch.setattr(delegation, "keep_cost", lambda k, *rest: keep[k - 1])
+    monkeypatch.setattr(delegation, "delegate_cost", lambda k, *rest: delegate[k - 1])
+    d = delegation.decide(calls, 800_000, 3_000, 1_500, OPUS, OPUS, same_model=True)
+    assert d.delegate is passes
+
+
 def test_another_model_is_charged_more_work() -> None:
     same = delegation.delegate_cost(20, 300_000, 3_000, 1_500, OPUS, OPUS, 1.0)
     other = delegation.delegate_cost(20, 300_000, 3_000, 1_500, OPUS, OPUS, delegation.OTHER_MODEL_SCALE)

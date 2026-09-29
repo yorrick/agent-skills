@@ -28,15 +28,17 @@
 - The blind judge is Codex GPT-6 Sol: `codex exec -m gpt-6-sol -c model_reasoning_effort=max --disable hooks`.
 - Fork-check data lives under `config["fork_check_dir"]` (set with `mode capture --dir`); the user's is `~/work/data/jev-fork-check`. Never under `/tmp`.
 - No em dashes in any text a person reads (docs, notes, PR bodies, CLI output).
+- Code blocks favour readability: run `uv run ruff format` on changed files (the repo's PostToolUse hook does it on every edit) and wrap any line `ruff check` still reports as too long.
+- The judge runs before publishing, on untouched clones whose folder names, remotes and commits do not reveal which side is which.
 - Every task ends green on: `uv run pytest tests/ -q`, `uv run ruff check scripts/ tests/ jev-router/`, `uv run ruff format --check .`, `uv run pyright`.
 
 ## Review Focus
 
 - A session that just compacted: the context drops, so per-call deltas go negative; `added` must clip them at 0 and `context` must be the post-compaction size (Task 3 test `test_compaction_clips_negative_growth`).
 - The first message of a brand-new session has no model call in the transcript yet: the router must have no opinion and log `outcome: "no_session"` without calling Jev (Task 6 test `test_first_message_of_a_session_has_no_opinion`).
-- At UserPromptSubmit the transcript may or may not already hold the new message: the snapshot must end just before it either way (Task 7 tests `test_snapshot_cuts_the_prompt_if_already_written` and `test_snapshot_keeps_everything_if_prompt_not_written_yet`).
-- The conversation is full of the original checkout's absolute paths: a replay that reuses them would edit the user's real working copy, so the transcript copy is rewritten to the clone's path (Task 10 test `test_install_session_rewrites_paths_and_ids`).
-- A replay side whose first call does not read the shared prefix from cache is not comparable: it is rerun in a fresh clone, and after 3 cold attempts the job is inconclusive, never scored (Task 10 test `test_cold_side_is_retried_then_inconclusive`).
+- At UserPromptSubmit the transcript may or may not already hold the new message: the snapshot must end just before it either way (Task 7 tests `test_snapshot_cuts_the_prompt_if_already_written`, `test_snapshot_keeps_everything_if_prompt_not_written_yet` and `test_snapshot_keeps_an_earlier_identical_prompt`, for a repeated "continue").
+- The conversation is full of the original checkout's absolute paths: a replay that reuses them would edit the user's real working copy, so the transcript copy is rewritten to the clone's path (Task 11 test `test_install_session_rewrites_paths_and_ids`).
+- A replay side whose first call does not read the shared prefix from cache is not comparable: it is rerun in a fresh clone, and after 3 cold attempts the job is inconclusive, never scored (Task 11 test `test_cold_side_is_retried_then_inconclusive`).
 
 ## File Structure
 
@@ -170,7 +172,7 @@ git commit -m "jev-router: JEV_ROUTER on/off and the replay note file"
 - Test: `tests/test_jev_usage.py`
 
 **Interfaces:**
-- Produces: `Prices(inp, out, read, w1h, w5m)` in dollars per token; `load_prices(path: Path | None = None) -> dict[str, Prices]`; `canonical_model(model: str) -> str`; `Call(model, inp, read, w1h, w5m, out)` with `.context -> int` and `.cost(prices: dict[str, Prices]) -> float | None`; `calls(entries: list[dict], *, sidechain: bool = False) -> list[Call]`; `entry_text(entry: dict) -> str | None`; `is_typed(entry: dict) -> bool`; `read_entries(path: Path) -> list[dict]`; `assistant_text(entry: dict) -> str | None`.
+- Produces: `Prices(inp, out, read, w1h, w5m)` in dollars per token; `load_prices(path: Path | None = None) -> dict[str, Prices]`; `canonical_model(model: str) -> str`; `Call(model, inp, read, w1h, w5m, out)` with `.context -> int` and `.cost(prices: dict[str, Prices]) -> float | None`; `calls(entries: list[dict], *, sidechain: bool = False) -> list[Call]` (one per request, with the largest output count seen for it, as the study's extractor does); `entry_text(entry: dict) -> str | None`; `is_typed(entry: dict) -> bool`; `read_entries(path: Path) -> list[dict]`; `assistant_text(entry: dict) -> str | None`.
 
 - [ ] **Step 1: Write `prices.json`**
 
@@ -219,10 +221,10 @@ def typed(text: str) -> dict:
     return {"type": "user", "origin": {"kind": "human"}, "message": {"role": "user", "content": text}}
 
 
-def test_one_call_per_request_first_entry_wins() -> None:
+def test_one_call_per_request_with_its_largest_output() -> None:
     entries = [assistant("r1", out=5), assistant("r1", out=99), assistant("r2")]
     got = usage.calls(entries)
-    assert [c.out for c in got] == [5, 20]
+    assert [c.out for c in got] == [99, 20]
 
 
 def test_synthetic_and_sidechain_entries_are_not_main_calls() -> None:
@@ -285,7 +287,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 
@@ -342,9 +344,10 @@ def _int(value: object) -> int:
 
 def calls(entries: list[dict], *, sidechain: bool = False) -> list[Call]:
     """One Call per model request. Claude Code writes one entry per content block,
-    each carrying the request's usage; the first one counts, as in the study.
+    each carrying the request's usage; the inputs come from the first and the output
+    is the largest seen, exactly as the study's extractor counts them.
     `<synthetic>` entries are Claude Code's own (an error or an interrupt), not calls."""
-    seen: set[str] = set()
+    seen: dict[str, int] = {}
     found: list[Call] = []
     for entry in entries:
         if entry.get("type") != "assistant" or bool(entry.get("isSidechain")) != sidechain:
@@ -353,9 +356,15 @@ def calls(entries: list[dict], *, sidechain: bool = False) -> list[Call]:
         usage = message.get("usage")
         request = entry.get("requestId") or message.get("id")
         model = str(message.get("model") or "?")
-        if not isinstance(usage, dict) or not request or request in seen or model == "<synthetic>":
+        if not isinstance(usage, dict) or not request or model == "<synthetic>":
             continue
-        seen.add(request)
+        out = _int(usage.get("output_tokens"))
+        if request in seen:
+            i = seen[request]
+            if out > found[i].out:
+                found[i] = replace(found[i], out=out)
+            continue
+        seen[request] = len(found)
         created = _int(usage.get("cache_creation_input_tokens"))
         split = usage.get("cache_creation")
         w5m = _int(split.get("ephemeral_5m_input_tokens")) if isinstance(split, dict) else 0
@@ -366,7 +375,7 @@ def calls(entries: list[dict], *, sidechain: bool = False) -> list[Call]:
                 read=_int(usage.get("cache_read_input_tokens")),
                 w1h=max(0, created - w5m),
                 w5m=w5m,
-                out=_int(usage.get("output_tokens")),
+                out=out,
             )
         )
     return found
@@ -987,11 +996,11 @@ git commit -m "jev-router: the study's cost model with the frozen gates"
 
 **Interfaces:**
 - Consumes: `session.read_session`, `delegation.load_calibration/calls_for/decide`, `usage.load_prices`, `hook_json` (Task 1).
-- Produces: `steps_questions(tiers) -> dict`; `StepsVerdict(steps: float, size: str, probability: float)`; `parse_steps_verdict(body, tiers) -> StepsVerdict`; `delegate_note(tier: Tier, decision: delegation.Decision, context: int) -> str`; `route_cache_aware(config: dict, payload: dict, prompt: str) -> str`; `cmd_mode(mode: str, directory: str | None) -> int`; log event fields for version 3: `harness, version, mode, session_id, transcript_path, prompt_sha, outcome (no_session|timeout|error|unpriced|keep|delegate), context, model, added, output, latency_ms, answered, cost, steps, size, helper, helper_model, expected_keep, expected_saving, loss_probability, median_calls`; `ask_jev(..., state=None, questions=None)`.
+- Produces: `steps_questions(tiers) -> dict`; `StepsVerdict(steps: float, size: str, probability: float)`; `parse_steps_verdict(body, tiers) -> StepsVerdict`; `delegate_note(tier: Tier, decision: delegation.Decision, context: int) -> str`; `route_cache_aware(config: dict, payload: dict, prompt: str) -> str`; `cmd_mode(mode: str, directory: str | None) -> int`; log event fields for version 3: `harness, version, mode, session_id, transcript_path, prompt_sha, outcome (no_session|timeout|error|unpriced|keep|delegate), context, model, added, output, latency_ms, answered, cost, steps, size, helper, helper_model, expected_keep, expected_saving, loss_probability, median_calls, calls` (the call counts the decision priced: numbers only); `ask_jev(..., state=None, questions=None)`.
 
 - [ ] **Step 1: Point the 0.2.0 tests at Codex and add Claude helpers**
 
-In `tests/test_jev_router.py`: change `hook()`'s default `harness` to `"codex"` (Codex keeps 0.2.0 behaviour, and the helper already writes an interactive Codex transcript). Delete `test_confident_job_is_handed_to_the_matching_claude_helper` and `test_claude_hands_off_unless_the_session_is_certain_it_matches`: Claude no longer gets 0.2.0 hand-offs. In the remaining 0.2.0 tests, change any assertion that names a Claude helper (`jev-router:<size>`, "subagent") to the Codex form of the same hand-off (`spawn_agent`, the tier's `model_id` and effort, as `test_codex_spawns_with_the_model_and_thinking_level` already does). Keep `test_headless_claude_is_never_routed_or_sent_to_jev` (it still must pass). Then add:
+In `tests/test_jev_router.py`: change `hook()`'s default `harness` to `"codex"` (Codex keeps 0.2.0 behaviour, and the helper already writes an interactive Codex transcript). Delete `test_confident_job_is_handed_to_the_matching_claude_helper` and `test_claude_hands_off_unless_the_session_is_certain_it_matches`: Claude no longer gets 0.2.0 hand-offs. In the remaining 0.2.0 tests, change any assertion that names a Claude helper (`jev-router:<size>`, "subagent") to the Codex form of the same hand-off (`spawn_agent`, the tier's `model_id` and effort, as `test_codex_spawns_with_the_model_and_thinking_level` already does). In `test_headless_claude_is_never_routed_or_sent_to_jev`, pass `harness="claude"` explicitly (the helper's default is now Codex); it must still pass. Then add:
 
 ```python
 from test_jev_usage import assistant, typed  # noqa: E402
@@ -1022,6 +1031,7 @@ def claude_hook(home: Path, jev: FakeJev, *, prompt: str = "build the whole expo
                  env={"JEV_ROUTER_CALIBRATION": str(calibration), **(env or {})})
     assert result.returncode == 0, result.stderr
     return result.stdout
+
 
 
 def test_shadow_mode_decides_and_logs_but_tells_the_session_nothing(home: Path, jev: FakeJev) -> None:
@@ -1094,6 +1104,22 @@ def test_a_step_score_out_of_range_is_an_error(home: Path, jev: FakeJev) -> None
     assert log(home)[0]["outcome"] == "error"
 
 
+def test_a_broken_calibration_file_never_blocks_the_message(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev, mode="live")
+    jev.raw_answers = steps_answers(3.5)
+    bad = home.parent / "bad.json"
+    bad.write_text("not json")
+    assert claude_hook(home, jev, env={"JEV_ROUTER_CALIBRATION": str(bad)}) == ""
+    assert "spawn_agent" in hook(home, jev, harness="codex", env={"JEV_ROUTER_CALIBRATION": str(bad)})
+
+
+def test_shadow_log_keeps_the_priced_call_distribution(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev)
+    jev.raw_answers = steps_answers(3.5)
+    claude_hook(home, jev)
+    assert log(home)[0]["calls"] == [12, 20, 30, 40, 60]
+
+
 def test_mode_command_sets_the_mode_and_capture_dir(home: Path, jev: FakeJev, tmp_path: Path) -> None:
     result = run(home, jev, "mode", "capture", "--dir", str(tmp_path / "fc"))
     assert result.returncode == 0
@@ -1109,7 +1135,7 @@ Expected: the 0.2.0 tests pass through Codex; the new Claude tests fail (Claude 
 
 - [ ] **Step 3: Implement in `jev_router.py`**
 
-Imports (top, after the stdlib imports): `import hashlib`, and
+Imports (top, after the stdlib imports): `import functools`, `import hashlib`, and
 
 ```python
 # Reason: sibling modules, found because `uv run --script` puts this folder first on sys.path.
@@ -1133,10 +1159,19 @@ STEP_BUCKETS = [
     "11 to 30 steps: a feature, a debugging session, or a change across several files",
     "more than 30 steps: a long autonomous build, migration, review loop or investigation",
 ]
-CALIBRATION = delegation.load_calibration(
-    Path(os.environ["JEV_ROUTER_CALIBRATION"]) if os.environ.get("JEV_ROUTER_CALIBRATION") else None
-)
-PRICES = usage.load_prices()
+
+
+@functools.cache
+def calibration() -> tuple[delegation.Bin, ...]:
+    """Loaded on first use inside the guarded Claude route, so a broken file can only
+    cost that message its opinion, never block it or touch Codex and opencode."""
+    override = os.environ.get("JEV_ROUTER_CALIBRATION")
+    return delegation.load_calibration(Path(override) if override else None)
+
+
+@functools.cache
+def prices() -> dict[str, usage.Prices]:
+    return usage.load_prices()
 ```
 
 Replace `PRIVACY` with:
@@ -1254,13 +1289,14 @@ def route_cache_aware(config: dict, payload: dict, prompt: str) -> str:
     note = None
     if verdict is not None:
         tier = next(t for t in tiers if t.size == verdict.size)
-        parent, helper = PRICES.get(current.model), PRICES.get(tier.model_id)
+        parent, helper = prices().get(current.model), prices().get(tier.model_id)
         event.update(steps=verdict.steps, size=verdict.size, helper=tier.helper, helper_model=tier.model_id)
         if parent is None or helper is None:
             event["outcome"] = "unpriced"
         else:
+            sample = delegation.calls_for(calibration(), verdict.steps)
             decision = delegation.decide(
-                delegation.calls_for(CALIBRATION, verdict.steps),
+                sample,
                 current.context,
                 current.added,
                 current.output,
@@ -1274,6 +1310,7 @@ def route_cache_aware(config: dict, payload: dict, prompt: str) -> str:
                 expected_saving=round(decision.expected_saving, 4),
                 loss_probability=round(decision.loss_probability, 4),
                 median_calls=decision.median_calls,
+                calls=list(sample),
             )
             if decision.delegate:
                 note = delegate_note(tier, decision, current.context)
@@ -1392,7 +1429,7 @@ def repo(tmp_path: Path) -> Path:
     git(r, "init", "-q", "-b", "main")
     git(r, "config", "user.email", "t@example.com")
     git(r, "config", "user.name", "T")
-    (r / ".gitignore").write_text("node_modules/\n.env\n__pycache__/\n")
+    (r / ".gitignore").write_text("node_modules/\n.venv/\n.env\n__pycache__/\n")
     (r / "app.py").write_text("print('v1')\n")
     git(r, "add", ".")
     git(r, "commit", "-qm", "init")
@@ -1442,6 +1479,21 @@ def test_snapshot_keeps_everything_if_prompt_not_written_yet(tmp_path: Path, rep
     transcript = write(tmp_path / "t.jsonl", entries)
     sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "build it", "N", EVENT)
     assert (tmp_path / "fc" / "snapshots" / sid / "transcript.jsonl").read_text() == transcript.read_text()
+
+
+def test_snapshot_keeps_an_earlier_identical_prompt(tmp_path: Path, repo: Path) -> None:
+    transcript = write(tmp_path / "t.jsonl", [typed("continue"), assistant("r1", text="Done.")])
+    sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "continue", "N", EVENT)
+    assert (tmp_path / "fc" / "snapshots" / sid / "transcript.jsonl").read_text() == transcript.read_text()
+
+
+def test_fingerprint_sees_python_packages_come_and_go(repo: Path) -> None:
+    packages = repo / ".venv" / "lib" / "python3.12" / "site-packages"
+    packages.mkdir(parents=True)
+    (repo / ".venv" / "pyvenv.cfg").write_text("home = /x\n")
+    before = snapshot.ignored_fingerprint(repo)
+    (packages / "requests").mkdir()
+    assert snapshot.ignored_fingerprint(repo) != before
 
 
 def test_fingerprint_follows_dependencies_and_env_files_only(repo: Path) -> None:
@@ -1519,8 +1571,14 @@ from pathlib import Path
 import usage
 
 MAX_UNTRACKED_BYTES = 50_000_000
-DEPENDENCY_DIRS = {"node_modules": (".package-lock.json", ".modules.yaml", ".yarn-state.yml"),
-                   ".venv": ("pyvenv.cfg",), "venv": ("pyvenv.cfg",)}
+# Reason: package managers touch these when packages come and go (site-packages'
+# own modification time changes when a package directory is added or removed).
+# Cheap by design: a change inside one package that leaves them alone goes unseen.
+DEPENDENCY_DIRS = {
+    "node_modules": (".package-lock.json", ".modules.yaml", ".yarn-state.yml"),
+    ".venv": ("pyvenv.cfg", "lib/python*/site-packages"),
+    "venv": ("pyvenv.cfg", "lib/python*/site-packages"),
+}
 
 
 class SnapshotError(RuntimeError):
@@ -1539,15 +1597,21 @@ def _git_bytes(cwd: Path, *args: str) -> bytes:
 
 
 def trim_before_prompt(data: bytes, prompt: str) -> bytes:
-    """End the copy just before the message, whether or not Claude Code wrote it yet:
-    cut at the last typed entry if it is this message."""
+    """End the copy just before the message, whether or not Claude Code wrote it yet.
+
+    The message is already written only if the last typed entry is this text and no
+    model call follows it: an earlier identical message ("continue") has calls after it."""
     lines = data.splitlines(keepends=True)
     for i in range(len(lines) - 1, -1, -1):
         try:
             entry = json.loads(lines[i])
         except (json.JSONDecodeError, UnicodeDecodeError):
             continue
-        if isinstance(entry, dict) and usage.is_typed(entry):
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("type") == "assistant" and not entry.get("isSidechain"):
+            return data
+        if usage.is_typed(entry):
             return b"".join(lines[:i]) if usage.entry_text(entry) == prompt.strip() else data
     return data
 
@@ -1561,7 +1625,7 @@ def ignored_fingerprint(top: Path) -> str:
         path = top / rel
         name = path.name
         if name in DEPENDENCY_DIRS:
-            for marker in (path, *(path / m for m in DEPENDENCY_DIRS[name])):
+            for marker in (path, *(m for pattern in DEPENDENCY_DIRS[name] for m in sorted(path.glob(pattern)))):
                 if marker.exists():
                     st = marker.stat()
                     digest.update(f"{marker.relative_to(top)}\t{st.st_size}\t{st.st_mtime_ns}\n".encode())
@@ -1641,7 +1705,7 @@ git commit -m "jev-router: capture mode snapshots the jobs it would delegate"
 
 **Interfaces:**
 - Consumes: version-3 log events (Task 6), `usage`, `delegation`.
-- Produces: `report.prompt_sha(text: str) -> str`; `report.turn_after(entries: list[dict], sha: str) -> list[dict] | None`; `report.shadow_rows(events: list[dict], prices: dict) -> list[dict]` (keys `ts, outcome, steps, median_calls, real_calls, real_cost, would_lose`); `report.shadow_report(events: list[dict], prices: dict) -> str`; `fork_check.root() -> Path`; `fork_check.main(argv: list[str] | None = None) -> int` with the `shadow` subcommand.
+- Produces: `report.prompt_sha(text: str) -> str`; `report.turn_after(entries: list[dict], sha: str, near: str | None = None) -> list[dict] | None` (with `near`, the occurrence closest in time); `report.period_events(events: list[dict], points: list[dict]) -> list[dict]`; `report.shadow_rows(events: list[dict], prices: dict) -> list[dict]` (keys `ts, outcome, steps, median_calls, real_calls, real_cost, would_lose`); `report.shadow_report(events: list[dict], prices: dict) -> str`; `fork_check.root() -> Path`; `fork_check.main(argv: list[str] | None = None) -> int` with the `shadow` subcommand.
 
 - [ ] **Step 1: Write the failing tests** (`tests/test_jev_report.py`)
 
@@ -1672,6 +1736,14 @@ def event(transcript: Path, prompt: str, outcome: str = "delegate") -> dict:
 def test_turn_runs_from_the_message_to_the_next_typed_one() -> None:
     entries = [typed("a"), assistant("r1"), typed("b"), assistant("r2"), assistant("r3"), typed("c")]
     turn = report.turn_after(entries, report.prompt_sha("b"))
+    assert turn is not None and len(usage.calls(turn)) == 2
+
+
+def test_a_repeated_prompt_finds_the_turn_nearest_in_time() -> None:
+    first = {**typed("continue"), "timestamp": "2026-10-01T09:00:00Z"}
+    second = {**typed("continue"), "timestamp": "2026-10-01T10:00:00Z"}
+    entries = [first, assistant("r1"), second, assistant("r2"), assistant("r3")]
+    turn = report.turn_after(entries, report.prompt_sha("continue"), near="2026-10-01T10:00:01+00:00")
     assert turn is not None and len(usage.calls(turn)) == 2
 
 
@@ -1708,6 +1780,7 @@ from __future__ import annotations
 
 import hashlib
 import statistics
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import delegation
@@ -1719,17 +1792,41 @@ def prompt_sha(text: str) -> str:
     return hashlib.sha256(text.strip().encode()).hexdigest()[:16]
 
 
-def turn_after(entries: list[dict], sha: str) -> list[dict] | None:
-    """From the typed message with this hash to the next typed message."""
-    start = None
-    for i, entry in enumerate(entries):
-        if not usage.is_typed(entry):
-            continue
-        if start is not None:
-            return entries[start:i]
-        if prompt_sha(usage.entry_text(entry) or "") == sha:
-            start = i
-    return entries[start:] if start is not None else None
+def _when(stamp: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def turn_after(entries: list[dict], sha: str, near: str | None = None) -> list[dict] | None:
+    """From the typed message with this hash to the next typed message. With `near`,
+    the occurrence closest in time to it, so a repeated "continue" finds its own turn."""
+    typed_at = [i for i, e in enumerate(entries) if usage.is_typed(e)]
+    matches = [i for i in typed_at if prompt_sha(usage.entry_text(entries[i]) or "") == sha]
+    if not matches:
+        return None
+    start = matches[0]
+    target = _when(near) if near else None
+    if target is not None:
+
+        def distance(i: int) -> float:
+            when = _when(str(entries[i].get("timestamp", "")))
+            return abs((when - target).total_seconds()) if when else float("inf")
+
+        start = min(matches, key=distance)
+    end = next((i for i in typed_at if i > start), len(entries))
+    return entries[start:end]
+
+
+def period_events(events: list[dict], points: list[dict]) -> list[dict]:
+    """Every cache-aware hook event from the first scored job's capture to the last
+    one's, plus a minute: the last hook logs its event just after its snapshot."""
+    if not points:
+        return []
+    first = datetime.fromisoformat(points[0]["meta"]["created"])
+    last = datetime.fromisoformat(points[-1]["meta"]["created"]) + timedelta(seconds=60)
+    return [e for e in events if e.get("version") == 3 and (t := _when(str(e.get("ts", "")))) and first <= t <= last]
 
 
 def shadow_rows(events: list[dict], prices: dict) -> list[dict]:
@@ -1741,7 +1838,7 @@ def shadow_rows(events: list[dict], prices: dict) -> list[dict]:
         path = e["transcript_path"]
         if path not in cache:
             cache[path] = usage.read_entries(Path(path)) if Path(path).exists() else []
-        turn = turn_after(cache[path], e["prompt_sha"])
+        turn = turn_after(cache[path], e["prompt_sha"], near=e.get("ts"))
         if turn is None:
             continue
         calls = usage.calls(turn)
@@ -1805,8 +1902,8 @@ def shadow_report(events: list[dict], prices: dict) -> str:
   fork_check.py check                      restore-check new snapshots without running anything
   fork_check.py mark ID (safe|skip) [--reason TEXT]
   fork_check.py replay (ID | --next) [--trial]
+  fork_check.py judge ID                   blind Codex judge (before publishing)
   fork_check.py publish ID                 push both results to a private copy and open the comparison PR
-  fork_check.py judge ID                   blind Codex judge
   fork_check.py report                     the fork check's pass or fail over 20 jobs
 """
 
@@ -2035,8 +2132,10 @@ def restore(snap: Path, dest: Path, *, copy_ignored: bool = True) -> Path:
 
 ```python
 def cmd_check() -> int:
-    """Restore every snapshot not yet checked, without running anything, and compare it."""
+    """Restore every snapshot not yet checked, without running anything, and compare
+    it: the commit, the uncommitted changes and the untracked files."""
     import shutil
+    import tarfile
 
     import replay
 
@@ -2049,9 +2148,13 @@ def cmd_check() -> int:
         try:
             clone = replay.restore(snap, dest, copy_ignored=False)
             meta = json.loads((snap / "meta.json").read_text())
+            with tarfile.open(snap / "untracked.tar") as tar:
+                captured = sorted(tar.getnames())
+            listed = replay.run("git", "-C", str(clone), "ls-files", "--others", "--exclude-standard", "-z")
             ok = (
                 replay.run("git", "-C", str(clone), "rev-parse", "HEAD").strip() == meta["head"]
                 and replay.run("git", "-C", str(clone), "diff", "--binary", "HEAD") == (snap / "changes.diff").read_text()
+                and sorted(p for p in listed.split("\0") if p) == captured
             )
             set_status(sid, "restore_ok" if ok else "restore_failed", "" if ok else "restored state differs")
         except Exception as exc:  # report and move on to the next snapshot
@@ -2182,7 +2285,8 @@ def external_actions(turn: list[dict]) -> list[str]:
 def real_turn(meta: dict, message: str) -> list[dict]:
     """The real turn in the user's session, plus its subagents' entries in the same time range."""
     path = Path(meta["transcript_path"])
-    turn = report.turn_after(usage.read_entries(path), report.prompt_sha(message)) if path.exists() else None
+    entries = usage.read_entries(path) if path.exists() else []
+    turn = report.turn_after(entries, report.prompt_sha(message), near=meta["created"])
     if not turn:
         return []
     stamps = [e["timestamp"] for e in turn if isinstance(e.get("timestamp"), str)]
@@ -2250,7 +2354,7 @@ git commit -m "jev-router: list snapshots with their external actions and mark t
 
 **Interfaces:**
 - Consumes: `restore` (Task 9), `usage`, the snapshot's `note.txt`, `message.txt`, `meta.json` (`helper`).
-- Produces: `replay.project_dir(claude_home: Path, cwd: Path) -> Path`; `replay.install_session(snap: Path, clone: Path, claude_home: Path) -> str`; `replay.run_claude(clone, session_id, prompt, env_extra, claude_home) -> tuple[dict, float, int]`; `replay.measure(claude_home, clone, session_id, prompt, helper) -> dict` (keys `calls, cost, unpriced_calls, first_cache_read, first_context, delegated`); `replay.replay_pair(snap, work, claude_home, rng) -> dict` (keys `id, order, sides{keep,delegate}{attempt, clone, session_id, wall_seconds, exit_code, warm, ...measure}, inconclusive`); constants `WARMUP`, `ATTEMPTS = 3`; env `JEV_FORK_CHECK_CLAUDE` (the `claude` binary, read at call time so tests can set it); `DEFAULT_CLAUDE_HOME`.
+- Produces: `replay.workdir(meta: dict, clone: Path) -> Path` (the clone's counterpart of the session's own directory); `replay.project_dir(claude_home: Path, cwd: Path) -> Path`; `replay.install_session(snap: Path, clone: Path, claude_home: Path) -> str`; `replay.run_claude(clone, session_id, prompt, env_extra, claude_home) -> tuple[dict, float, int]`; `replay.measure(claude_home, clone, session_id, prompt, helper) -> dict` (keys `calls, cost, unpriced_calls, first_cache_read, first_context, delegated`); `replay.replay_pair(snap, work, claude_home, rng) -> dict` (keys `id, order, sides{keep,delegate}{attempt, clone, session_id, wall_seconds, exit_code, warm, ...measure}, inconclusive`); constants `WARMUP`, `ATTEMPTS = 3`; env `JEV_FORK_CHECK_CLAUDE` (the `claude` binary, read at call time so tests can set it); `DEFAULT_CLAUDE_HOME`.
 
 - [ ] **Step 1: Write the fake `claude`** (`tests/fake_claude.py`)
 
@@ -2335,6 +2439,8 @@ def test_pair_runs_both_sides_and_only_delegate_gets_the_note(tmp_path: Path, sn
     assert delegate["delegated"] is True and keep["delegated"] is False
     assert delegate["calls"] == 2 and keep["calls"] == 1
     assert Path(keep["clone"], "RESULT.txt").read_text() == "done by keep\n"
+    under_work = [str(Path(side["clone"]).relative_to(tmp_path / "work")) for side in (keep, delegate)]
+    assert not any("keep" in p or "delegate" in p for p in under_work)
     calls = [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
     assert all(c["router"] == "off" for c in calls)
     assert [c["note"] is not None for c in calls if not c["args"][c["args"].index("-p") + 1].startswith("Reply")] \
@@ -2368,6 +2474,15 @@ def project_dir(claude_home: Path, cwd: Path) -> Path:
     return claude_home / "projects" / re.sub(r"[^A-Za-z0-9-]", "-", str(cwd))
 
 
+def workdir(meta: dict, clone: Path) -> Path:
+    """Where the session ran, inside the clone: a job started in a subdirectory
+    runs its relative commands from the same place."""
+    try:
+        return clone / Path(meta["cwd"]).resolve().relative_to(Path(meta["toplevel"]))
+    except ValueError:
+        return clone
+
+
 def install_session(snap: Path, clone: Path, claude_home: Path) -> str:
     """Copy the snapshot's conversation in as a new session of the clone.
 
@@ -2386,7 +2501,7 @@ def install_session(snap: Path, clone: Path, claude_home: Path) -> str:
         if isinstance(entry, dict) and "sessionId" in entry:
             entry["sessionId"] = new
         lines.append(json.dumps(entry))
-    target = project_dir(claude_home, clone)
+    target = project_dir(claude_home, workdir(meta, clone))
     target.mkdir(parents=True, exist_ok=True)
     (target / f"{new}.jsonl").write_text("\n".join(lines) + "\n")
     return new
@@ -2446,26 +2561,30 @@ def replay_pair(snap: Path, work: Path, claude_home: Path, rng: random.Random) -
     order = ["keep", "delegate"]
     rng.shuffle(order)
     sides: dict[str, dict] = {}
-    for name in order:
+    for position, name in enumerate(order, 1):
         side: dict = {}
         for attempt in range(1, ATTEMPTS + 1):
-            clone = restore(snap, work / name / f"attempt-{attempt}")
+            # Reason: folders are named by run order, which is random, so a path
+            # never tells the judge which side made a result.
+            clone = restore(snap, work / f"side-{position}" / f"attempt-{attempt}")
             sid = install_session(snap, clone, claude_home)
+            cwd = workdir(meta, clone)
             # Reason: the warm-up forks the same conversation with the same tools
             # and system prompt, so the side's first call can read it from cache.
-            warm_data, _, _ = run_claude(clone, sid, WARMUP, {}, claude_home)
-            warm = measure(claude_home, clone, str(warm_data.get("session_id") or ""), WARMUP, "")
+            warm_data, _, _ = run_claude(cwd, sid, WARMUP, {}, claude_home)
+            warm = measure(claude_home, cwd, str(warm_data.get("session_id") or ""), WARMUP, "")
             extra = {"JEV_ROUTER_NOTE_FILE": str(snap / "note.txt")} if name == "delegate" else {}
-            data, wall, code = run_claude(clone, sid, prompt, extra, claude_home)
-            m = measure(claude_home, clone, str(data.get("session_id") or ""), prompt, meta["helper"])
+            data, wall, code = run_claude(cwd, sid, prompt, extra, claude_home)
+            m = measure(claude_home, cwd, str(data.get("session_id") or ""), prompt, meta["helper"])
             is_warm = warm["calls"] > 0 and m["first_cache_read"] >= 0.99 * warm["first_context"] - 2_000
             side = {"attempt": attempt, "clone": str(clone), "session_id": data.get("session_id"),
                     "wall_seconds": round(wall, 1), "exit_code": code, "warm": is_warm, **m}
             if is_warm:
                 break
         sides[name] = side
-    return {"id": meta["id"], "order": order, "sides": sides,
-            "inconclusive": not all(s["warm"] for s in sides.values())}
+    # Reason: a call with no price would count as free and flatter one side.
+    comparable = all(s["warm"] and not s["unpriced_calls"] for s in sides.values())
+    return {"id": meta["id"], "order": order, "sides": sides, "inconclusive": not comparable}
 ```
 
 - [ ] **Step 5: Add `replay` to `fork_check.py`**
@@ -2497,7 +2616,8 @@ def cmd_replay(sid: str | None, trial: bool) -> int:
         return 0
     result["trial"] = trial
     (out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
-    set_status(sid, "inconclusive" if result["inconclusive"] else "replayed", "never warm" if result["inconclusive"] else "")
+    reason = "never warm, or a call had no price" if result["inconclusive"] else ""
+    set_status(sid, "inconclusive" if result["inconclusive"] else "replayed", reason)
     for name in result["order"]:
         s = result["sides"][name]
         print(f"{name}: ${s['cost']:.2f}, {s['wall_seconds']:.0f} s, {s['calls']} calls, warm={s['warm']}"
@@ -2553,6 +2673,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPTS = Path(__file__).resolve().parent.parent / "jev-router" / "skills" / "jev" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
@@ -2560,6 +2682,21 @@ import publish  # noqa: E402
 import replay  # noqa: E402
 from test_jev_replay import snap  # noqa: E402, F401
 from test_jev_snapshot import git, repo  # noqa: E402, F401
+
+
+def test_an_existing_public_copy_stops_everything(tmp_path: Path, repo: Path, snap: Path) -> None:
+    git(repo, "remote", "add", "origin", "git@github.com:acme/shop.git")
+
+    def gh(*args: str) -> str:
+        if args[:2] == ("api", "user"):
+            return "yorrick\n"
+        if args[:2] == ("repo", "view"):
+            return "PUBLIC\n"
+        raise AssertionError(f"unexpected gh call: {args}")
+
+    result = {"id": "x", "sides": {"keep": {"clone": str(tmp_path / "k")}, "delegate": {"clone": str(tmp_path / "d")}}}
+    with pytest.raises(RuntimeError, match="not private"):
+        publish.publish(snap, result, gh=gh, remote=str(tmp_path / "copy.git"))
 
 
 def test_copy_name_is_private_repo_named_after_the_source() -> None:
@@ -2598,6 +2735,7 @@ def test_publish_pushes_both_results_and_opens_the_compare_pr(tmp_path: Path, re
     assert git(remote, "rev-parse", f"replay/{sid}/compare^") == git(remote, "rev-parse", f"replay/{sid}/keep")
     for side in ("keep", "delegate", "compare"):
         assert ".env" not in git(remote, "ls-tree", "-r", "--name-only", f"replay/{sid}/{side}").split()
+    assert (keep / "RESULT.txt").read_text() == "keep\n"  # the clone's files are untouched
     pr = next(c for c in calls if c[:2] == ("pr", "create"))
     assert pr[pr.index("--base") + 1] == f"replay/{sid}/keep"
     assert pr[pr.index("--head") + 1] == f"replay/{sid}/compare"
@@ -2652,19 +2790,25 @@ def publish(snap: Path, result: dict, *, gh: Callable[..., str] = run_gh, remote
     origin = run("git", "-C", meta["toplevel"], "remote", "get-url", "origin").strip()
     copy = copy_name(origin, gh("api", "user", "--jq", ".login").strip())
     try:
-        gh("repo", "view", copy)
+        visibility = gh("repo", "view", copy, "--json", "visibility", "--jq", ".visibility").strip()
     except RuntimeError:
         gh("repo", "create", copy, "--private", "--description", "jev-router fork-check replays")
+        visibility = "PRIVATE"
+    if visibility != "PRIVATE":
+        raise RuntimeError(f"{copy} exists and is not private, so nothing was pushed")
     url = remote or f"git@github.com:{copy}.git"
     keep, delegate = Path(result["sides"]["keep"]["clone"]), Path(result["sides"]["delegate"]["clone"])
     for side, clone in (("keep", keep), ("delegate", delegate)):
-        commit_all(clone, f"jev fork check {sid}: {side} result")
+        commit_all(clone, f"jev fork check {sid}: result")
         run("git", "-C", str(clone), "push", "-q", url, f"HEAD:refs/heads/replay/{sid}/{side}")
+    # The comparison commit is built without checking anything out, so neither
+    # clone's files change after the replay.
     run("git", "-C", str(keep), "fetch", "-q", str(delegate), "HEAD")
-    run("git", "-C", str(keep), "checkout", "-q", "-b", f"replay/{sid}/compare")
-    run("git", "-C", str(keep), "read-tree", "-u", "--reset", "FETCH_HEAD")
-    commit_all(keep, f"jev fork check {sid}: the delegate result, shown against keep")
-    run("git", "-C", str(keep), "push", "-q", url, f"HEAD:refs/heads/replay/{sid}/compare")
+    tree = run("git", "-C", str(keep), "rev-parse", "FETCH_HEAD^{tree}").strip()
+    compare = run(
+        "git", "-C", str(keep), *IDENTITY, "commit-tree", tree, "-p", "HEAD", "-m", f"jev fork check {sid}: comparison"
+    ).strip()
+    run("git", "-C", str(keep), "push", "-q", url, f"{compare}:refs/heads/replay/{sid}/compare")
     k, d = result["sides"]["keep"], result["sides"]["delegate"]
     body = (
         f"Fork check {sid}. The base branch holds the keep result; this pull request shows the delegate result "
@@ -2683,6 +2827,9 @@ def publish(snap: Path, result: dict, *, gh: Callable[..., str] = run_gh, remote
 def cmd_publish(sid: str) -> int:
     import publish
 
+    if not (root() / "results" / sid / "verdict.json").exists():
+        print(f"Judge {sid} first: the judge must see the results before anything is committed or pushed.")
+        return 1
     result = json.loads((root() / "results" / sid / "result.json").read_text())
     url = publish.publish(root() / "snapshots" / sid, result)
     set_status(sid, "published", url)
@@ -2695,7 +2842,7 @@ registered as `sub.add_parser("publish").add_argument("id")`.
 - [ ] **Step 5: Run**
 
 Run: `uv run pytest tests/test_jev_publish.py -q`
-Expected: 2 passed.
+Expected: 3 passed.
 
 - [ ] **Step 6: Commit**
 
@@ -2715,7 +2862,7 @@ git commit -m "jev-router: publish replay results to a private copy with a compa
 
 **Interfaces:**
 - Consumes: `result.json`, `refs/jev/start` in each clone, version-3 log events.
-- Produces: `judge.parse(text: str) -> dict`; `judge.judge(snap: Path, result: dict, work: Path, *, codex: Callable[[str, Path], str] = run_codex, rng: random.Random) -> dict` (keys `keep{tests,outcome_met}`, `delegate{...}`, `prefer` in `keep|delegate|tie`, `why`), written to `verdict.json`; `report.check_report(points: list[dict], events: list[dict], skipped: int, inconclusive: int, period_cost: float | None = None) -> tuple[str, bool]` where each point is `{"meta": ..., "result": ..., "verdict": ...}`.
+- Produces: `judge.parse(text: str) -> dict`; `judge.judge(snap: Path, result: dict, work: Path, *, codex: Callable[[str, Path], str] = run_codex, rng: random.Random) -> dict` (keys `keep{tests,outcome_met}`, `delegate{...}`, `prefer` in `keep|delegate|tie`, `why`), written to `verdict.json`; `report.check_report(points: list[dict], events: list[dict], skipped: int, inconclusive: int, period_cost: float | None = None, waiting: tuple[str, ...] = ()) -> tuple[str, bool]` (`waiting`: among the first 20 eligible jobs, those not yet replayed or judged) where each point is `{"meta": ..., "result": ..., "verdict": ...}`.
 
 - [ ] **Step 1: Write the failing tests** (`tests/test_jev_judge.py`)
 
@@ -2726,6 +2873,7 @@ from __future__ import annotations
 
 import json
 import random
+import subprocess
 import sys
 from pathlib import Path
 
@@ -2764,6 +2912,8 @@ def test_labels_are_mapped_back_to_keep_and_delegate(tmp_path: Path, snap: Path)
     assert verdict["prefer"] == labels[0]
     assert "LEAF" in seen["prompt"] and "refs/jev/start" in seen["prompt"]
     assert seen["dirs"] == ["A", "B"]
+    assert subprocess.run(["git", "-C", str(tmp_path / "j" / "A"), "remote"], capture_output=True,
+                          text=True).stdout == ""
 
 
 def point(keep_cost: float, del_cost: float, prefer: str = "tie", delegate_ok: bool = True) -> dict:
@@ -2781,6 +2931,12 @@ def test_check_passes_on_twenty_cheaper_equal_jobs() -> None:
     text, passed = report.check_report([point(1.0, 0.8)] * 20, [], skipped=2, inconclusive=1)
     assert passed
     assert "Skipped by you: 2. Inconclusive: 1." in text
+
+
+def test_a_job_waiting_for_its_verdict_blocks_the_pass() -> None:
+    text, passed = report.check_report([point(1.0, 0.8)] * 19, [], 0, 0, waiting=("20261001-120000-abc",))
+    assert not passed
+    assert "waiting for 20261001-120000-abc" in text
 
 
 def test_one_broken_delegate_result_fails_the_check() -> None:
@@ -2817,8 +2973,16 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from replay import copy_tree
+from replay import copy_tree, run
 
+EXAMPLE = json.dumps(
+    {
+        "A": {"tests": "pass|fail|none", "outcome_met": True},
+        "B": {"tests": "pass|fail|none", "outcome_met": True},
+        "prefer": "A|B|tie",
+        "why": "one sentence",
+    }
+)
 PROMPT = """You are a LEAF reviewer: do not invoke any other AI CLI (no claude, codex, opencode, gemini).
 
 Two AI coding agents were given the same job in copies of the same repository: folder A and folder B.
@@ -2835,8 +2999,8 @@ new files included (the same for B; these folders are copies, so staging in them
 For each folder: run the project's tests if it has any, and decide whether the job's stated outcome
 is met. Then say which result is better, or tie. Change nothing except test caches.
 
-End your reply with one line of JSON and nothing after it:
-{{"A": {{"tests": "pass|fail|none", "outcome_met": true}}, "B": {{"tests": "pass|fail|none", "outcome_met": true}}, "prefer": "A|B|tie", "why": "one sentence"}}
+End your reply with one line of JSON, shaped like this example, and nothing after it:
+{example}
 """
 
 
@@ -2869,7 +3033,9 @@ def judge(snap: Path, result: dict, work: Path, *, codex: Callable[[str, Path], 
     work.mkdir(parents=True, exist_ok=True)
     for letter, side in names.items():
         copy_tree(Path(result["sides"][side]["clone"]), work / letter)
-    raw = parse(codex(PROMPT.format(message=(snap / "message.txt").read_text()), work))
+        # Reason: the origin's path would say which replay folder this came from.
+        run("git", "-C", str(work / letter), "remote", "remove", "origin")
+    raw = parse(codex(PROMPT.format(message=(snap / "message.txt").read_text(), example=EXAMPLE), work))
     verdict = {
         names["A"]: {"tests": raw["A"]["tests"], "outcome_met": bool(raw["A"]["outcome_met"])},
         names["B"]: {"tests": raw["B"]["tests"], "outcome_met": bool(raw["B"]["outcome_met"])},
@@ -2895,24 +3061,27 @@ def _broken(verdict: dict) -> bool:
 
 
 def check_report(
-    points: list[dict], events: list[dict], skipped: int, inconclusive: int, period_cost: float | None = None
+    points: list[dict],
+    events: list[dict],
+    skipped: int,
+    inconclusive: int,
+    period_cost: float | None = None,
+    waiting: tuple[str, ...] = (),
 ) -> tuple[str, bool]:
     points = points[:POINTS]
     keep_cost = sum(p["result"]["sides"]["keep"]["cost"] for p in points)
     del_cost = sum(p["result"]["sides"]["delegate"]["cost"] for p in points)
     keep_time = sum(p["result"]["sides"]["keep"]["wall_seconds"] for p in points)
     del_time = sum(p["result"]["sides"]["delegate"]["wall_seconds"] for p in points)
-    if points:
-        first, last = points[0]["meta"]["created"], points[-1]["meta"]["created"]
-        period = [e for e in events if e.get("version") == 3 and first <= e.get("ts", "") <= last]
-        del_cost += sum(e.get("cost") or 0 for e in period)
-        del_time += sum(e.get("latency_ms") or 0 for e in period) / 1000
+    period = period_events(events, points)
+    del_cost += sum(e.get("cost") or 0 for e in period)
+    del_time += sum(e.get("latency_ms") or 0 for e in period) / 1000
     broken = [p for p in points if _broken(p["verdict"])]
     prefer_keep = sum(p["verdict"]["prefer"] == "keep" for p in points)
     prefer_delegate = sum(p["verdict"]["prefer"] == "delegate" for p in points)
     overrides = sum(not p["result"]["sides"]["delegate"]["delegated"] for p in points)
     conditions = {
-        f"{POINTS} jobs": len(points) == POINTS,
+        f"{POINTS} jobs, all judged": len(points) == POINTS and not waiting,
         "at least 10% cheaper": bool(points) and del_cost <= 0.9 * keep_cost,
         "as good": not broken and prefer_keep <= prefer_delegate,
         "not slower": bool(points) and del_time <= keep_time,
@@ -2920,7 +3089,9 @@ def check_report(
     lines = [
         "# Fork check",
         "",
-        f"Jobs: {len(points)} of {POINTS}. Skipped by you: {skipped}. Inconclusive: {inconclusive}. "
+        f"Jobs judged: {len(points)} of {POINTS}"
+        + (f", waiting for {', '.join(waiting)}" if waiting else "")
+        + f". Skipped by you: {skipped}. Inconclusive: {inconclusive}. "
         f"Overrides (the session kept a job it was told to hand off): {overrides}.",
         f"Cost: keep ${keep_cost:.2f}, delegate ${del_cost:.2f} with Jev's cost over the period included.",
         f"Time: keep {keep_time / 60:.0f} min, delegate {del_time / 60:.0f} min with Jev's added wait included.",
@@ -2965,26 +3136,31 @@ def cmd_judge(sid: str) -> int:
 
 
 def cmd_report() -> int:
+    """The first 20 jobs marked safe, in capture order, whose replay is conclusive:
+    a later job never stands in for an earlier one that is not judged yet."""
     done = statuses()
-    points = []
+    points: list[dict] = []
+    waiting: list[str] = []
     for snap in snapshot_dirs():
-        out = root() / "results" / snap.name
-        if not (out / "verdict.json").exists():
+        if done.get(snap.name, {}).get("status") not in ("safe", "replayed", "published", "judged"):
             continue
-        result = json.loads((out / "result.json").read_text())
-        if result.get("trial") or result.get("inconclusive"):
+        out = root() / "results" / snap.name
+        result = json.loads((out / "result.json").read_text()) if (out / "result.json").exists() else None
+        if result is not None and (result.get("trial") or result.get("inconclusive")):
+            continue
+        if len(points) + len(waiting) == report.POINTS:
+            break
+        if result is None or not (out / "verdict.json").exists():
+            waiting.append(snap.name)
             continue
         points.append({"meta": json.loads((snap / "meta.json").read_text()), "result": result,
                        "verdict": json.loads((out / "verdict.json").read_text())})
     skipped = sum(s["status"] == "skip" for s in done.values())
     inconclusive = sum(s["status"] == "inconclusive" for s in done.values())
     events = jev_router.read_log()
-    period_cost = None
-    if points:
-        first, last = points[0]["meta"]["created"], points[-1]["meta"]["created"]
-        period = [e for e in events if e.get("version") == 3 and first <= e.get("ts", "") <= last]
-        period_cost = sum(r["real_cost"] for r in report.shadow_rows(period, usage.load_prices()))
-    text, passed = report.check_report(points, events, skipped, inconclusive, period_cost)
+    period = report.period_events(events, points)
+    period_cost = sum(r["real_cost"] for r in report.shadow_rows(period, usage.load_prices())) if period else None
+    text, passed = report.check_report(points, events, skipped, inconclusive, period_cost, tuple(waiting))
     (root() / "report.md").write_text(text + "\n")
     print(text)
     print("\nThe fork check PASSES." if passed else "\nThe fork check has not passed (yet).")
@@ -3011,13 +3187,13 @@ git commit -m "jev-router: blind Codex judge and the fork-check report"
 
 **Files:**
 - Modify: `jev-router/plugin.toml` (version `0.3.0`, description), `jev-router/README.md`, `jev-router/skills/jev/SKILL.md`, `README.md` (plugin row), generated manifests
-- Modify: `docs/superpowers/specs/2026-09-28-jev-router-cache-aware-design.md` only if the implementation had to differ (say where and why)
+- Modify: `docs/superpowers/specs/2026-09-28-jev-router-cache-aware-design.md` only if the implementation had to differ beyond what this plan already changed in it (say where and why)
 
 - [ ] **Step 1: Update the docs**
 
 `plugin.toml`: `version = "0.3.0"`, description: "Asks Jev (via OpenRouter) how long each job will run and, in Claude Code, whether a fresh subagent would do it cheaper. Starts in shadow mode. Off until you turn it on with /jev on."
 
-`SKILL.md`: add `/jev mode shadow|capture|live` (runs `jev_router.py mode ...`) and a short "Fork check" section naming the `fork_check.py` commands in order (`check`, `list`, `mark`, `replay`, `publish`, `judge`, `report`, `shadow`).
+`SKILL.md`: add `/jev mode shadow|capture|live` (runs `jev_router.py mode ...`) and a short "Fork check" section naming the `fork_check.py` commands in order (`check`, `list`, `mark`, `replay`, `judge`, `publish`, `report`, `shadow`).
 
 `jev-router/README.md`: a section "Claude Code: cache-aware delegation (0.3)" of at most three short paragraphs: what it decides and why (re-reading the context is the cost), the three modes, and the fork check in one paragraph with the command order. Link the spec. Keep the Codex and opencode sections as they are (they still describe 0.2.0 behaviour). No em dashes.
 
@@ -3053,7 +3229,7 @@ cat ~/work/data/jev-router-study/impl_review1_prompt.md | codex exec -m gpt-6-so
 
 Verify each finding against the code, fix the real ones with a test each, commit, and repeat until the reviewer ends with "approve".
 
-- [ ] **Step 5: Push and open the PR (only with the user's go-ahead)**
+- [ ] **Step 5: Push and open the PR (part of this approved plan; merging needs the user's explicit go-ahead)**
 
 ```bash
 git push origin HEAD
@@ -3116,12 +3292,12 @@ Expected: both sides `warm=True`; the delegate side `handed to the helper=True` 
 - [ ] **Step 4: Publish, judge and report**
 
 ```bash
-uv run --script $S/fork_check.py publish <ID>
 uv run --script $S/fork_check.py judge <ID>
+uv run --script $S/fork_check.py publish <ID>
 uv run --script $S/fork_check.py report
 ```
 
-Expected: a PR URL on `<owner>/<repo>-jev-replays` whose diff is exactly keep versus delegate and holds no `.env`; a verdict with `prefer`; a report with 0 of 20 jobs (the trial is excluded).
+Expected: a verdict with `prefer` (the judge runs first, on untouched results); a PR URL on a private `<owner>/<repo>-jev-replays` whose diff is exactly keep versus delegate and holds no `.env`; a report with 0 of 20 jobs judged (the trial is excluded).
 
 - [ ] **Step 5: Fix what the trial found, then hand over**
 

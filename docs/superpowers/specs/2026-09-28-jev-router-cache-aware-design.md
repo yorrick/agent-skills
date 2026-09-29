@@ -210,7 +210,7 @@ the jobs the router selects, on the user's own work.
 4. **Measure** API-equivalent cost, wall time and calls from the transcripts, subagents
    included, pricing every call by its recorded categories (cache reads, cache writes,
    uncached input, output). Right before each side runs, a one-line throwaway fork of the
-   same transcript, with no tools, warms the cache, and a pair is scored only when both
+   same transcript, with the same tools and settings and a prompt that asks only for a one-word reply, warms the cache (a fork without tools would cache a different prefix), and a pair is scored only when both
    sides' first calls read the prefix from cache; otherwise it is rerun. Every run is scored on what
    it really cost and took, including a parent that kept a job it was told to delegate;
    the report counts these overrides. The shadow log's Jev cost and latency over every

@@ -165,6 +165,13 @@ show whether a subagent working from a brief does the job as well; the fork chec
 It measures what shadow mode cannot: the real cost, speed and quality of delegating
 the jobs the router selects, on the user's own work.
 
+0. **Trial run.** Before the check, one or two jobs are captured and replayed right
+   away, end to end, to prove the chain works: the snapshot restores to the same state,
+   both sides resume the right conversation, the delegate side really hands the job to
+   a subagent, costs and times are read, and the pull request opens on the fork. Trial
+   jobs do not count toward the 20. During the check, the runner also restores each
+   new snapshot without running anything and compares it with what was captured, so a
+   broken snapshot shows up the same day rather than at replay time.
 1. **Snapshot selected jobs.** With the rule frozen and `"fork_check": true`, whenever
    the router (still in shadow mode) selects a job, the hook saves a snapshot before the
    turn runs: a copy of the transcript ending just before the message, the message, and

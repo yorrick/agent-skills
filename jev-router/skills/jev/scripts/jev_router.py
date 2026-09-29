@@ -381,12 +381,17 @@ def keep_note(verdict: Verdict) -> str:
     )
 
 
+def hook_json(context: str) -> str:
+    """What Claude Code and Codex read from a UserPromptSubmit hook."""
+    return json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": context}})
+
+
 def hook_output(harness: str, tier: Tier | None, verdict: Verdict) -> str:
     context = handoff(harness, tier, verdict) if tier else keep_note(verdict)
     if harness == "opencode":
         switch = {"model_id": tier.model_id, "variant": tier.effort, "agent": tier.helper} if tier else {}
         return json.dumps({**switch, "context": context})
-    return json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": context}})
+    return hook_json(context)
 
 
 INTERACTIVE_CODEX_SOURCES = {"cli", "vscode"}
@@ -421,11 +426,20 @@ def interactive(harness: str, payload: dict) -> bool:
 
 def route(harness: str, stdin: str) -> str:
     """What the hook prints: a hand-off, or '' for "carry on as if I wasn't here"."""
+    # Reason: a fork-check replay must see exactly the note the live router gave
+    # when the job was captured, and nothing else, so it never asks Jev again.
+    note_file = os.environ.get("JEV_ROUTER_NOTE_FILE")
+    if note_file:
+        return hook_json(Path(note_file).read_text()) if harness == "claude" else ""
+    if os.environ.get("JEV_ROUTER") == "off":
+        return ""
     config = load_config()
     if not config.get("enabled"):
         return ""
     payload = json.loads(stdin)
-    if not interactive(harness, payload):
+    # Reason: headless runs are reviews and automation, unrouted unless a person
+    # opts one in, such as an eval (`JEV_ROUTER=on claude -p ...`).
+    if os.environ.get("JEV_ROUTER") != "on" and not interactive(harness, payload):
         return ""
     prompt = str(payload.get("prompt") or "").strip()
     # Reason: slash commands and skill invocations (including `/jev off`) are

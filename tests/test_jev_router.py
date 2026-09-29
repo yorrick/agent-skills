@@ -112,15 +112,15 @@ def home(tmp_path: Path) -> Path:
 
 
 def run(
-    home: Path, jev: FakeJev, *args: str, stdin: str = "", attended: str | None = "1"
+    home: Path, jev: FakeJev, *args: str, stdin: str = "", attended: str | None = "1", env: dict | None = None
 ) -> subprocess.CompletedProcess[str]:
     """Run the script as a harness would. `attended` is what Claude Code sets in
     CLAUDE_CODE_SESSION_ATTENDED: "1" in the TUI, "0" under `claude -p`."""
-    env = {"JEV_ROUTER_HOME": str(home), "JEV_ROUTER_API_URL": jev.url, "PATH": "/usr/bin:/bin"}
+    full = {"JEV_ROUTER_HOME": str(home), "JEV_ROUTER_API_URL": jev.url, "PATH": "/usr/bin:/bin", **(env or {})}
     if attended is not None:
-        env["CLAUDE_CODE_SESSION_ATTENDED"] = attended
+        full["CLAUDE_CODE_SESSION_ATTENDED"] = attended
     return subprocess.run(
-        [sys.executable, str(SCRIPT), *args], input=stdin, env=env, capture_output=True, text=True, timeout=30
+        [sys.executable, str(SCRIPT), *args], input=stdin, env=full, capture_output=True, text=True, timeout=30
     )
 
 
@@ -139,6 +139,7 @@ def hook(
     attended: str | None = "1",
     source: str | None = "cli",
     permission_mode: str = "default",
+    env: dict | None = None,
 ) -> str:
     """One message through the hook. `source` is what the Codex transcript's first
     line records: "cli" or "vscode" when a person types, "exec" under `codex exec`;
@@ -152,7 +153,7 @@ def hook(
         "transcript_path": str(transcript),
         "permission_mode": permission_mode,
     }
-    result = run(home, jev, "hook", harness, stdin=json.dumps(payload), attended=attended)
+    result = run(home, jev, "hook", harness, stdin=json.dumps(payload), attended=attended, env=env)
     assert result.returncode == 0, result.stderr
     return result.stdout
 
@@ -312,6 +313,31 @@ def test_codex_exec_resuming_an_interactive_session_is_headless(home: Path, jev:
 def test_codex_from_the_ide_is_interactive(home: Path, jev: FakeJev) -> None:
     switch_on(home, jev)
     assert "spawn_agent" in hook(home, jev, "codex", source="vscode")
+
+
+# --- JEV_ROUTER on/off and the replay note --------------------------------------------
+
+
+def test_jev_router_off_wins_even_when_switched_on(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev)
+    assert hook(home, jev, harness="codex", env={"JEV_ROUTER": "off"}) == ""
+    assert jev.requests == []
+
+
+def test_jev_router_on_routes_a_headless_run(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev)
+    out = hook(home, jev, harness="codex", source="exec", env={"JEV_ROUTER": "on"})
+    assert "spawn_agent" in out
+    assert len(jev.requests) == 1
+
+
+def test_note_file_is_printed_verbatim_without_asking_jev(home: Path, jev: FakeJev, tmp_path: Path) -> None:
+    note = tmp_path / "note.txt"
+    note.write_text("Jev router: hand this to the large subagent.")
+    out = hook(home, jev, harness="claude", attended="0", env={"JEV_ROUTER": "off", "JEV_ROUTER_NOTE_FILE": str(note)})
+    assert json.loads(out)["hookSpecificOutput"]["additionalContext"] == "Jev router: hand this to the large subagent."
+    assert jev.requests == []
+    assert log(home) == []
 
 
 # --- never in the way ----------------------------------------------------------------

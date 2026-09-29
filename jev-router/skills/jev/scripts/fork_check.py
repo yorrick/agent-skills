@@ -234,6 +234,19 @@ def cmd_replay(sid: str | None, trial: bool) -> int:
     return 0
 
 
+def cmd_publish(sid: str) -> int:
+    import publish
+
+    if not (root() / "results" / sid / "verdict.json").exists():
+        print(f"Judge {sid} first: the judge must see the results before anything is committed or pushed.")
+        return 1
+    result = json.loads((root() / "results" / sid / "result.json").read_text())
+    url = publish.publish(root() / "snapshots" / sid, result)
+    set_status(sid, "published", url)
+    print(url)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -249,6 +262,8 @@ def main(argv: list[str] | None = None) -> int:
     target.add_argument("id", nargs="?")
     target.add_argument("--next", action="store_true")
     rep.add_argument("--trial", action="store_true")
+    pub = sub.add_parser("publish")
+    pub.add_argument("id")
     args = parser.parse_args(argv)
     if args.command == "shadow":
         return cmd_shadow()
@@ -260,6 +275,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_mark(args.id, args.mark, args.reason)
     if args.command == "replay":
         return cmd_replay(None if args.next else args.id, args.trial)
+    if args.command == "publish":
+        return cmd_publish(args.id)
     return 2
 
 

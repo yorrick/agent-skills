@@ -55,11 +55,17 @@ def _refuse_if_unusable(result: dict) -> None:
 def _restored_ignored(clone: Path) -> list[str]:
     """The top-level entries `restore` copied into this clone (from its
     sibling `restore.json`), which must never end up in a published commit no
-    matter what the clone's own ignore rules say by the time it is published."""
+    matter what the clone's own ignore rules say by the time it is published.
+    Raises rather than assuming "nothing was ignored" when the record is
+    missing or incomplete: silently returning an empty list here would quietly
+    disable the whole guard instead of refusing to publish."""
     info = clone.parent / "restore.json"
     if not info.exists():
-        return []
-    return json.loads(info.read_text()).get("ignored", [])
+        raise RuntimeError(f"{info} is missing; cannot tell what restore copied in, refusing to publish {clone}")
+    data = json.loads(info.read_text())
+    if "ignored" not in data:
+        raise RuntimeError(f'{info} has no "ignored" list; refusing to publish {clone}')
+    return data["ignored"]
 
 
 def _matches_ignored(path: str, ignored: list[str]) -> str | None:
@@ -74,17 +80,30 @@ def _refuse_if_ignored_leaked(clone: Path, ignored: list[str], label: str) -> No
     or was ever touched between `refs/jev/start` (where the replay began) and
     HEAD: a session with bypass permissions can drop a `.gitignore` line or
     force-add a path, so the clone's own current ignore rules cannot be
-    trusted; only what `restore` actually copied in can."""
+    trusted; only what `restore` actually copied in can.
+
+    Both listings are read with `-z`: without it, git quotes a path that holds
+    a non-ASCII byte, a `"`, a `\\` or a control character, so the quoted form
+    would never equal the plain name recorded in `restore.json` and the check
+    would silently miss it."""
     if not ignored:
         return
-    tree = [p for p in run("git", "-C", str(clone), "ls-tree", "-r", "--name-only", "HEAD").splitlines() if p]
-    history = [
-        p
-        for p in run(
-            "git", "-C", str(clone), "log", "--name-only", "--pretty=format:", "refs/jev/start..HEAD"
-        ).splitlines()
-        if p
-    ]
+    tree_out = run("git", "-C", str(clone), "ls-tree", "-r", "--name-only", "-z", "HEAD")
+    tree = [p for p in tree_out.split("\0") if p]
+    # --diff-merges=m: a path introduced only by how a merge resolved a
+    # conflict is still listed, not skipped as merges normally are.
+    history_out = run(
+        "git",
+        "-C",
+        str(clone),
+        "log",
+        "--name-only",
+        "-z",
+        "--format=",
+        "--diff-merges=m",
+        "refs/jev/start..HEAD",
+    )
+    history = [p for p in history_out.split("\0") if p]
     for path in tree + history:
         hit = _matches_ignored(path, ignored)
         if hit:
@@ -94,14 +113,14 @@ def _refuse_if_ignored_leaked(clone: Path, ignored: list[str], label: str) -> No
 def _refuse_if_branches_exist(url: str, copy: str, sid: str) -> None:
     """A failed publish cannot simply be retried: every attempt stacks a new
     commit, so a second push would be non-fast-forward, and force pushes are
-    not allowed. Refuses up front, before any push, with the exact commands to
-    clear the copy's branches for a clean retry."""
+    not allowed. Refuses up front, before any push, with the exact command to
+    delete each ref `ls-remote` actually found (never a generic hint), so a
+    clean retry only needs the reported refs removed and nothing else."""
     existing = run("git", "ls-remote", url, f"refs/heads/replay/{sid}/*")
-    if existing.strip():
-        raise RuntimeError(
-            f"replay/{sid}/* already exists on {copy}; delete it first with: "
-            f"gh api -X DELETE repos/{copy}/git/refs/heads/replay/{sid}/keep (and the same for delegate, compare)"
-        )
+    refs = [line.split("\t", 1)[1] for line in existing.splitlines() if line.strip()]
+    if refs:
+        commands = "; ".join(f"gh api -X DELETE repos/{copy}/git/{ref}" for ref in refs)
+        raise RuntimeError(f"replay/{sid}/* already exists on {copy}; delete it first with: {commands}")
 
 
 def _pr_body(sid: str, snap: Path, k: dict, d: dict) -> str:

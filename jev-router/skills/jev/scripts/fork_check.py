@@ -240,8 +240,14 @@ def cmd_publish(sid: str) -> int:
     if not (root() / "results" / sid / "verdict.json").exists():
         print(f"Judge {sid} first: the judge must see the results before anything is committed or pushed.")
         return 1
-    result = json.loads((root() / "results" / sid / "result.json").read_text())
     try:
+        result = json.loads((root() / "results" / sid / "result.json").read_text())
+        # Reason: an inconclusive result is nothing new to report, not a failure
+        # of publishing; the snapshot's own status (set by replay) already says
+        # so, so it is left alone rather than overwritten with publish_failed.
+        if result.get("inconclusive"):
+            print(f"{sid} is inconclusive ({result.get('reason', '')}); nothing to publish")
+            return 1
         # `gh=publish.run_gh` (not the function's own default) so a test can
         # monkeypatch the module attribute and still reach this call.
         url = publish.publish(root() / "snapshots" / sid, result, gh=publish.run_gh)

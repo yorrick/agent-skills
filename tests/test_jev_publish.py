@@ -15,7 +15,9 @@ sys.path.insert(0, str(SCRIPTS))
 import fork_check  # noqa: E402
 import publish  # noqa: E402
 import replay  # noqa: E402
-from test_jev_snapshot import git  # noqa: E402
+import snapshot  # noqa: E402
+from test_jev_snapshot import EVENT, git, payload, write  # noqa: E402
+from test_jev_usage import assistant, typed  # noqa: E402
 
 
 def _setup(tmp_path: Path, repo: Path, snap: Path) -> tuple[Path, Path, Path, str, dict]:
@@ -125,6 +127,51 @@ def test_a_restored_ignored_file_committed_earlier_in_the_replay_is_also_refused
     assert git(remote, "branch", "-a").strip() == ""
 
 
+def test_non_ascii_ignored_name_is_refused_even_after_the_clone_stops_ignoring_it(
+    tmp_path: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`ls-tree`/`log` quote a non-ASCII path unless run with `-z`; a check that
+    reads them without it would never recognize the quoted form as a match."""
+    (repo / ".gitignore").write_text((repo / ".gitignore").read_text() + "clé.env\n")
+    (repo / "clé.env").write_text("SECRET=x\n")
+    git(repo, "remote", "add", "origin", "git@github.com:acme/shop.git")
+    transcript = write(tmp_path / "t.jsonl", [typed("start"), assistant("r1")])
+    sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "build it", "N", EVENT)
+    snap = tmp_path / "fc" / "snapshots" / sid
+    keep = replay.restore(snap, tmp_path / "k")
+    delegate = replay.restore(snap, tmp_path / "d")
+    remote = tmp_path / "copy.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")  # mask the user's own global excludes
+    (keep / ".gitignore").write_text("node_modules/\n.venv/\n.env\n__pycache__/\n")  # the replay dropped the line
+    result = {
+        "id": sid,
+        "sides": {
+            "keep": {"clone": str(keep), "cost": 1.0, "wall_seconds": 60, "calls": 10, "delegated": False},
+            "delegate": {"clone": str(delegate), "cost": 0.5, "wall_seconds": 50, "calls": 12, "delegated": True},
+        },
+    }
+    calls: list[tuple[str, ...]] = []
+    with pytest.raises(RuntimeError, match="clé.env"):
+        publish.publish(snap, result, gh=_gh(calls), remote=str(remote))
+    assert git(remote, "branch", "-a").strip() == ""
+
+
+def test_restored_ignored_raises_when_restore_json_is_missing(tmp_path: Path) -> None:
+    clone = tmp_path / "somewhere" / "repo"
+    clone.mkdir(parents=True)
+    with pytest.raises(RuntimeError, match="restore.json"):
+        publish._restored_ignored(clone)
+
+
+def test_restored_ignored_raises_when_the_ignored_key_is_missing(tmp_path: Path) -> None:
+    clone = tmp_path / "somewhere" / "repo"
+    clone.mkdir(parents=True)
+    (clone.parent / "restore.json").write_text(json.dumps({"skipped": []}))
+    with pytest.raises(RuntimeError, match="ignored"):
+        publish._restored_ignored(clone)
+
+
 # Ruling T12b: an inconclusive result, or a side missing a priced cost, must
 # refuse before touching gh at all.
 def test_inconclusive_result_is_refused_with_no_gh_call(tmp_path: Path, repo: Path, snap: Path) -> None:
@@ -179,9 +226,26 @@ def test_existing_remote_branches_refuse_a_retry_instead_of_a_force_push(
     # A branch left over from a previous, failed publish attempt.
     git(keep, "push", "-q", str(remote), f"HEAD:refs/heads/replay/{sid}/keep")
     calls: list[tuple[str, ...]] = []
-    with pytest.raises(RuntimeError, match="gh api -X DELETE"):
+    with pytest.raises(
+        RuntimeError, match=f"gh api -X DELETE repos/yorrick/shop-jev-replays/git/refs/heads/replay/{sid}/keep"
+    ) as excinfo:
         publish.publish(snap, result, gh=_gh(calls, visibility="PRIVATE"), remote=str(remote))
+    assert "delegate" not in str(excinfo.value) and "compare" not in str(excinfo.value)
     assert not any(c[:2] == ("pr", "create") for c in calls)
+
+
+def test_existing_remote_branches_list_one_delete_command_per_ref(tmp_path: Path, repo: Path, snap: Path) -> None:
+    keep, delegate, remote, sid, result = _setup(tmp_path, repo, snap)
+    # Two branches left over from a previous, failed publish attempt.
+    git(keep, "push", "-q", str(remote), f"HEAD:refs/heads/replay/{sid}/keep")
+    git(delegate, "push", "-q", str(remote), f"HEAD:refs/heads/replay/{sid}/delegate")
+    calls: list[tuple[str, ...]] = []
+    with pytest.raises(RuntimeError) as excinfo:
+        publish.publish(snap, result, gh=_gh(calls, visibility="PRIVATE"), remote=str(remote))
+    message = str(excinfo.value)
+    assert f"gh api -X DELETE repos/yorrick/shop-jev-replays/git/refs/heads/replay/{sid}/keep" in message
+    assert f"gh api -X DELETE repos/yorrick/shop-jev-replays/git/refs/heads/replay/{sid}/delegate" in message
+    assert "compare" not in message
 
 
 def test_cmd_publish_records_publish_failed_instead_of_raising(
@@ -201,3 +265,20 @@ def test_cmd_publish_records_publish_failed_instead_of_raising(
     monkeypatch.setattr(publish, "run_gh", gh)
     assert fork_check.main(["publish", sid]) == 1
     assert fork_check.statuses()[sid]["status"] == "publish_failed"
+
+
+def test_cmd_publish_leaves_the_status_alone_on_an_inconclusive_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(fork_check, "root", lambda: tmp_path)
+    sid = "20261001-100000-abc"
+    fork_check.set_status(sid, "inconclusive", "no model recorded")
+    results_dir = tmp_path / "results" / sid
+    results_dir.mkdir(parents=True)
+    (results_dir / "verdict.json").write_text("{}")
+    (results_dir / "result.json").write_text(
+        json.dumps({"id": sid, "order": [], "sides": {}, "inconclusive": True, "reason": "no model recorded"})
+    )
+    assert fork_check.main(["publish", sid]) == 1
+    assert fork_check.statuses()[sid]["status"] == "inconclusive"  # left as replay set it, not overwritten
+    assert "inconclusive" in capsys.readouterr().out

@@ -260,6 +260,62 @@ def cmd_publish(sid: str) -> int:
     return 0
 
 
+def cmd_judge(sid: str) -> int:
+    import random
+    import uuid
+
+    import judge
+
+    out = root() / "results" / sid
+    result = json.loads((out / "result.json").read_text())
+    # Reason: a neutral folder away from results/, whose result.json names the
+    # sides; the judge works in its own folder so nothing there can tell it
+    # which side is which.
+    blind = root() / "blind" / uuid.uuid4().hex
+    verdict = judge.judge(root() / "snapshots" / sid, result, blind, rng=random.Random())
+    (out / "verdict.json").write_text(json.dumps(verdict, indent=2) + "\n")
+    set_status(sid, "judged", verdict["prefer"])
+    print(json.dumps(verdict, indent=2))
+    return 0
+
+
+def cmd_report() -> int:
+    """The first 20 jobs marked safe, in capture order, whose replay is conclusive:
+    a later job never stands in for an earlier one that is not judged yet."""
+    done = statuses()
+    points: list[dict] = []
+    waiting: list[str] = []
+    for snap in snapshot_dirs():
+        if done.get(snap.name, {}).get("status") not in ("safe", "replayed", "published", "judged"):
+            continue
+        out = root() / "results" / snap.name
+        result = json.loads((out / "result.json").read_text()) if (out / "result.json").exists() else None
+        if result is not None and (result.get("trial") or result.get("inconclusive")):
+            continue
+        if len(points) + len(waiting) == report.POINTS:
+            break
+        if result is None or not (out / "verdict.json").exists():
+            waiting.append(snap.name)
+            continue
+        points.append(
+            {
+                "meta": json.loads((snap / "meta.json").read_text()),
+                "result": result,
+                "verdict": json.loads((out / "verdict.json").read_text()),
+            }
+        )
+    skipped = sum(s["status"] == "skip" for s in done.values())
+    inconclusive = sum(s["status"] == "inconclusive" for s in done.values())
+    events = jev_router.read_log()
+    period = report.period_events(events, points)
+    period_cost = sum(r["real_cost"] for r in report.shadow_rows(period, usage.load_prices())) if period else None
+    text, passed = report.check_report(points, events, skipped, inconclusive, period_cost, tuple(waiting))
+    (root() / "report.md").write_text(text + "\n")
+    print(text)
+    print("\nThe fork check PASSES." if passed else "\nThe fork check has not passed (yet).")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -277,6 +333,9 @@ def main(argv: list[str] | None = None) -> int:
     rep.add_argument("--trial", action="store_true")
     pub = sub.add_parser("publish")
     pub.add_argument("id")
+    judge_parser = sub.add_parser("judge")
+    judge_parser.add_argument("id")
+    sub.add_parser("report")
     args = parser.parse_args(argv)
     if args.command == "shadow":
         return cmd_shadow()
@@ -290,6 +349,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_replay(None if args.next else args.id, args.trial)
     if args.command == "publish":
         return cmd_publish(args.id)
+    if args.command == "judge":
+        return cmd_judge(args.id)
+    if args.command == "report":
+        return cmd_report()
     return 2
 
 

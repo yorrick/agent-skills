@@ -235,6 +235,94 @@ def restore(snap: Path, dest: Path, *, copy_ignored: bool = True) -> Path:
     return clone
 
 
+def refuse_if_unusable(result: dict) -> None:
+    """Neither an inconclusive replay nor a side with no priced cost is usable:
+    the first has nothing worth comparing, and the second would either crash
+    building a report or post cost figures that are not real. Shared by
+    publish and the judge, so neither ever acts on a result the other would
+    refuse."""
+    sid = result.get("id", "?")
+    if result.get("inconclusive"):
+        raise RuntimeError(f"{sid} is inconclusive ({result.get('reason', '')}); nothing to publish or judge")
+    sides = result.get("sides") or {}
+    for side in ("keep", "delegate"):
+        if side not in sides or "cost" not in sides[side]:
+            raise RuntimeError(f"{sid} has no priced cost for {side}; nothing to publish or judge")
+
+
+def restored_ignored(clone: Path) -> list[str]:
+    """The top-level entries `restore` copied into this clone (from its
+    sibling `restore.json`), which must never end up published or shown to
+    the judge, no matter what the clone's own ignore rules say by the time it
+    is checked. Raises rather than assuming "nothing was ignored" when the
+    record is missing or incomplete: silently returning an empty list here
+    would quietly disable the whole guard instead of refusing to proceed."""
+    info = clone.parent / "restore.json"
+    if not info.exists():
+        raise RuntimeError(f"{info} is missing; cannot tell what restore copied in, refusing to use {clone}")
+    data = json.loads(info.read_text())
+    if "ignored" not in data:
+        raise RuntimeError(f'{info} has no "ignored" list; refusing to use {clone}')
+    return data["ignored"]
+
+
+def _matches_ignored(path: str, ignored: list[str]) -> str | None:
+    for rel in ignored:
+        if path == rel or path.startswith(rel + "/"):
+            return rel
+    return None
+
+
+def _status_paths(output: str) -> list[str]:
+    """The paths named by `git status --porcelain -z`: one per NUL-separated
+    entry (two status letters, a space, then the path), except a rename,
+    whose second field is the old path with no status prefix of its own."""
+    entries = [e for e in output.split("\0") if e]
+    paths: list[str] = []
+    i = 0
+    while i < len(entries):
+        code, path = entries[i][:2], entries[i][3:]
+        paths.append(path)
+        if "R" in code:
+            i += 1
+            if i < len(entries):
+                paths.append(entries[i])
+        i += 1
+    return paths
+
+
+def refuse_if_ignored_leaked(clone: Path, ignored: list[str], label: str) -> None:
+    """Refuses if any of `ignored` (or anything under it) is committed at HEAD, was
+    ever touched between `refs/jev/start` (where the replay began) and HEAD, or
+    merely sits in the working tree right now: a session with bypass permissions
+    can drop a `.gitignore` line or force-add a path, so the clone's own current
+    ignore rules cannot be trusted; only what `restore` actually copied in can.
+    The working-tree check is what catches this before anything is ever
+    committed, which matters to the judge: it never commits, so an un-ignored
+    `.env` would otherwise show nowhere else.
+
+    All three listings are read with `-z`: without it, git quotes a path that
+    holds a non-ASCII byte, a `"`, a backslash or a control character, so the
+    quoted form would never equal the plain name recorded in `restore.json`
+    and the check would silently miss it."""
+    if not ignored:
+        return
+    tree_out = run("git", "-C", str(clone), "ls-tree", "-r", "--name-only", "-z", "HEAD")
+    tree = [p for p in tree_out.split("\0") if p]
+    # --diff-merges=m: a path introduced only by how a merge resolved a
+    # conflict is still listed, not skipped as merges normally are.
+    history_out = run(
+        "git", "-C", str(clone), "log", "--name-only", "-z", "--format=", "--diff-merges=m", "refs/jev/start..HEAD"
+    )
+    history = [p for p in history_out.split("\0") if p]
+    status_out = run("git", "-C", str(clone), "status", "--porcelain", "-z", "--untracked-files=all")
+    status = _status_paths(status_out)
+    for path in tree + history + status:
+        hit = _matches_ignored(path, ignored)
+        if hit:
+            raise RuntimeError(f"{hit} would be published or shown from the {label} clone (found as {path}); refusing")
+
+
 DEFAULT_CLAUDE_HOME = Path.home() / ".claude"
 WARMUP = "Reply with the single word ok and do nothing else."
 ATTEMPTS = 3

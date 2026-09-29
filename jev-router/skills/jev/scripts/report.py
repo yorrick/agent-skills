@@ -106,3 +106,76 @@ def shadow_report(events: list[dict], prices: dict) -> str:
             f"{lost} ({lost / len(selected):.0%}) would have cost more delegated."
         )
     return "\n".join(lines)
+
+
+POINTS = 20
+
+
+def _broken(verdict: dict) -> bool:
+    """A delegated result that fails a test or its goal where the kept one passes."""
+    keep, delegate = verdict["keep"], verdict["delegate"]
+    return (delegate["tests"] == "fail" and keep["tests"] != "fail") or (
+        not delegate["outcome_met"] and keep["outcome_met"]
+    )
+
+
+def check_report(
+    points: list[dict],
+    events: list[dict],
+    skipped: int,
+    inconclusive: int,
+    period_cost: float | None = None,
+    waiting: tuple[str, ...] = (),
+) -> tuple[str, bool]:
+    points = points[:POINTS]
+    keep_cost = sum(p["result"]["sides"]["keep"]["cost"] for p in points)
+    del_cost = sum(p["result"]["sides"]["delegate"]["cost"] for p in points)
+    keep_time = sum(p["result"]["sides"]["keep"]["wall_seconds"] for p in points)
+    del_time = sum(p["result"]["sides"]["delegate"]["wall_seconds"] for p in points)
+    period = period_events(events, points)
+    del_cost += sum(e.get("cost") or 0 for e in period)
+    del_time += sum(e.get("latency_ms") or 0 for e in period) / 1000
+    broken = [p for p in points if _broken(p["verdict"])]
+    prefer_keep = sum(p["verdict"]["prefer"] == "keep" for p in points)
+    prefer_delegate = sum(p["verdict"]["prefer"] == "delegate" for p in points)
+    overrides = sum(not p["result"]["sides"]["delegate"]["delegated"] for p in points)
+    conditions = {
+        f"{POINTS} jobs, all judged": len(points) == POINTS and not waiting,
+        "at least 10% cheaper": bool(points) and del_cost <= 0.9 * keep_cost,
+        "as good": not broken and prefer_keep <= prefer_delegate,
+        "not slower": bool(points) and del_time <= keep_time,
+    }
+    lines = [
+        "# Fork check",
+        "",
+        f"Jobs judged: {len(points)} of {POINTS}"
+        + (f", waiting for {', '.join(waiting)}" if waiting else "")
+        + f". Skipped by you: {skipped}. Inconclusive: {inconclusive}. "
+        f"Overrides (the session kept a job it was told to hand off): {overrides}.",
+        f"Cost: keep ${keep_cost:.2f}, delegate ${del_cost:.2f} with Jev's cost over the period included.",
+        f"Time: keep {keep_time / 60:.0f} min, delegate {del_time / 60:.0f} min with Jev's added wait included.",
+        f"Blind judge: prefers keep {prefer_keep}, delegate {prefer_delegate}; "
+        f"broken delegated results: {len(broken)}.",
+        *(
+            [
+                f"Saving as a share of the period's decided messages (their main-thread cost): "
+                f"{(keep_cost - del_cost) / period_cost:.0%} (no threshold: it depends on how the work mixes long and "
+                "short jobs)."
+            ]
+            if period_cost
+            else []
+        ),
+        "",
+        *[f"- {name}: {'pass' if ok else 'FAIL'}" for name, ok in conditions.items()],
+        "",
+        "| job | predicted calls | calls keep / delegate | cost keep / delegate | minutes keep / delegate | judge |",
+        "|---|---|---|---|---|---|",
+    ]
+    for p in points:
+        k, d = p["result"]["sides"]["keep"], p["result"]["sides"]["delegate"]
+        lines.append(
+            f"| {p['meta']['id']} | {p['meta'].get('median_calls')} | {k['calls']} / {d['calls']} | "
+            f"${k['cost']:.2f} / ${d['cost']:.2f} | {k['wall_seconds'] / 60:.0f} / {d['wall_seconds'] / 60:.0f} | "
+            f"{p['verdict']['prefer']} |"
+        )
+    return "\n".join(lines), all(conditions.values())

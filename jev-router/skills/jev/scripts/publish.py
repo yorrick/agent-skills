@@ -9,7 +9,11 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from replay import IDENTITY, run
+from replay import IDENTITY, refuse_if_ignored_leaked, refuse_if_unusable, restored_ignored, run
+
+# Kept as a module attribute: some tests call this directly. The real
+# implementation is shared with the judge, in replay.py.
+_restored_ignored = restored_ignored
 
 MESSAGE_LIMIT = 2000
 LOGIN_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
@@ -31,83 +35,12 @@ def copy_name(origin_url: str, owner: str) -> str:
 def commit_all(clone: Path, message: str) -> None:
     # `add -A` never adds an ignored file under the CURRENT ignore rules, but the
     # replayed session ran with bypass permissions and could have rewritten those
-    # rules or force-added a path; `_refuse_if_ignored_leaked` is what actually
-    # keeps a restored ignored file (`.env`, a dependency directory) out, by
-    # checking against what `restore` recorded, not against the clone's own
-    # (possibly tampered) ignore rules.
+    # rules or force-added a path; `refuse_if_ignored_leaked` (shared with the
+    # judge, in replay.py) is what actually keeps a restored ignored file
+    # (`.env`, a dependency directory) out, by checking against what `restore`
+    # recorded, not against the clone's own (possibly tampered) ignore rules.
     run("git", "-C", str(clone), "add", "-A")
     run("git", "-C", str(clone), *IDENTITY, "commit", "-q", "--allow-empty", "-m", message)
-
-
-def _refuse_if_unusable(result: dict) -> None:
-    """Neither an inconclusive replay nor a side with no priced cost is ever
-    publishable: the first has nothing worth comparing, and the second would
-    either crash building the PR body or post cost figures that are not real."""
-    sid = result.get("id", "?")
-    if result.get("inconclusive"):
-        raise RuntimeError(f"{sid} is inconclusive ({result.get('reason', '')}); nothing to publish")
-    sides = result.get("sides") or {}
-    for side in ("keep", "delegate"):
-        if side not in sides or "cost" not in sides[side]:
-            raise RuntimeError(f"{sid} has no priced cost for {side}; nothing to publish")
-
-
-def _restored_ignored(clone: Path) -> list[str]:
-    """The top-level entries `restore` copied into this clone (from its
-    sibling `restore.json`), which must never end up in a published commit no
-    matter what the clone's own ignore rules say by the time it is published.
-    Raises rather than assuming "nothing was ignored" when the record is
-    missing or incomplete: silently returning an empty list here would quietly
-    disable the whole guard instead of refusing to publish."""
-    info = clone.parent / "restore.json"
-    if not info.exists():
-        raise RuntimeError(f"{info} is missing; cannot tell what restore copied in, refusing to publish {clone}")
-    data = json.loads(info.read_text())
-    if "ignored" not in data:
-        raise RuntimeError(f'{info} has no "ignored" list; refusing to publish {clone}')
-    return data["ignored"]
-
-
-def _matches_ignored(path: str, ignored: list[str]) -> str | None:
-    for rel in ignored:
-        if path == rel or path.startswith(rel + "/"):
-            return rel
-    return None
-
-
-def _refuse_if_ignored_leaked(clone: Path, ignored: list[str], label: str) -> None:
-    """Refuses if any of `ignored` (or anything under it) is committed at HEAD,
-    or was ever touched between `refs/jev/start` (where the replay began) and
-    HEAD: a session with bypass permissions can drop a `.gitignore` line or
-    force-add a path, so the clone's own current ignore rules cannot be
-    trusted; only what `restore` actually copied in can.
-
-    Both listings are read with `-z`: without it, git quotes a path that holds
-    a non-ASCII byte, a `"`, a `\\` or a control character, so the quoted form
-    would never equal the plain name recorded in `restore.json` and the check
-    would silently miss it."""
-    if not ignored:
-        return
-    tree_out = run("git", "-C", str(clone), "ls-tree", "-r", "--name-only", "-z", "HEAD")
-    tree = [p for p in tree_out.split("\0") if p]
-    # --diff-merges=m: a path introduced only by how a merge resolved a
-    # conflict is still listed, not skipped as merges normally are.
-    history_out = run(
-        "git",
-        "-C",
-        str(clone),
-        "log",
-        "--name-only",
-        "-z",
-        "--format=",
-        "--diff-merges=m",
-        "refs/jev/start..HEAD",
-    )
-    history = [p for p in history_out.split("\0") if p]
-    for path in tree + history:
-        hit = _matches_ignored(path, ignored)
-        if hit:
-            raise RuntimeError(f"{hit} would be published from the {label} clone (found as {path}); refusing")
 
 
 def _refuse_if_branches_exist(url: str, copy: str, sid: str) -> None:
@@ -137,7 +70,7 @@ def _pr_body(sid: str, snap: Path, k: dict, d: dict) -> str:
 
 
 def publish(snap: Path, result: dict, *, gh: Callable[..., str] = run_gh, remote: str | None = None) -> str:
-    _refuse_if_unusable(result)
+    refuse_if_unusable(result)
     meta = json.loads((snap / "meta.json").read_text())
     sid = result["id"]
     k, d = result["sides"]["keep"], result["sides"]["delegate"]
@@ -162,7 +95,7 @@ def publish(snap: Path, result: dict, *, gh: Callable[..., str] = run_gh, remote
     ignored = {"keep": _restored_ignored(keep), "delegate": _restored_ignored(delegate)}
     for side, clone in (("keep", keep), ("delegate", delegate)):
         commit_all(clone, f"jev fork check {sid}: result")
-        _refuse_if_ignored_leaked(clone, ignored[side], side)
+        refuse_if_ignored_leaked(clone, ignored[side], side)
     for side, clone in (("keep", keep), ("delegate", delegate)):
         run("git", "-C", str(clone), "push", "-q", url, f"HEAD:refs/heads/replay/{sid}/{side}")
     # The comparison commit is built without checking anything out, so neither

@@ -198,10 +198,11 @@ the jobs the router selects, on the user's own work.
    difference is that each clone's `origin` is a local bare copy, so a normal push stays
    local (a push to an explicit URL or another remote still could not be stopped). The
    two sides run one after the other in random order. When both are done, the runner
-   pushes the two results to a private GitHub fork of the repository (one per
-   repository, or a private copy where forking is not allowed) as `replay/<job>/keep`
-   and `replay/<job>/delegate`, and opens a pull request between them, so the user can
-   compare the results side by side.
+   pushes the two results (their final files, committed as they stand) to a private
+   copy of the repository on GitHub, one per repository (a fork of a public repository
+   would be public), as `replay/<job>/keep` and `replay/<job>/delegate`. It then opens
+   a pull request into `replay/<job>/keep` from a branch that starts at keep and holds
+   the delegate side's final files, so the diff is exactly keep versus delegate.
 4. **Measure** API-equivalent cost, wall time and calls from the transcripts, subagents
    included, pricing every call by its recorded categories (cache reads, cache writes,
    uncached input, output). Right before each side runs, a one-line throwaway fork of the

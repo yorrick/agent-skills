@@ -287,10 +287,11 @@ def _path_spellings(path: str) -> list[str]:
 
 
 def _real_path_forms(tops: list[str]) -> list[str]:
-    """The real checkout's own absolute and `~` spellings (never the `$HOME`
-    form, and never the clone): what a leaked tool-call input would still
-    contain if a rewrite were incomplete."""
-    return [form for top in tops for form in _path_spellings(top)[:2]]
+    """The real checkout's own absolute, `~` and `$HOME` spellings (never the
+    clone): what a leaked tool-call input would still contain if a rewrite
+    were incomplete. A tool call such as `cd $HOME/work/<repo>` uses the
+    `$HOME` form just as readily as the other two."""
+    return [form for top in tops for form in _path_spellings(top)]
 
 
 def _rewrite_real_paths(text: str, tops: list[str], clone: Path) -> str:
@@ -335,7 +336,9 @@ def install_session(snap: Path, clone: Path, claude_home: Path) -> str:
             raise Inconclusive(f"a transcript line did not parse as JSON: {exc}") from exc
         if isinstance(entry, dict) and "sessionId" in entry:
             entry["sessionId"] = new
-        lines.append(json.dumps(entry))
+        # Reason: ensure_ascii=False, so a non-ASCII leaked path in `content`
+        # below is still there to find, not hidden behind a \uXXXX escape.
+        lines.append(json.dumps(entry, ensure_ascii=False))
     content = "\n".join(lines) + "\n"
     _refuse_if_leaked(content, _real_path_forms(tops))
     target = project_dir(claude_home, workdir(meta, clone))
@@ -354,48 +357,73 @@ def _turn(entries: list[dict], prompt: str) -> list[dict]:
     return entries[starts[-1] :] if starts else []
 
 
-def _leaked_real_path(claude_home: Path, cwd: Path, session_id: str, prompt: str, leak_forms: list[str]) -> bool:
-    """Whether a tool call in this one call's own new turn, or in its subagent
-    transcripts, still names the real checkout. Scoped to the new turn (the
-    same slice `measure` scores), never the whole forked session file, which
-    still carries the inherited, already-rewritten history: a history that
-    merely mentions an unrelated sibling checkout (`<repo>-flowchart` next to
-    `<repo>`) must never be mistaken for a leak, and a copy already checked
-    once at install time should not be re-scanned wholesale on every call."""
-    if not leak_forms:
+def _session_file_names(pdir: Path) -> set[str]:
+    return {p.name for p in pdir.glob("*.jsonl")} if pdir.exists() else set()
+
+
+def _new_session_files(pdir: Path, before: set[str]) -> list[Path]:
+    """The `*.jsonl` files a call created in `pdir`, found by listing the
+    directory before and after it, never by trusting its own stdout: a timed-out
+    or hard-crashed run never prints its JSON result, but Claude Code writes the
+    transcript as it goes, so a killed run can still leave a file to scan."""
+    if not pdir.exists():
+        return []
+    return sorted(p for p in pdir.glob("*.jsonl") if p.name not in before)
+
+
+def _verify_reported_session(reported: object, new_files: list[Path]) -> None:
+    """When the CLI's own JSON does report a session id, it must be one of the
+    files the directory listing just found; a mismatch means the two ways of
+    identifying the call's session disagree, which is a bug worth raising
+    loudly, not a normal replay outcome to route around."""
+    if reported and f"{reported}.jsonl" not in {f.name for f in new_files}:
+        raise RuntimeError(f"claude reported session {reported}, which is not among the session files it just wrote")
+
+
+def _leaked_real_path(new_files: list[Path], prompt: str, leak_forms: list[str]) -> bool:
+    """Whether a tool call in any of `new_files`' own new turn, or in their
+    subagent transcripts, still names the real checkout. `new_files` (Open 1b)
+    are the session files one call just created, found by listing the project
+    directory rather than trusting stdout, so a timed-out or hard-crashed call
+    is scanned exactly like a clean one. Scoped to each file's own new turn
+    (the same slice `measure` scores), never its whole inherited history: a
+    history that merely mentions an unrelated sibling checkout
+    (`<repo>-flowchart` next to `<repo>`) must never be mistaken for a leak."""
+    if not leak_forms or not new_files:
         return False
-    pdir = project_dir(claude_home, cwd)
-    path = pdir / f"{session_id}.jsonl"
-    turn = _turn(usage.read_entries(path), prompt) if session_id and path.exists() else []
-    subs = (
-        [e for f in sorted((pdir / session_id / "subagents").glob("*.jsonl")) for e in usage.read_entries(f)]
-        if session_id
-        else []
-    )
     pattern = re.compile(_alternation(leak_forms) + _PATH_BOUNDARY)
-    for entry in turn + subs:
-        if entry.get("type") != "assistant":
-            continue
-        for block in (entry.get("message") or {}).get("content") or []:
-            if isinstance(block, dict) and block.get("type") == "tool_use":
-                # Reason: ensure_ascii=False, so a non-ASCII path still matches
-                # instead of surviving only as an escaped \uXXXX sequence.
-                text = json.dumps(block.get("input") or {}, ensure_ascii=False)
-                if pattern.search(text):
-                    return True
+    for f in new_files:
+        turn = _turn(usage.read_entries(f), prompt)
+        subs_dir = f.with_suffix("") / "subagents"
+        subs = (
+            [e for sub in sorted(subs_dir.glob("*.jsonl")) for e in usage.read_entries(sub)]
+            if subs_dir.exists()
+            else []
+        )
+        for entry in turn + subs:
+            if entry.get("type") != "assistant":
+                continue
+            for block in (entry.get("message") or {}).get("content") or []:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    # Reason: ensure_ascii=False, so a non-ASCII path still matches
+                    # instead of surviving only as an escaped \uXXXX sequence.
+                    text = json.dumps(block.get("input") or {}, ensure_ascii=False)
+                    if pattern.search(text):
+                        return True
     return False
 
 
 def run_claude(
     clone: Path, session_id: str, prompt: str, env_extra: dict, claude_home: Path, model: str
-) -> tuple[dict, float, int]:
+) -> tuple[dict, float, int, bool]:
     """One headless fork of the session, with the same access as the user's own
     session. The prompt is the last argument, after `--`, so a message that
     starts with `-` is never parsed as an option. A key in `env_extra` mapped
     to None is removed from the environment instead of set, so a call can
-    strip a variable it must never inherit. Returns exit code -1, never a real
-    process's own code (always >= 0, or a negative signal number), for a call
-    this killed after TIMEOUT_SECONDS."""
+    strip a variable it must never inherit. The fourth return value is True
+    only for a call this killed after TIMEOUT_SECONDS; the exit code next to it
+    is whatever the killed process actually reported (often a negative signal
+    number), never a stand-in like -1, which is also SIGHUP's own code."""
     cmd = [
         os.environ.get("JEV_FORK_CHECK_CLAUDE", "claude"),
         "--resume",
@@ -429,19 +457,20 @@ def run_claude(
     proc = subprocess.Popen(
         cmd, cwd=clone, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True
     )
+    timed_out = False
     try:
         stdout, _ = proc.communicate(timeout=TIMEOUT_SECONDS)
         code = proc.returncode
     except subprocess.TimeoutExpired:
         os.killpg(proc.pid, signal.SIGKILL)
         proc.wait()
-        stdout, code = "", -1
+        stdout, code, timed_out = "", proc.returncode, True
     wall = time.monotonic() - started
     try:
         data = json.loads(stdout)
     except json.JSONDecodeError:
         data = {}
-    return (data if isinstance(data, dict) else {}), wall, code
+    return (data if isinstance(data, dict) else {}), wall, code, timed_out
 
 
 def measure(claude_home: Path, clone: Path, session_id: str, prompt: str, helper: str) -> dict:
@@ -502,9 +531,15 @@ def _replay_side(
         # never tells the judge which side made a result.
         dest = work / f"side-{position}" / f"attempt-{attempt}"
         clone = restore(snap, dest)
+        tops = _worktree_paths(meta)
+        leak_forms = _real_path_forms(tops)
         sid = install_session(snap, clone, claude_home)
         cwd = workdir(meta, clone)
-        leak_forms = _real_path_forms(_worktree_paths(meta))
+        pdir = project_dir(claude_home, cwd)
+        # Reason: a message naming the real checkout (e.g. "fix ~/work/x/y.py")
+        # must never reach `claude` verbatim: under bypass permissions it would
+        # send the job straight into the real repository.
+        job_prompt = _rewrite_real_paths(prompt, tops, clone)
         restored = dest / "restore.json"
         skipped = json.loads(restored.read_text())["skipped"] if restored.exists() else []
         side = {"attempt": attempt, "clone": str(clone), "warm": False, "skipped": skipped}
@@ -512,13 +547,15 @@ def _replay_side(
         before_head = run("git", "-C", str(clone), "rev-parse", "HEAD").strip()
         # Reason: the warm-up forks the same conversation with the same tools
         # and system prompt, so the side's first call can read it from cache.
-        warm_data, _, warm_code = run_claude(cwd, sid, WARMUP, warmup_env, claude_home, model)
-        warm_sid = str(warm_data.get("session_id") or "")
+        before_files = _session_file_names(pdir)
+        warm_data, _, warm_code, warm_timed_out = run_claude(cwd, sid, WARMUP, warmup_env, claude_home, model)
+        warm_new_files = _new_session_files(pdir, before_files)
+        _verify_reported_session(warm_data.get("session_id"), warm_new_files)
         # Reason: every attempt is scanned, whether it succeeded, crashed or
         # timed out, since a leak can happen before a call ever fails.
-        if _leaked_real_path(claude_home, cwd, warm_sid, WARMUP, leak_forms):
+        if _leaked_real_path(warm_new_files, WARMUP, leak_forms):
             return side, "a replay used a path into the real repository"
-        if warm_code == -1:
+        if warm_timed_out:
             return side, "timed out"
         if warm_code != 0 or warm_data.get("is_error"):
             reason = "crashed"
@@ -528,20 +565,28 @@ def _replay_side(
         if after_status != before_status or after_head != before_head:
             reason = "warm-up changed the clone"
             continue
+        warm_sid = str(warm_data.get("session_id") or "")
         warm = measure(claude_home, cwd, warm_sid, WARMUP, "")
-        if warm["calls"] == 0 or warm["unpriced_calls"]:
+        if warm["calls"] == 0:
             reason = "never warm"
             continue
-        data, wall, code = run_claude(cwd, sid, prompt, job_env, claude_home, model)
-        job_sid = str(data.get("session_id") or "")
-        if _leaked_real_path(claude_home, cwd, job_sid, prompt, leak_forms):
+        # Reason: an unpriced call is never retried (a fresh clone would price
+        # it the same way), and it must stop the other side too.
+        if warm["unpriced_calls"]:
+            return side, "unpriced"
+        before_files = _session_file_names(pdir)
+        data, wall, code, job_timed_out = run_claude(cwd, sid, job_prompt, job_env, claude_home, model)
+        job_new_files = _new_session_files(pdir, before_files)
+        _verify_reported_session(data.get("session_id"), job_new_files)
+        if _leaked_real_path(job_new_files, job_prompt, leak_forms):
             return side, "a replay used a path into the real repository"
-        if code == -1:
+        if job_timed_out:
             return side, "timed out"
         if code != 0 or data.get("is_error"):
             reason = "crashed"
             continue
-        m = measure(claude_home, cwd, job_sid, prompt, meta["helper"])
+        job_sid = str(data.get("session_id") or "")
+        m = measure(claude_home, cwd, job_sid, job_prompt, meta["helper"])
         # Reason: the warm-up's own calls being priced does not prove the JOB's
         # first call actually read the shared prefix from cache; both are checked.
         if m["first_cache_read"] < 0.99 * warm["first_context"] - 2_000:
@@ -557,9 +602,7 @@ def _replay_side(
             "skipped": skipped,
             **m,
         }
-        # Reason: an unpriced call is never retried (a fresh clone would price
-        # it the same way), and it must stop the other side too: a call with
-        # no price would count as free and flatter one side.
+        # Reason: a call with no price would count as free and flatter one side.
         if m["unpriced_calls"]:
             return side, "unpriced"
         return side, ""

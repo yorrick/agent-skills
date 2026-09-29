@@ -399,6 +399,19 @@ def test_unpriced_call_makes_the_pair_inconclusive(
     assert len(result["sides"]) == 1
 
 
+def test_unpriced_warmup_stops_at_once_instead_of_being_retried_as_never_warm(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling T11g small 3: an unpriced call happened (unlike a truly cold, calls
+    == 0 warm-up), so a fresh clone would not fix it; it must not be retried."""
+    monkeypatch.setenv("FAKE_CLAUDE_UNPRICED_WARMUP", "1")
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert result["inconclusive"] and result["reason"] == "unpriced"
+    first = result["order"][0]
+    assert list(result["sides"]) == [first]
+    assert result["sides"][first]["attempt"] == 1
+
+
 def test_warm_warmup_but_cold_job_is_retried(
     tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -446,8 +459,10 @@ def test_timeout_kills_the_whole_process_group(
     monkeypatch.setattr(replay, "TIMEOUT_SECONDS", 1)
     pidfile = tmp_path / "child.pid"
     monkeypatch.setenv("FAKE_CLAUDE_SLEEP_CHILD", str(pidfile))
-    _, _, code = replay.run_claude(tmp_path, "sid", "hello", {}, fake_claude, "claude-opus-5-5")
-    assert code == -1
+    # Ruling T11g small 1: -1 is also SIGHUP's own exit code, so the timeout is its
+    # own flag now, never inferred from the exit code alone.
+    _, _, _, timed_out = replay.run_claude(tmp_path, "sid", "hello", {}, fake_claude, "claude-opus-5-5")
+    assert timed_out is True
     child_pid = int(pidfile.read_text())
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
@@ -458,6 +473,40 @@ def test_timeout_kills_the_whole_process_group(
         time.sleep(0.1)
     else:
         pytest.fail("the sleep child was not killed along with the timed-out fake claude")
+
+
+def test_job_timeout_gives_the_reason_timed_out(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling T11g small 5: the warm-up succeeds normally; only the job times out."""
+    monkeypatch.setattr(replay, "TIMEOUT_SECONDS", 0.5)
+    monkeypatch.setenv("FAKE_CLAUDE_SLEEP_CHILD_JOB", str(tmp_path / "child.pid"))
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert result["inconclusive"] and result["reason"] == "timed out"
+    first = result["order"][0]
+    assert list(result["sides"]) == [first]
+    assert result["sides"][first]["attempt"] == 1
+
+
+def test_timeout_after_a_leak_reports_the_leak_not_timed_out(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Ruling T11g Open 1b: the fake writes a session file whose new turn names the
+    real toplevel, then hangs past TIMEOUT_SECONDS. Found via directory listing
+    (Open 1b), not stdout, which a hung call never prints. The reason is the leak,
+    not the timeout, and cmd_replay prints the warning."""
+    meta = json.loads((snap / "meta.json").read_text())
+    monkeypatch.setattr(replay, "TIMEOUT_SECONDS", 0.5)
+    monkeypatch.setenv("FAKE_CLAUDE_LEAK_PATH", meta["toplevel"])
+    monkeypatch.setenv("FAKE_CLAUDE_HANG_AFTER_WRITE", "1")
+    monkeypatch.setattr(fork_check, "root", lambda: tmp_path / "fc")
+    assert fork_check.main(["mark", snap.name, "safe"]) == 0
+    assert fork_check.main(["replay", snap.name]) == 0
+    out = capsys.readouterr().out
+    assert "WARNING" in out and "real repository" in out
+    status = fork_check.statuses()[snap.name]
+    assert status["status"] == "inconclusive"
+    assert status["reason"] == "a replay used a path into the real repository"
 
 
 def test_leaked_real_path_makes_the_pair_inconclusive_and_stops_the_second_side(
@@ -569,6 +618,47 @@ def test_leak_scan_runs_on_a_crashed_attempt_too(
     result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
     assert result["inconclusive"]
     assert result["reason"] == "a replay used a path into the real repository"
+
+
+def test_job_prompt_is_rewritten_before_it_reaches_claude(tmp_path: Path, repo: Path, fake_claude: Path) -> None:
+    """Ruling T11g New (Important): a message naming the real checkout (e.g. "fix
+    ~/work/x/y.py") must never reach `claude` verbatim under bypass permissions."""
+    transcript = write(tmp_path / "t.jsonl", [typed("start"), assistant("r1")])
+    message = f"fix {repo}/x.py, please"
+    sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), message, "NOTE", EVENT)
+    snap = tmp_path / "fc" / "snapshots" / sid
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert not result["inconclusive"]
+    calls = calls_log(tmp_path)
+    job_calls = [c for c in calls if not prompt_of(c).startswith("Reply")]
+    assert job_calls
+    for c in job_calls:
+        assert str(repo) not in prompt_of(c)
+        assert prompt_of(c).endswith("/x.py, please")
+
+
+def test_refuse_if_leaked_matches_a_non_ascii_path() -> None:
+    """Ruling T11g small 2: `_refuse_if_leaked`'s own regex match must see a
+    non-ASCII path; the fix is in `install_session`'s ensure_ascii=False, exercised
+    end to end by the next test."""
+    forms = ["/Users/x/wörk/agent-skills"]
+    text = json.dumps({"note": "see /Users/x/wörk/agent-skills/CLAUDE.md"}, ensure_ascii=False)
+    with pytest.raises(replay.Inconclusive, match="still names the real repository"):
+        replay._refuse_if_leaked(text, forms)
+
+
+def test_install_session_preserves_non_ascii_text_unescaped(tmp_path: Path, repo: Path) -> None:
+    """Ruling T11g small 2: `install_session` must write with ensure_ascii=False, or
+    a non-ASCII leaked path would only ever survive as an escaped \\uXXXX sequence,
+    which `_refuse_if_leaked`'s plain-text regex would never match."""
+    transcript = write(tmp_path / "t.jsonl", [typed("start"), assistant("r1", text="café notes")])
+    sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "build it", "N", EVENT)
+    snap = tmp_path / "fc" / "snapshots" / sid
+    clone = replay.restore(snap, tmp_path / "r")
+    new_sid = replay.install_session(snap, clone, tmp_path / "claude-home")
+    text = (replay.project_dir(tmp_path / "claude-home", clone) / f"{new_sid}.jsonl").read_text()
+    assert "café notes" in text
+    assert "\\u00e9" not in text
 
 
 def test_history_naming_a_sibling_checkout_is_not_flagged(tmp_path: Path, repo: Path, fake_claude: Path) -> None:

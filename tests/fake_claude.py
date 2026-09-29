@@ -17,11 +17,16 @@ Env vars the tests use to steer it:
                             still there to find), then reports is_error instead of exiting non-zero:
                             a graceful crash, the kind whose output still names a session id.
   FAKE_CLAUDE_UNPRICED      the job call's model is one `prices.json` has no entry for.
+  FAKE_CLAUDE_UNPRICED_WARMUP  the same, but for the warm-up call.
   FAKE_CLAUDE_LEAK_PATH=<path>  the job call's tool input names this path, simulating an
                             incomplete path rewrite.
   FAKE_CLAUDE_SLEEP_CHILD=<path>  spawns a detached `sleep 60`, writes its pid to the named
-                            file, then sleeps itself, for exercising the timeout/process-group
-                            kill. Short-circuits everything else.
+                            file, then sleeps itself, for any call. Short-circuits everything else.
+  FAKE_CLAUDE_SLEEP_CHILD_JOB=<path>  the same, but only for the job call, so the warm-up
+                            succeeds normally first.
+  FAKE_CLAUDE_HANG_AFTER_WRITE  the job call writes its session file (and any injected leak) and
+                            RESULT.txt as usual, logs the call, then hangs before printing its
+                            JSON result: a timeout whose transcript is still there to scan.
   FAKE_CLAUDE_LOG           appends each call's details to a file.
 """
 
@@ -50,9 +55,12 @@ def log(**extra: object) -> None:
             handle.write(json.dumps(entry) + "\n")
 
 
-if pidfile := os.environ.get("FAKE_CLAUDE_SLEEP_CHILD"):
+sleep_pidfile = os.environ.get("FAKE_CLAUDE_SLEEP_CHILD")
+if not sleep_pidfile and not warm:
+    sleep_pidfile = os.environ.get("FAKE_CLAUDE_SLEEP_CHILD_JOB")
+if sleep_pidfile:
     child = subprocess.Popen(["sleep", "60"])
-    Path(pidfile).write_text(str(child.pid))
+    Path(sleep_pidfile).write_text(str(child.pid))
     time.sleep(60)
     sys.exit(0)  # never reached in the test: the parent kills the whole group first
 
@@ -113,7 +121,10 @@ if not warm and (leak_path := os.environ.get("FAKE_CLAUDE_LEAK_PATH")):
     content.append({"type": "tool_use", "id": "t2", "name": "Edit", "input": {"file_path": f"{leak_path}/app.py"}})
 
 if not cold_warmup:
-    model_name = "unknown-model" if not warm and os.environ.get("FAKE_CLAUDE_UNPRICED") == "1" else "claude-opus-5-5"
+    unpriced = (not warm and os.environ.get("FAKE_CLAUDE_UNPRICED") == "1") or (
+        warm and os.environ.get("FAKE_CLAUDE_UNPRICED_WARMUP") == "1"
+    )
+    model_name = "unknown-model" if unpriced else "claude-opus-5-5"
     cold_job = not warm and os.environ.get("FAKE_CLAUDE_COLD_JOB") == "1"
     ctx = 100_000
     entries.append(
@@ -137,6 +148,10 @@ if not cold_warmup:
 if not warm:
     Path("RESULT.txt").write_text(f"done by {'delegate' if note else 'keep'}\n")
 log()
+if not warm and os.environ.get("FAKE_CLAUDE_HANG_AFTER_WRITE") == "1":
+    # Reason: the session file (and any leak in it) is already on disk; this
+    # simulates a run the caller's timeout has to kill, not a clean exit.
+    time.sleep(60)
 result: dict = {"type": "result", "session_id": new, "result": "ok"}
 if not warm and os.environ.get("FAKE_CLAUDE_ERROR_RESULT") == "1":
     result["is_error"] = True

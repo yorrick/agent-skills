@@ -436,11 +436,11 @@ def test_every_git_call_on_the_real_checkout_takes_no_optional_lock(
         calls.append(([str(a) for a in args], kwargs.get("env")))  # type: ignore[arg-type]
         return real_run(args, *rest, **kwargs)  # type: ignore[call-overload]
 
-    monkeypatch.setattr(subprocess, "run", recording_run)
-    snap = take(tmp_path, repo)
-    clone = replay.restore(snap, tmp_path / "r")
-    replay.install_session(snap, clone, tmp_path / "claude-home")
-    monkeypatch.undo()
+    with monkeypatch.context() as m:
+        m.setattr(subprocess, "run", recording_run)
+        snap = take(tmp_path, repo)
+        clone = replay.restore(snap, tmp_path / "r")
+        replay.install_session(snap, clone, tmp_path / "claude-home")
     tops = {str(repo), str(repo.resolve())}
     on_source = [env for args, env in calls if args[0] == "git" and tops & set(args)]
     assert len(on_source) >= 10

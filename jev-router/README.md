@@ -95,7 +95,8 @@ kept and delegated, to measure real cost, time and quality on the user's own wor
 commands, in order: `check`, `list`, `mark`, `replay`, `judge`, `publish`, `report`, and
 `shadow` (shadow-mode decisions against what really happened) at any time. Replay a job
 captured in a worktree before removing that worktree: once its checkout is gone, the job is
-inconclusive. See
+inconclusive. The judge (Codex) reads both results, but its copies leave out the restored
+secrets such as `.env`. See
 [the design spec](../docs/superpowers/specs/2026-09-28-jev-router-cache-aware-design.md)
 for the full design and the validation it must pass.
 

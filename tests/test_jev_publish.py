@@ -224,6 +224,74 @@ def test_start_content_only_in_an_untracked_file_is_not_exempt(tmp_path: Path, r
     assert git(remote, "branch", "-a").strip() == ""
 
 
+def _snapshot_with_an_untracked_copy_of_env(tmp_path: Path, repo: Path) -> Path:
+    (repo / "copy.txt").write_text("TOKEN=x\n")  # untracked, the same bytes as .env
+    git(repo, "remote", "add", "origin", "git@github.com:acme/shop.git")
+    transcript = write(tmp_path / "t.jsonl", [typed("start"), assistant("r1")])
+    sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "build it", "N", EVENT)
+    return tmp_path / "fc" / "snapshots" / sid
+
+
+def commit_then_remove_a_copy_of_env(clone: Path) -> None:
+    """What F17's replay does: the copy lives only in the replay's history."""
+    (clone / "copy.txt").unlink()
+    shutil.copy(clone / ".env", clone / "config.txt")
+    git(clone, "add", "config.txt")
+    git(clone, "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-qm", "the replay committed a copy")
+    git(clone, "rm", "-q", "config.txt")
+    git(clone, "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-qm", "and removed it again")
+
+
+def test_a_copy_in_history_matching_an_untracked_start_file_is_refused(tmp_path: Path, repo: Path) -> None:
+    """F17: the history walk starts at the snapshot HEAD. From refs/jev/start, the
+    committed copy's blob is reachable through the start tree's untracked
+    `copy.txt` and would be skipped."""
+    snap = _snapshot_with_an_untracked_copy_of_env(tmp_path, repo)
+    sid = snap.name
+    keep, delegate = replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d")
+    commit_then_remove_a_copy_of_env(keep)
+    remote = tmp_path / "copy.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    sides = {"cost": 1.0, "wall_seconds": 60, "calls": 10, "delegated": True}
+    result = {
+        "id": sid,
+        "sides": {"keep": {**sides, "clone": str(keep)}, "delegate": {**sides, "clone": str(delegate)}},
+    }
+    calls: list[tuple[str, ...]] = []
+    with pytest.raises(RuntimeError, match=r"config\.txt in the keep clone holds the content of .* \.env"):
+        publish.publish(snap, result, gh=_gh(calls), remote=str(remote))
+    assert git(remote, "branch", "-a").strip() == ""
+
+
+def test_nothing_to_protect_skips_the_hashing_and_the_history_walk(
+    tmp_path: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B3: with no restored ignored file to protect (only a dependency folder was
+    restored), an unreadable untracked file cannot fail the check, and no
+    history is walked."""
+    (repo / ".env").unlink()
+    transcript = write(tmp_path / "t.jsonl", [typed("start"), assistant("r1")])
+    sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "build it", "N", EVENT)
+    clone = replay.restore(tmp_path / "fc" / "snapshots" / sid, tmp_path / "k")
+    assert replay.restored_ignored(clone) == ["node_modules"] and replay.restored_blobs(clone) == {}
+    locked = clone / "locked.txt"
+    locked.write_text("no one may read this\n")
+    locked.chmod(0o000)
+    commands: list[tuple[str, ...]] = []
+    real_run = replay.run
+
+    def recording(*args: str, **kwargs: object) -> str:
+        commands.append(args)
+        return real_run(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(replay, "run", recording)
+    try:
+        replay.refuse_if_ignored_leaked(clone, replay.restored_ignored(clone), "keep")
+    finally:
+        locked.chmod(0o644)
+    assert not [c for c in commands if "rev-list" in c or "hash-object" in c]
+
+
 def test_restore_records_the_restored_files_content(tmp_path: Path, repo: Path, snap: Path) -> None:
     """Same selection as the content check: the 8-byte `.env` is recorded, the
     `node_modules` lock file (a dependency folder, and 2 bytes) is not."""

@@ -476,6 +476,10 @@ def _refuse_if_content_leaked(
     hash-object call covers those and the working-tree files."""
     secrets = restored_blobs(clone)
     now = _restored_files(clone, ignored)
+    # Reason: nothing to protect, so no working-tree file is hashed (one the
+    # check cannot read would fail it) and no history is walked.
+    if not secrets and not now:
+        return
     worktree = [p for p in status if (clone / p).is_file() and not (clone / p).is_symlink() and "\n" not in p]
     hashed = _blob_ids(clone, now + worktree)
     for oid, path in zip(hashed[: len(now)], now, strict=True):
@@ -491,7 +495,11 @@ def _refuse_if_content_leaked(
     if not secrets:
         return
     candidates = [(oid, path) for kind, oid, path in tree if kind == "blob"]
-    candidates += _object_ids(clone, "refs/jev/start..HEAD")
+    # Reason (Ruling F17): from the snapshot HEAD, not from refs/jev/start. The
+    # start tree holds the tar's untracked files, so `start..HEAD` would leave
+    # out a blob matching one of them that the replay committed under another
+    # name and deleted later.
+    candidates += _object_ids(clone, "refs/jev/start^..HEAD")
     candidates += list(zip(hashed[len(now) :], worktree, strict=True))
     for oid, path in candidates:
         if oid in secrets:
@@ -520,9 +528,10 @@ def refuse_if_ignored_leaked(clone: Path, ignored: list[str], label: str) -> Non
         return
     tree = _tree(clone, "HEAD")
     # --diff-merges=m: a path introduced only by how a merge resolved a
-    # conflict is still listed, not skipped as merges normally are.
+    # conflict is still listed, not skipped as merges normally are. The range
+    # starts at the snapshot HEAD, like the content check's (Ruling F17).
     history_out = run(
-        "git", "-C", str(clone), "log", "--name-only", "-z", "--format=", "--diff-merges=m", "refs/jev/start..HEAD"
+        "git", "-C", str(clone), "log", "--name-only", "-z", "--format=", "--diff-merges=m", "refs/jev/start^..HEAD"
     )
     history = [p for p in history_out.split("\0") if p]
     status_out = run("git", "-C", str(clone), "status", "--porcelain", "-z", "--untracked-files=all", "--no-renames")

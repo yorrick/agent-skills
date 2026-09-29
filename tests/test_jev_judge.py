@@ -200,6 +200,31 @@ def test_a_restored_env_edited_then_copied_is_refused_with_no_codex_call(tmp_pat
     assert calls == []
 
 
+def test_a_copy_in_history_matching_an_untracked_start_file_is_refused_with_no_codex_call(
+    tmp_path: Path, repo: Path
+) -> None:
+    """F17, through the judge: it reads the same history as publish."""
+    from test_jev_publish import _snapshot_with_an_untracked_copy_of_env, commit_then_remove_a_copy_of_env
+
+    snap = _snapshot_with_an_untracked_copy_of_env(tmp_path, repo)
+    keep, delegate = replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d")
+    commit_then_remove_a_copy_of_env(delegate)
+    (keep / "copy.txt").unlink()  # else keep is refused first, for its untracked copy (F13)
+    calls: list[str] = []
+
+    def codex(prompt: str, work: Path) -> str:
+        calls.append(prompt)
+        return ANSWER
+
+    result = {
+        "id": "x",
+        "sides": {"keep": {"clone": str(keep), "cost": 1.0}, "delegate": {"clone": str(delegate), "cost": 1.0}},
+    }
+    with pytest.raises(RuntimeError, match=r"config\.txt in the delegate clone holds the content of .* \.env"):
+        judge.judge(snap, result, tmp_path / "j", codex=codex, rng=random.Random(1))
+    assert calls == []
+
+
 # F14: a replay-made link into the fork-check folder would unblind the judge.
 def _link_case(tmp_path: Path, snap: Path, target: Path) -> tuple[dict, list[str], Callable[[str, Path], str]]:
     keep = replay.restore(snap, tmp_path / "k")

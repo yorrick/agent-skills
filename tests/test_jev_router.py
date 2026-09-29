@@ -548,7 +548,9 @@ def test_a_session_on_an_unpriced_model_is_not_decided(home: Path, jev: FakeJev)
     jev.raw_answers = steps_answers(3.5)
     entries = [assistant("r1", model="claude-future-9", read=800_000)]
     assert claude_hook(home, jev, entries=entries) == ""
-    assert log(home)[0]["outcome"] == "unpriced"
+    (event,) = log(home)
+    assert event["outcome"] == "unpriced" and event["model"] == "claude-future-9"
+    assert jev.requests == []  # nothing was paid for
 
 
 def test_a_step_score_out_of_range_is_an_error(home: Path, jev: FakeJev) -> None:
@@ -647,6 +649,9 @@ def test_status_counts_claude_code_decisions(home: Path, jev: FakeJev) -> None:
     text = run(home, jev, "status").stdout
     assert "Claude Code mode: live." in text
     assert "2 messages decided, 1 worth a fresh subagent, 0 snapshots." in text
+    # Their size answers are not 0.2.0 routing decisions, so the size table leaves them out.
+    assert re.search(r"Messages Jev sized since \S+: 0\n", text)
+    assert "routed" not in text
 
 
 # --- opencode: the hook module, through the repository's opencode entry -------------
@@ -839,6 +844,13 @@ def test_each_claude_tier_has_a_helper_agent_on_its_model() -> None:
         assert meta.get("effort") == tier["effort"], agent
         label = f"{tier['model']} at {tier['effort']} thinking" if tier["effort"] else tier["model"]
         assert agent.read_text().rstrip().endswith(f"Done by {label}"), agent
+
+
+def test_every_claude_tier_model_has_a_price() -> None:
+    """The Claude route prices every helper it can pick without checking first."""
+    prices = json.loads(SCRIPT.with_name("prices.json").read_text())["per_million_tokens"]
+    for tier in json.loads(TIERS_FILE.read_text())["harnesses"]["claude"]:
+        assert tier["model_id"] in prices, tier["size"]
 
 
 def test_every_harness_has_every_size_smallest_first() -> None:

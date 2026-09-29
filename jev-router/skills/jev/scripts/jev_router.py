@@ -594,37 +594,40 @@ def route_cache_aware(config: dict, payload: dict, prompt: str) -> str:
         event.update(outcome="error", error=error_label(exc))
         record(event)
         return ""
+    parent = table.get(current.model)
+    if parent is None:  # no price, no decision: Jev is not paid to size this message
+        event["outcome"] = "unpriced"
+        record(event)
+        return ""
     tiers = TIERS["claude"]
     state = {"agent_previous_reply": current.previous_reply, "message": prompt[:MAX_MESSAGE_CHARS]}
     verdict = consult(config, event, prompt, tiers, parse_steps_verdict, state=state, questions=steps_questions(tiers))
     note = None
     if verdict is not None:
         tier = next(t for t in tiers if t.size == verdict.size)
-        parent, helper = table.get(current.model), table.get(tier.model_id)
         event.update(steps=verdict.steps, size=verdict.size, helper=tier.helper, helper_model=tier.model_id)
-        if parent is None or helper is None:
-            event["outcome"] = "unpriced"
-        else:
-            sample = delegation.calls_for(bins, verdict.steps)
-            decision = delegation.decide(
-                sample,
-                current.context,
-                current.added,
-                current.output,
-                parent,
-                helper,
-                same_model=tier.model_id == current.model,
-            )
-            event.update(
-                outcome="delegate" if decision.delegate else "keep",
-                expected_keep=round(decision.expected_keep, 4),
-                expected_saving=round(decision.expected_saving, 4),
-                loss_probability=round(decision.loss_probability, 4),
-                median_calls=decision.median_calls,
-                calls=list(sample),
-            )
-            if decision.delegate:
-                note = delegate_note(tier, decision, current.context)
+        sample = delegation.calls_for(bins, verdict.steps)
+        decision = delegation.decide(
+            sample,
+            current.context,
+            current.added,
+            current.output,
+            parent,
+            # Reason: indexed, not checked: test_every_claude_tier_model_has_a_price
+            # keeps every helper model in prices.json.
+            table[tier.model_id],
+            same_model=tier.model_id == current.model,
+        )
+        event.update(
+            outcome="delegate" if decision.delegate else "keep",
+            expected_keep=round(decision.expected_keep, 4),
+            expected_saving=round(decision.expected_saving, 4),
+            loss_probability=round(decision.loss_probability, 4),
+            median_calls=decision.median_calls,
+            calls=list(sample),
+        )
+        if decision.delegate:
+            note = delegate_note(tier, decision, current.context)
     record(event)
     return hook_json(note) if note and mode == "live" else ""
 
@@ -726,7 +729,9 @@ def status_text(config: dict, events: list[dict]) -> str:
     state = "ON" if config.get("enabled") else "OFF"
     lines = [f"Jev router is {state}." + (f" {PRIVACY}" if state == "ON" else " Turn it on with: /jev on")]
     messages = [e for e in events if e.get("harness") in HARNESSES]
-    sized = [e for e in messages if "size" in e]
+    # Reason: a version-3 (Claude Code) event's size is not a 0.2.0 routing
+    # decision, so it has its own line below and stays out of this table.
+    sized = [e for e in messages if "size" in e and e.get("version") != 3]
     since = f" since {messages[0]['ts'][:10]}" if messages else ""
     lines.append(f"\nMessages Jev sized{since}: {len(sized)}")
     if sized:

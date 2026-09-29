@@ -186,6 +186,44 @@ def test_a_restored_env_moved_to_another_name_is_refused(tmp_path: Path, repo: P
     assert not any(c[:2] == ("pr", "create") for c in calls)
 
 
+def test_a_restored_env_edited_then_copied_is_refused(tmp_path: Path, repo: Path, snap: Path) -> None:
+    """N1: the copy matches neither id restore recorded, only the `.env` as it is now."""
+    keep, delegate, remote, sid, result = _setup(tmp_path, repo, snap)
+    with (keep / ".env").open("a") as env:
+        env.write("EXTRA=1\n")
+    shutil.copy(keep / ".env", keep / "config.txt")
+    calls: list[tuple[str, ...]] = []
+    with pytest.raises(RuntimeError, match=r"config\.txt in the keep clone holds the content of .* \.env"):
+        publish.publish(snap, result, gh=_gh(calls), remote=str(remote))
+    assert git(remote, "branch", "-a").strip() == ""
+    assert not any(c[:2] == ("pr", "create") for c in calls)
+
+
+def test_start_content_only_in_an_untracked_file_is_not_exempt(tmp_path: Path, repo: Path) -> None:
+    """F13: only what the committed base (the snapshot HEAD) already holds is
+    exempt. An untracked start file with the `.env` content is not: the replay
+    deletes it and copies `.env` to `config.txt`, which is refused."""
+    (repo / "copy.txt").write_text("TOKEN=x\n")  # untracked, the same bytes as .env
+    git(repo, "remote", "add", "origin", "git@github.com:acme/shop.git")
+    transcript = write(tmp_path / "t.jsonl", [typed("start"), assistant("r1")])
+    sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "build it", "N", EVENT)
+    snap = tmp_path / "fc" / "snapshots" / sid
+    keep, delegate = replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d")
+    (keep / "copy.txt").unlink()
+    shutil.copy(keep / ".env", keep / "config.txt")
+    remote = tmp_path / "copy.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    sides = {"cost": 1.0, "wall_seconds": 60, "calls": 10, "delegated": True}
+    result = {
+        "id": sid,
+        "sides": {"keep": {**sides, "clone": str(keep)}, "delegate": {**sides, "clone": str(delegate)}},
+    }
+    calls: list[tuple[str, ...]] = []
+    with pytest.raises(RuntimeError, match=r"config\.txt in the keep clone holds the content of .* \.env"):
+        publish.publish(snap, result, gh=_gh(calls), remote=str(remote))
+    assert git(remote, "branch", "-a").strip() == ""
+
+
 def test_restore_records_the_restored_files_content(tmp_path: Path, repo: Path, snap: Path) -> None:
     """Same selection as the content check: the 8-byte `.env` is recorded, the
     `node_modules` lock file (a dependency folder, and 2 bytes) is not."""

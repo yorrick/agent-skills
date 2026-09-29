@@ -450,31 +450,49 @@ def _blob_ids(clone: Path, paths: list[str]) -> list[str]:
     return result.stdout.split()
 
 
-def _refuse_if_content_leaked(clone: Path, tree: list[tuple[str, str, str]], status: list[str], label: str) -> None:
+def _object_ids(clone: Path, *revs: str) -> list[tuple[str, str]]:
+    """(object id, path or "(no path)") of every object `git rev-list --objects`
+    lists for `revs`."""
+    out = run("git", "-C", str(clone), "rev-list", "--objects", *revs)
+    listed = []
+    for line in out.splitlines():
+        oid, _, path = line.partition(" ")
+        listed.append((oid, path or "(no path)"))
+    return listed
+
+
+def _refuse_if_content_leaked(
+    clone: Path, ignored: list[str], tree: list[tuple[str, str, str]], status: list[str], label: str
+) -> None:
     """Refuses if a restored ignored file's exact content shows up under another
     path: in HEAD's tree, in any object the replay's commits introduced, or in a
     working-tree file `git status` lists. A replay that copies or moves `.env` to
     `config.txt` would otherwise publish the secret, or show it to the judge,
-    under a name no path check knows. The restored files' ids come from
-    `restore.json`, hashed before the replay ran, so a moved file still counts;
-    only the working-tree files are hashed here."""
+    under a name no path check knows.
+
+    The secrets are the union of the ids `restore` recorded before the replay
+    ran (so a moved `.env` still counts, Ruling F10) and the restored files as
+    they are now (so one the replay edited, then copied, counts too). One
+    hash-object call covers those and the working-tree files."""
     secrets = restored_blobs(clone)
-    # Reason (accepted in Ruling F11): content already in the start state is
-    # published anyway (it sits in the base history or the start tree), so
-    # matching it leaks nothing new; a `.env` copied from a tracked
-    # `.env.example` must not refuse every job.
-    for kind, oid, _ in _tree(clone, "refs/jev/start"):
-        if kind == "blob":
-            secrets.pop(oid, None)
+    now = _restored_files(clone, ignored)
+    worktree = [p for p in status if (clone / p).is_file() and not (clone / p).is_symlink() and "\n" not in p]
+    hashed = _blob_ids(clone, now + worktree)
+    for oid, path in zip(hashed[: len(now)], now, strict=True):
+        secrets.setdefault(oid, path)
+    # Reason (accepted in Ruling F11, narrowed by F13): content the committed
+    # base already holds is published anyway, since the push carries the
+    # snapshot HEAD's whole history, so matching it leaks nothing new; a `.env`
+    # copied from a tracked `.env.example` must not refuse every job. Only
+    # objects reachable from `refs/jev/start^` (the snapshot HEAD) are exempt,
+    # never the start tree's untracked files from the tar.
+    for oid, _ in _object_ids(clone, "refs/jev/start^"):
+        secrets.pop(oid, None)
     if not secrets:
         return
-    worktree = [p for p in status if (clone / p).is_file() and not (clone / p).is_symlink() and "\n" not in p]
-    introduced = run("git", "-C", str(clone), "rev-list", "--objects", "refs/jev/start..HEAD")
     candidates = [(oid, path) for kind, oid, path in tree if kind == "blob"]
-    for line in introduced.splitlines():
-        oid, _, path = line.partition(" ")
-        candidates.append((oid, path or "(no path)"))
-    candidates += list(zip(_blob_ids(clone, worktree), worktree, strict=True))
+    candidates += _object_ids(clone, "refs/jev/start..HEAD")
+    candidates += list(zip(hashed[len(now) :], worktree, strict=True))
     for oid, path in candidates:
         if oid in secrets:
             raise RuntimeError(
@@ -513,7 +531,7 @@ def refuse_if_ignored_leaked(clone: Path, ignored: list[str], label: str) -> Non
         hit = _matches_ignored(path, ignored)
         if hit:
             raise RuntimeError(f"{hit} would be published or shown from the {label} clone (found as {path}); refusing")
-    _refuse_if_content_leaked(clone, tree, status, label)
+    _refuse_if_content_leaked(clone, ignored, tree, status, label)
 
 
 DEFAULT_CLAUDE_HOME = Path.home() / ".claude"

@@ -177,6 +177,28 @@ def test_a_restored_env_moved_to_another_name_is_refused_with_no_codex_call(tmp_
     assert not (tmp_path / "j").exists()
 
 
+def test_a_restored_env_edited_then_copied_is_refused_with_no_codex_call(tmp_path: Path, snap: Path) -> None:
+    """N1: the restored files are hashed again at check time, alongside the ids restore recorded."""
+    keep = replay.restore(snap, tmp_path / "k")
+    delegate = replay.restore(snap, tmp_path / "d")
+    with (delegate / ".env").open("a") as env:
+        env.write("EXTRA=1\n")
+    shutil.copy(delegate / ".env", delegate / "config.txt")
+    calls: list[str] = []
+
+    def codex(prompt: str, work: Path) -> str:
+        calls.append(prompt)
+        return ANSWER
+
+    result = {
+        "id": "x",
+        "sides": {"keep": {"clone": str(keep), "cost": 1.0}, "delegate": {"clone": str(delegate), "cost": 1.0}},
+    }
+    with pytest.raises(RuntimeError, match=r"config\.txt in the delegate clone holds the content of .* \.env"):
+        judge.judge(snap, result, tmp_path / "j", codex=codex, rng=random.Random(1))
+    assert calls == []
+
+
 # Final Minor 13: a timed-out judge takes the processes it started down with it.
 def fake_codex(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, script: str) -> None:
     exe = tmp_path / "fake-codex"

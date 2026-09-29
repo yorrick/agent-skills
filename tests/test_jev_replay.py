@@ -880,6 +880,11 @@ def test_replays_never_inherit_the_launching_sessions_markers(
         "CLAUDE_CODE_USE_VERTEX",
         "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
         "CLAUDE_CODE_SKIP_VERTEX_AUTH",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
+        "CLAUDE_CODE_CLIENT_CERT",
+        "CLAUDE_CODE_CLIENT_KEY",
+        "CLAUDE_CODE_CLIENT_KEY_PASSPHRASE",
     }
     for call in calls:
         inherited = set(call["claude_env"])

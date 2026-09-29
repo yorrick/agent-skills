@@ -607,6 +607,11 @@ KEPT_CLAUDE_CODE_VARS = {
     "CLAUDE_CODE_USE_VERTEX",
     "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
     "CLAUDE_CODE_SKIP_VERTEX_AUTH",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
+    "CLAUDE_CODE_CLIENT_CERT",
+    "CLAUDE_CODE_CLIENT_KEY",
+    "CLAUDE_CODE_CLIENT_KEY_PASSPHRASE",
 }
 # Reason: a path is only ever rewritten (or flagged as leaked) when it is NOT
 # immediately followed by another path-name character, so a shorter checkout

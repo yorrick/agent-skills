@@ -62,9 +62,9 @@ the context comparison in point 5 came after that review.
 
 Claude Code and Codex. The helper is the harness's own subagent, started with a fresh
 context (What the session is told), so it buys the fresh-context saving without any new
-process or runner. Both harnesses start in shadow mode. Claude Code delegates live once
-its fork check passes. Codex has no transcripts in the study, so it first gets its own
-calibration from its shadow logs, then its own fork check. opencode keeps 0.2.0's
+process or runner. Work starts with Claude Code, which delegates live once its fork
+check passes. Codex follows: it has no transcripts in the study, so it first gets its
+own calibration from its shadow logs, then its own fork check. opencode keeps 0.2.0's
 behaviour; its task subagents could carry the same design later.
 
 ### When the router decides
@@ -124,8 +124,9 @@ E[keep(k) - delegate(k)] is at least $0.25 and at least 15% of E[keep(k)], and t
 probability that delegating costs more is at most 20%. The second gate matters because
 a rare very long job can make the expected saving positive while most such jobs lose.
 The margins stand in for what the model leaves out (a helper re-reading files, a failed
-hand-off); they are tuned on shadow logs and a few trial forks, then frozen before the
-fork check.
+hand-off). The user accepted these values, so they are frozen now, together with the
+Claude Code calibration table fitted on the study; there is no separate tuning period
+before the fork check.
 
 The helper is the tier Jev's size picks (`tiers.json`). The saving often comes from the
 fresh context alone, so a helper on the session's own model and effort is a valid
@@ -152,13 +153,15 @@ relay. When the router does not delegate, it says nothing.
 
 ### Shadow mode
 
-Before it instructs anything, the router runs in shadow mode (`"mode": "shadow"` in
+Until the fork check passes, the router runs in shadow mode (`"mode": "shadow"` in
 `config.json`): it computes and logs the decision, Jev's score, the calibrated
-distribution and the inputs, and tells the session nothing. A report joins each logged
-decision with the number of calls the turn really took and its real cost from the
-transcript. Shadow mode supplies the large sample: calibration, how often the router
-would select a job, and how often the cost model says a selected job loses. It cannot
-show whether a subagent working from a brief does the job as well; the fork check does.
+distribution and the inputs, and tells the session nothing. Shadow mode is how the fork
+check captures its jobs, not a phase before it. A report joins each logged decision
+with the number of calls the turn really took and its real cost from the transcript,
+which gives how often the router would select a job, how often the cost model says a
+selected job loses, the router's own cost and latency over the period, and, for Codex,
+its calibration. It cannot show whether a subagent working from a brief does the job as
+well; the fork check does.
 
 ## Validation: the fork check
 
@@ -234,4 +237,6 @@ job), and delegation in opencode.
 
 ## Open questions
 
-- How often the parent overrides a delegation, and whether that needs its own rule.
+- Deferred until after the trial run: how often the parent overrides a delegation, and
+  whether that needs its own rule. Until then, overrides are counted and scored at their
+  real cost.

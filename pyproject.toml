@@ -31,5 +31,5 @@ ignore = ["UP017"]  # datetime.UTC requires Python 3.11+, we target 3.10
 [tool.pyright]
 pythonVersion = "3.12"
 typeCheckingMode = "standard"
-extraPaths = ["dev-loop/scripts"]
+extraPaths = ["dev-loop/scripts", "jev-router/skills/jev/scripts"]
 exclude = ["**/workflow_eval/scenarios/**/repo/**", "**/.venv"]

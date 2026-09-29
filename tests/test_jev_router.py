@@ -28,6 +28,7 @@ PLUGIN = REPO / "jev-router"
 SCRIPT = PLUGIN / "skills" / "jev" / "scripts" / "jev_router.py"
 TIERS_FILE = SCRIPT.with_name("tiers.json")
 
+sys.path.insert(0, str(SCRIPT.parent))
 _spec = importlib.util.spec_from_file_location("jev_router", SCRIPT)
 assert _spec and _spec.loader
 jev_router = importlib.util.module_from_spec(_spec)

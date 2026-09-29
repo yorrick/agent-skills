@@ -169,8 +169,8 @@ the jobs the router selects, on the user's own work.
    the router (still in shadow mode) selects a job, the hook saves a snapshot before the
    turn runs: a copy of the transcript ending just before the message, the message, and
    the working copy's state (HEAD, uncommitted changes and untracked files) with a hash
-   of its ignored setup files and installed dependencies. The user works as usual; the
-   real session is never touched.
+   of its ignored setup files and installed dependencies. A snapshot is small; no clone
+   or fork exists yet. The user works as usual; the real session is never touched.
 2. **The user picks what is safe to replay.** A replay has the same access as the
    user's session, so it would repeat whatever the real turn did outside the machine.
    After the real turn finishes, the runner lists each snapshot with those actions, read
@@ -190,8 +190,11 @@ the jobs the router selects, on the user's own work.
    session: bypass permissions, the same MCP servers, network and credentials. The one
    difference is that each clone's `origin` is a local bare copy, so a normal push stays
    local (a push to an explicit URL or another remote still could not be stopped). The
-   two sides run one after the other in random
-   order.
+   two sides run one after the other in random order. When both are done, the runner
+   pushes the two results to a private GitHub fork of the repository (one per
+   repository, or a private copy where forking is not allowed) as `replay/<job>/keep`
+   and `replay/<job>/delegate`, and opens a pull request between them, so the user can
+   compare the results side by side.
 4. **Measure** API-equivalent cost, wall time and calls from the transcripts, subagents
    included, pricing every call by its recorded categories (cache reads, cache writes,
    uncached input, output). Right before each side runs, a one-line throwaway fork of the

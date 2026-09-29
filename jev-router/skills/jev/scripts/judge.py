@@ -29,6 +29,9 @@ mapping between them and the two agents lives outside those folders, out of your
 {message}
 </job>
 
+Any path in the job that names the user's own checkout corresponds to the root of A, and equally to the
+root of B.
+
 Both started from the same state, saved as the git ref refs/jev/start in each folder, so
 `git -C A add -A && git -C A diff --cached refs/jev/start` shows exactly what the first agent changed,
 new files included (the same for B; these folders are copies, so staging in them is fine).
@@ -43,31 +46,38 @@ End your reply with one line of JSON, shaped like this example, and nothing afte
 
 def run_codex(prompt: str, work: Path) -> str:
     out = work / "verdict.md"
-    subprocess.run(
-        [
-            "codex",
-            "exec",
-            "-m",
-            "gpt-6-sol",
-            "-c",
-            "model_reasoning_effort=max",
-            "--disable",
-            "hooks",
-            "--sandbox",
-            "workspace-write",
-            "--skip-git-repo-check",
-            "-C",
-            str(work),
-            "-o",
-            str(out),
-            "-",
-        ],
-        input=prompt,
-        text=True,
-        capture_output=True,
-        timeout=2 * 3600,
-        check=True,
-    )
+    try:
+        subprocess.run(
+            [
+                "codex",
+                "exec",
+                "-m",
+                "gpt-6-sol",
+                "-c",
+                "model_reasoning_effort=max",
+                "--disable",
+                "hooks",
+                "--sandbox",
+                "workspace-write",
+                "--skip-git-repo-check",
+                "-C",
+                str(work),
+                "-o",
+                str(out),
+                "-",
+            ],
+            input=prompt,
+            text=True,
+            capture_output=True,
+            timeout=2 * 3600,
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        # Reason: CalledProcessError's own str() names the exit code and the
+        # command, never the stderr that explains it; a short excerpt of that
+        # is what actually tells cmd_judge (and the person reading its output)
+        # why codex failed.
+        raise RuntimeError(f"codex exec failed: {(exc.stderr or '').strip()[:500]}") from exc
     return out.read_text()
 
 
@@ -83,16 +93,33 @@ def _valid(data: object) -> bool:
 
 
 def parse(text: str) -> dict:
-    """The last line that is a complete, well-formed verdict; anything else is an error,
-    never a guess (a string "false" is not a boolean, an unknown preference is not a tie)."""
+    """The last line that parses as JSON at all, which must be a complete,
+    well-formed verdict or this raises: a line that is not JSON (prose,
+    reasoning) is skipped looking for it, but once found, it is final. Ruling
+    T13d: an earlier, valid-looking line is never used to paper over a later,
+    malformed one, since that would let a draft verdict stand in for the
+    judge's actual last word."""
     for line in reversed(text.strip().splitlines()):
         try:
             data = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if _valid(data):
-            return data
-    raise ValueError("the judge gave no well-formed verdict line")
+        if not _valid(data):
+            raise ValueError("the judge's last verdict line is not well-formed")
+        return data
+    raise ValueError("the judge gave no verdict line")
+
+
+def _refuse_if_source_path_leaked(git_dir: Path, source: Path, label: str) -> None:
+    """Defense in depth, after the origin, the reflogs and FETCH_HEAD are all
+    stripped: confirm no file left under `git_dir` still spells out `source`'s
+    own path, before the judge is ever shown this copy. None of the three
+    removals above would catch a linked worktree's `.git/worktrees/*/gitdir`,
+    which points straight back at the source clone by path."""
+    needle = str(source).encode()
+    for f in git_dir.rglob("*"):
+        if f.is_file() and needle in f.read_bytes():
+            raise RuntimeError(f"{label}'s copy still names its source clone, in {f}; refusing")
 
 
 def judge(
@@ -113,11 +140,16 @@ def judge(
     names = dict(zip(("A", "B"), labels, strict=True))
     work.mkdir(parents=True, exist_ok=True)
     for letter, side in names.items():
-        copy_tree(Path(result["sides"][side]["clone"]), work / letter)
-        # Reason: the origin and the reflogs record which replay folder this came
-        # from, which result.json maps to a side; the judge gets neither.
+        source = Path(result["sides"][side]["clone"])
+        copy_tree(source, work / letter)
+        git_dir = work / letter / ".git"
+        # Reason: the origin, the reflogs and FETCH_HEAD all record which
+        # replay folder this came from, which result.json maps to a side; the
+        # judge gets none of them.
         run("git", "-C", str(work / letter), "remote", "remove", "origin")
-        shutil.rmtree(work / letter / ".git" / "logs", ignore_errors=True)
+        shutil.rmtree(git_dir / "logs", ignore_errors=True)
+        (git_dir / "FETCH_HEAD").unlink(missing_ok=True)
+        _refuse_if_source_path_leaked(git_dir, source, letter)
     raw = parse(codex(PROMPT.format(message=(snap / "message.txt").read_text(), example=EXAMPLE), work))
     verdict = {
         names["A"]: {"tests": raw["A"]["tests"], "outcome_met": raw["A"]["outcome_met"]},

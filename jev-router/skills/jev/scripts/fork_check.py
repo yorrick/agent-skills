@@ -87,13 +87,19 @@ def set_status(sid: str, status: str, reason: str = "") -> None:
         handle.write(json.dumps(line) + "\n")
 
 
-def statuses() -> dict[str, dict]:
+def _status_history() -> list[dict]:
+    """Every mark ever made, oldest first: `statuses()` collapses this to the
+    latest per id, but the report (Ruling T13c) needs to know a job was ever
+    marked safe, even if a later status (`publish_failed`, `replay_failed`)
+    would otherwise hide that from a latest-status-only lookup."""
     path = root() / "status.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def statuses() -> dict[str, dict]:
     latest: dict[str, dict] = {}
-    if path.exists():
-        for line in path.read_text().splitlines():
-            entry = json.loads(line)
-            latest[entry["id"]] = entry
+    for entry in _status_history():
+        latest[entry["id"]] = entry
     return latest
 
 
@@ -262,40 +268,64 @@ def cmd_publish(sid: str) -> int:
 
 def cmd_judge(sid: str) -> int:
     import random
+    import shutil
     import uuid
 
     import judge
 
     out = root() / "results" / sid
-    result = json.loads((out / "result.json").read_text())
+    if (out / "verdict.json").exists():
+        print(f"{sid} already has a verdict; nothing to judge")
+        return 1
+    status = statuses().get(sid, {}).get("status")
+    if status in ("published", "publish_failed"):
+        print(f"{sid} has already been published ({status}); publish has touched its clones, refusing to judge")
+        return 1
     # Reason: a neutral folder away from results/, whose result.json names the
     # sides; the judge works in its own folder so nothing there can tell it
-    # which side is which.
+    # which side is which. Computed before the try so the finally below can
+    # always clean it up, even if reading result.json itself fails.
     blind = root() / "blind" / uuid.uuid4().hex
-    verdict = judge.judge(root() / "snapshots" / sid, result, blind, rng=random.Random())
-    (out / "verdict.json").write_text(json.dumps(verdict, indent=2) + "\n")
+    try:
+        result = json.loads((out / "result.json").read_text())
+        verdict = judge.judge(root() / "snapshots" / sid, result, blind, rng=random.Random())
+        (out / "verdict.json").write_text(json.dumps(verdict, indent=2) + "\n")
+    except Exception as exc:  # a refusal or a codex failure: a short reason, never a traceback
+        set_status(sid, "judge_failed", str(exc)[:200])
+        print(f"{sid}: judge failed ({exc})")
+        return 1
+    finally:
+        # Reason: `blind` holds a full copy of both clones, ignored files
+        # (.env, dependency directories) included; nothing here is worth
+        # keeping once the attempt, successful or not, is over.
+        shutil.rmtree(blind, ignore_errors=True)
     set_status(sid, "judged", verdict["prefer"])
     print(json.dumps(verdict, indent=2))
     return 0
 
 
 def cmd_report() -> int:
-    """The first 20 jobs marked safe, in capture order, whose replay is conclusive:
-    a later job never stands in for an earlier one that is not judged yet."""
+    """The first 20 jobs ever marked safe (Ruling T13c), in capture order, excluding
+    trial jobs: a job with a result and a verdict counts as scored whatever its later
+    status (a publish that then failed does not undo a job the judge already scored);
+    an inconclusive result counts as inconclusive; a replay that failed, or no result
+    yet, counts as waiting, so a later job never silently takes an earlier one's slot."""
     done = statuses()
+    ever_safe = {entry["id"] for entry in _status_history() if entry["status"] == "safe"}
     points: list[dict] = []
     waiting: list[str] = []
     for snap in snapshot_dirs():
-        if done.get(snap.name, {}).get("status") not in ("safe", "replayed", "published", "judged"):
+        sid = snap.name
+        if sid not in ever_safe:
             continue
-        out = root() / "results" / snap.name
+        out = root() / "results" / sid
         result = json.loads((out / "result.json").read_text()) if (out / "result.json").exists() else None
         if result is not None and (result.get("trial") or result.get("inconclusive")):
             continue
         if len(points) + len(waiting) == report.POINTS:
             break
-        if result is None or not (out / "verdict.json").exists():
-            waiting.append(snap.name)
+        if result is None or done.get(sid, {}).get("status") == "replay_failed" or not (out / "verdict.json").exists():
+            waiting.append(sid)
             continue
         points.append(
             {

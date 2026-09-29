@@ -11,10 +11,6 @@ from pathlib import Path
 
 from replay import IDENTITY, refuse_if_ignored_leaked, refuse_if_unusable, restored_ignored, run
 
-# Kept as a module attribute: some tests call this directly. The real
-# implementation is shared with the judge, in replay.py.
-_restored_ignored = restored_ignored
-
 MESSAGE_LIMIT = 2000
 LOGIN_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
@@ -92,7 +88,7 @@ def publish(snap: Path, result: dict, *, gh: Callable[..., str] = run_gh, remote
     url = remote or f"git@github.com:{copy}.git"
     _refuse_if_branches_exist(url, copy, sid)
     keep, delegate = Path(k["clone"]), Path(d["clone"])
-    ignored = {"keep": _restored_ignored(keep), "delegate": _restored_ignored(delegate)}
+    ignored = {"keep": restored_ignored(keep), "delegate": restored_ignored(delegate)}
     for side, clone in (("keep", keep), ("delegate", delegate)):
         commit_all(clone, f"jev fork check {sid}: result")
         refuse_if_ignored_leaked(clone, ignored[side], side)

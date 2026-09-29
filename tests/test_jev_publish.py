@@ -161,7 +161,7 @@ def test_restored_ignored_raises_when_restore_json_is_missing(tmp_path: Path) ->
     clone = tmp_path / "somewhere" / "repo"
     clone.mkdir(parents=True)
     with pytest.raises(RuntimeError, match="restore.json"):
-        publish._restored_ignored(clone)
+        replay.restored_ignored(clone)
 
 
 def test_restored_ignored_raises_when_the_ignored_key_is_missing(tmp_path: Path) -> None:
@@ -169,7 +169,7 @@ def test_restored_ignored_raises_when_the_ignored_key_is_missing(tmp_path: Path)
     clone.mkdir(parents=True)
     (clone.parent / "restore.json").write_text(json.dumps({"skipped": []}))
     with pytest.raises(RuntimeError, match="ignored"):
-        publish._restored_ignored(clone)
+        replay.restored_ignored(clone)
 
 
 # Ruling T12b: an inconclusive result, or a side missing a priced cost, must

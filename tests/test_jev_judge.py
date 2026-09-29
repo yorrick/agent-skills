@@ -32,6 +32,14 @@ def test_parse_refuses_a_malformed_verdict() -> None:
         judge.parse(bad)
     with pytest.raises(ValueError):
         judge.parse(ANSWER.replace('"prefer": "A"', '"prefer": "keep"'))
+    # Ruling T13d: the last JSON line is final; a well-formed draft earlier in the
+    # reply must never stand in for a malformed one that comes after it.
+    draft_then_malformed_final = (
+        ANSWER + '\n{"A": {"tests": "pass", "outcome_met": true}, '
+        '"B": {"tests": "passed", "outcome_met": true}, "prefer": "B"}'
+    )
+    with pytest.raises(ValueError):
+        judge.parse(draft_then_malformed_final)
 
 
 def test_labels_are_mapped_back_to_keep_and_delegate(tmp_path: Path, snap: Path) -> None:
@@ -54,9 +62,11 @@ def test_labels_are_mapped_back_to_keep_and_delegate(tmp_path: Path, snap: Path)
     assert verdict["prefer"] == labels[0]
     assert "LEAF" in seen["prompt"] and "refs/jev/start" in seen["prompt"]
     assert seen["dirs"] == ["A", "B"]
-    assert (
-        subprocess.run(["git", "-C", str(tmp_path / "j" / "A"), "remote"], capture_output=True, text=True).stdout == ""
-    )
+    for letter in ("A", "B"):
+        remotes = subprocess.run(
+            ["git", "-C", str(tmp_path / "j" / letter), "remote"], capture_output=True, text=True
+        ).stdout
+        assert remotes == ""
     for letter in ("A", "B"):
         for f in (tmp_path / "j" / letter / ".git").rglob("*"):
             if f.is_file():

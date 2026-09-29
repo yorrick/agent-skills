@@ -274,21 +274,14 @@ def _matches_ignored(path: str, ignored: list[str]) -> str | None:
 
 
 def _status_paths(output: str) -> list[str]:
-    """The paths named by `git status --porcelain -z`: one per NUL-separated
-    entry (two status letters, a space, then the path), except a rename,
-    whose second field is the old path with no status prefix of its own."""
-    entries = [e for e in output.split("\0") if e]
-    paths: list[str] = []
-    i = 0
-    while i < len(entries):
-        code, path = entries[i][:2], entries[i][3:]
-        paths.append(path)
-        if "R" in code:
-            i += 1
-            if i < len(entries):
-                paths.append(entries[i])
-        i += 1
-    return paths
+    """The paths named by `git status --porcelain -z --no-renames`: one per
+    NUL-separated entry (two status letters, a space, then the path).
+    `--no-renames` is what keeps every entry to exactly one path: with rename
+    or copy detection on, an R or C entry carries a second, unprefixed field
+    (the old path), and a parser that does not account for it drifts by one
+    field for every entry that follows, silently losing whatever comes after
+    (a later `.env` included)."""
+    return [e[3:] for e in output.split("\0") if e]
 
 
 def refuse_if_ignored_leaked(clone: Path, ignored: list[str], label: str) -> None:
@@ -315,7 +308,7 @@ def refuse_if_ignored_leaked(clone: Path, ignored: list[str], label: str) -> Non
         "git", "-C", str(clone), "log", "--name-only", "-z", "--format=", "--diff-merges=m", "refs/jev/start..HEAD"
     )
     history = [p for p in history_out.split("\0") if p]
-    status_out = run("git", "-C", str(clone), "status", "--porcelain", "-z", "--untracked-files=all")
+    status_out = run("git", "-C", str(clone), "status", "--porcelain", "-z", "--untracked-files=all", "--no-renames")
     status = _status_paths(status_out)
     for path in tree + history + status:
         hit = _matches_ignored(path, ignored)

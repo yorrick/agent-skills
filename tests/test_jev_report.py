@@ -100,3 +100,73 @@ def test_main_shadow_prints_the_report(
     log.write_text(json.dumps(event(transcript, "x")) + "\n")
     assert fork_check.main(["shadow"]) == 0
     assert "# Shadow report" in capsys.readouterr().out
+
+
+# --- Ruling T13c: cmd_report selects by status history, not the latest status ---
+
+
+def _snap(sid: str, created: str) -> Path:
+    d = fork_check.root() / "snapshots" / sid
+    d.mkdir(parents=True)
+    (d / "meta.json").write_text(json.dumps({"id": sid, "created": created, "median_calls": 20}))
+    return d
+
+
+def _result(sid: str, **overrides: object) -> Path:
+    out = fork_check.root() / "results" / sid
+    out.mkdir(parents=True)
+    result = {
+        "id": sid,
+        "sides": {
+            "keep": {"cost": 1.0, "wall_seconds": 100, "calls": 20, "delegated": False},
+            "delegate": {"cost": 0.8, "wall_seconds": 90, "calls": 22, "delegated": True},
+        },
+    }
+    result.update(overrides)
+    (out / "result.json").write_text(json.dumps(result))
+    return out
+
+
+def _verdict(out: Path) -> None:
+    side = {"tests": "pass", "outcome_met": True}
+    (out / "verdict.json").write_text(json.dumps({"keep": side, "delegate": side, "prefer": "tie", "why": ""}))
+
+
+def test_cmd_report_selects_ever_safe_jobs_in_capture_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A job counts by its status HISTORY (ever marked safe), not just its latest
+    status: a publish that later fails does not undo a job the judge already
+    scored (a), a failed replay is waiting rather than silently dropped (b), and a
+    trial job is excluded outright even though it too was marked safe (c)."""
+    monkeypatch.setenv("JEV_ROUTER_HOME", str(tmp_path))
+    _snap("20261001-090000-a", "2026-10-01T09:00:00+00:00")
+    _snap("20261001-093000-b", "2026-10-01T09:30:00+00:00")
+    _snap("20261001-100000-c", "2026-10-01T10:00:00+00:00")
+    _snap("20261001-103000-d", "2026-10-01T10:30:00+00:00")
+
+    out_a = _result("20261001-090000-a")
+    _verdict(out_a)
+    fork_check.set_status("20261001-090000-a", "safe")
+    fork_check.set_status("20261001-090000-a", "judged", "tie")
+    fork_check.set_status("20261001-090000-a", "publish_failed", "network down")
+
+    fork_check.set_status("20261001-093000-b", "safe")
+    fork_check.set_status("20261001-093000-b", "replay_failed", "boom")
+
+    _result("20261001-100000-c", trial=True)
+    fork_check.set_status("20261001-100000-c", "safe")
+    fork_check.set_status("20261001-100000-c", "replayed", "")
+
+    out_d = _result("20261001-103000-d")
+    _verdict(out_d)
+    fork_check.set_status("20261001-103000-d", "safe")
+    fork_check.set_status("20261001-103000-d", "judged", "tie")
+
+    assert fork_check.main(["report"]) == 0
+    out = capsys.readouterr().out
+    assert "Jobs judged: 2 of 20, waiting for 20261001-093000-b" in out
+    text = (fork_check.root() / "report.md").read_text()
+    assert "20261001-090000-a" in text
+    assert "20261001-103000-d" in text
+    assert "20261001-100000-c" not in text

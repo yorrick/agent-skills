@@ -79,6 +79,29 @@ def test_labels_are_mapped_back_to_keep_and_delegate(tmp_path: Path, snap: Path)
                 assert str(tmp_path / "k").encode() not in data and str(tmp_path / "d").encode() not in data
 
 
+def test_blind_copies_leave_out_the_restored_secrets_but_keep_dependencies(tmp_path: Path, snap: Path) -> None:
+    """F18: the judge is a model, so `.env` never reaches A or B; node_modules
+    stays so the project's tests can run. The clones keep their own `.env`."""
+    keep = replay.restore(snap, tmp_path / "k")
+    delegate = replay.restore(snap, tmp_path / "d")
+    seen: dict = {}
+
+    def codex(prompt: str, work: Path) -> str:
+        seen["env"] = [(work / letter / ".env").exists() for letter in ("A", "B")]
+        return ANSWER
+
+    result = {"sides": {"keep": {"clone": str(keep), "cost": 1.0}, "delegate": {"clone": str(delegate), "cost": 1.0}}}
+    judge.judge(snap, result, tmp_path / "j", codex=codex, rng=random.Random(3))
+    assert seen["env"] == [False, False]
+    for letter in ("A", "B"):
+        copy = tmp_path / "j" / letter
+        assert not os.path.lexists(copy / ".env")
+        assert (copy / "node_modules" / ".package-lock.json").read_text() == "{}"
+        assert (copy / "app.py").read_text() == "print('v2')\n"
+        assert (copy / ".git").is_dir()
+    assert (keep / ".env").read_text() == "TOKEN=x\n" and (delegate / ".env").read_text() == "TOKEN=x\n"
+
+
 # Ruling T13a: an inconclusive result, or a side missing a priced cost, is
 # refused before anything is copied or codex is ever called.
 def test_inconclusive_result_is_refused_with_no_codex_call(tmp_path: Path, snap: Path) -> None:

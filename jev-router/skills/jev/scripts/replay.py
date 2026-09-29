@@ -180,7 +180,9 @@ def _copy_selective(top: Path, rel: str, target: Path, excluded: set[str]) -> No
         return
     source = top / rel
     prefix = f"{rel}/"
-    if any(path.startswith(prefix) for path in excluded):
+    # Reason: a symlink is copied as the link it is, never opened up, so nothing
+    # is ever read (or written) through it.
+    if not source.is_symlink() and any(path.startswith(prefix) for path in excluded):
         target.mkdir(parents=True, exist_ok=True)
         for child in os.scandir(source):
             _copy_selective(top, f"{rel}/{child.name}", target / child.name, excluded)
@@ -433,6 +435,15 @@ def _restored_files(clone: Path, ignored: list[str]) -> list[str]:
             for name in filenames:
                 consider(f"{base}/{name}")
     return found
+
+
+def copy_without_secrets(clone: Path, target: Path) -> None:
+    """Copy `clone` to `target`, leaving out the restored ignored files the
+    content check protects (`.env` and the like; dependency folders stay, so
+    tests can run). They are left out while copying, never deleted afterwards,
+    so nothing is ever removed through a symlink."""
+    left_out = {f"{clone.name}/{p}" for p in _restored_files(clone, restored_ignored(clone))}
+    _copy_selective(clone.parent, clone.name, target, left_out)
 
 
 def _blob_ids(clone: Path, paths: list[str]) -> list[str]:

@@ -11,7 +11,7 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from replay import copy_tree, refuse_if_ignored_leaked, refuse_if_unusable, restored_ignored, run
+from replay import copy_without_secrets, refuse_if_ignored_leaked, refuse_if_unusable, restored_ignored, run
 
 EXAMPLE = json.dumps(
     {
@@ -176,7 +176,9 @@ def judge(
     work.mkdir(parents=True, exist_ok=True)
     for letter, side in names.items():
         source = Path(result["sides"][side]["clone"])
-        copy_tree(source, work / letter)
+        # Reason: the judge is a model; the restored secrets (.env and the like)
+        # never reach it, while dependency folders stay so tests can run.
+        copy_without_secrets(source, work / letter)
         git_dir = work / letter / ".git"
         # Reason: the origin, the reflogs and FETCH_HEAD all record which
         # replay folder this came from, which result.json maps to a side; the

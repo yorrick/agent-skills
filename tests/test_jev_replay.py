@@ -378,6 +378,22 @@ def test_a_copy_through_a_folder_linked_out_of_the_clone_is_refused(
     assert list(ext.iterdir()) == []
 
 
+def test_a_secret_under_a_linked_folder_is_never_copied_or_read_through_the_link(tmp_path: Path) -> None:
+    """F18: a replay replaced `logs` with a link to an outside folder. The copy
+    keeps `logs` as the link it is; it never opens it up to leave `a.log` out."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "a.log").write_text("SECRET=1234\n")
+    (outside / "b.log").write_text("other\n")
+    clone = tmp_path / "attempt" / "repo"
+    clone.mkdir(parents=True)
+    (clone / "logs").symlink_to(outside)
+    (tmp_path / "attempt" / "restore.json").write_text(json.dumps({"ignored": ["logs/a.log"], "ignored_blobs": {}}))
+    replay.copy_without_secrets(clone, tmp_path / "copy")
+    assert os.readlink(tmp_path / "copy" / "logs") == str(outside)
+    assert sorted(p.name for p in outside.iterdir()) == ["a.log", "b.log"]
+
+
 def test_a_read_only_folder_opened_up_for_an_exclusion_still_gets_its_children(tmp_path: Path, repo: Path) -> None:
     """The folder is opened up because it holds a nested checkout; its mode is
     applied only after its children are copied, or a read-only one refuses them."""

@@ -195,32 +195,32 @@ codex plugin add visual-design-review@yorrick
 
 ### jev-router
 
-Sends each job to the model and thinking level that fit it, which usually means a
-cheaper one. While it is on, every message you type goes to
-[Jev](https://openrouter.ai/typesafe/jev-1.13), TypeSafe's decision model, on OpenRouter
-with two typed questions: what is the smallest model that can do this job well, and does
-the message only make sense inside the conversation? When Jev gives its pick at least a 60%
-probability, and the message is not such a follow-up, the job
-goes to a helper on that size's model and thinking level, which signs off with
-`Done by <model> at <level> thinking`. It only routes inside the harness you are in,
-never touches headless runs such as `claude -p` reviews, and never blocks a message: if
-Jev is slow (over 2 s) or anything fails, the message goes through as if the router were
-not there.
+Sends each job where it costs least, using
+[Jev](https://openrouter.ai/typesafe/jev-1.13), TypeSafe's decision model, on OpenRouter.
 
-Claude Code and Codex cannot switch the main model per message, so there the main model
-hands the job to a helper subagent and relays its result. opencode can, so there the
-message itself moves onto the helper's model.
+In Codex and opencode (0.2.0), every message you type goes to Jev with two typed
+questions: what is the smallest model that can do this job well, and does the message only
+make sense inside the conversation? When Jev gives its pick at least a 60% probability, and
+the message is not such a follow-up, the job goes to a helper on that size's model and
+thinking level, which signs off with `Done by <model> at <level> thinking`. Codex cannot
+switch the main model per message, so there the main model hands the job to a helper and
+relays its result; opencode can, so there the message itself moves onto the helper's model.
 
-In Claude Code, the router also decides whether a fresh subagent would finish a long job
-for less, since re-reading the whole conversation on every call is most of its cost. It
-starts in shadow mode (decide and log, tell the session nothing) until its fork check
-passes; `/jev mode shadow|capture|live` switches modes. See
-[`jev-router/README.md`](jev-router/README.md).
+In Claude Code (0.3), Jev instead predicts how long the job is (how many model calls), and
+the router prices doing it in the session, which re-reads the whole conversation on every
+call, against briefing a fresh subagent. It starts in shadow mode (decide and log, tell the
+session nothing) until its fork check passes; `/jev mode shadow|capture|live` switches
+modes. See [`jev-router/README.md`](jev-router/README.md).
+
+It only routes inside the harness you are in, leaves headless runs such as `claude -p`
+reviews alone unless you set `JEV_ROUTER=on`, and never blocks a message: if Jev is slow
+(over 2 s) or anything fails, the message goes through as if the router were not there.
 
 It is off until you turn it on with `/jev on` (`$jev on` in Codex), and `/jev status`
-shows how many messages went to each size and what Jev has cost. While it is on, your
-messages go to OpenRouter and TypeSafe (the company that makes Jev), so keep it off for
-private work.
+shows what it decided and what Jev has cost. While it is on, each message (up to its first
+4,000 characters) goes to OpenRouter and TypeSafe (the company that makes Jev), and in
+Claude Code so do the last 1,500 characters of the assistant's previous reply, in every
+mode, shadow included. Keep it off for private work.
 
 ```fish
 claude plugin install jev-router@yorrick

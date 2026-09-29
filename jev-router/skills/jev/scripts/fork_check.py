@@ -94,10 +94,28 @@ def root() -> Path:
     return jev_router.fork_check_dir(jev_router.load_config())
 
 
-def set_status(sid: str, status: str, reason: str = "") -> None:
+def _still_running(entry: dict) -> bool:
+    """Whether the `replay` run that wrote this "replaying" line is still alive.
+    A line without a pid, or whose process is gone, was left by an interrupted
+    run, so the job can be replayed again."""
+    pid = entry.get("pid")
+    if not isinstance(pid, int):
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # alive, owned by someone else
+        return True
+    return True
+
+
+def set_status(sid: str, status: str, reason: str = "", *, pid: int | None = None) -> None:
     path = root() / "status.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    line = {"ts": datetime.now(UTC).isoformat(timespec="seconds"), "id": sid, "status": status, "reason": reason}
+    line: dict = {"ts": datetime.now(UTC).isoformat(timespec="seconds"), "id": sid, "status": status, "reason": reason}
+    if pid is not None:
+        line["pid"] = pid
     with path.open("a") as handle:
         handle.write(json.dumps(line) + "\n")
 
@@ -216,18 +234,28 @@ def cmd_replay(sid: str | None, trial: bool) -> int:
 
     done = statuses()
     if sid is None:
-        todo = [p.name for p in snapshot_dirs() if done.get(p.name, {}).get("status") == "safe"]
+        # Reason: jobs marked safe first, then any an interrupted run left in
+        # "replaying", in capture order.
+        names = [p.name for p in snapshot_dirs()]
+        todo = [n for n in names if done.get(n, {}).get("status") == "safe"]
+        todo += [n for n in names if done.get(n, {}).get("status") == "replaying" and not _still_running(done[n])]
         if not todo:
-            print("No snapshot is marked safe and waiting. Mark one with: mark ID safe")
+            print("No snapshot is marked safe and waiting, or left half-replayed. Mark one with: mark ID safe")
             return 1
         sid = todo[0]
-    elif done.get(sid, {}).get("status") != "safe":
-        print(f"{sid} is not marked safe; mark it first.")
-        return 1
+    else:
+        entry = done.get(sid, {})
+        if entry.get("status") == "replaying" and _still_running(entry):
+            print(f"{sid} is being replayed by process {entry['pid']}; if that run is gone, mark it safe again.")
+            return 1
+        if entry.get("status") not in ("safe", "replaying"):
+            print(f"{sid} is not marked safe; mark it first.")
+            return 1
     snap, out = root() / "snapshots" / sid, root() / "results" / sid
     # Reason: written before anything runs, so the report knows a trial job even
-    # when the replay raises and no result.json is ever written.
-    set_status(sid, "replaying", "trial" if trial else "")
+    # when the replay raises and no result.json is ever written. The pid tells a
+    # later run whether this one is still going or was interrupted.
+    set_status(sid, "replaying", "trial" if trial else "", pid=os.getpid())
     # Reason: a previous run that ended in replay_failed may have left partial
     # clones here; restore()'s dest.mkdir(parents=True) would fail forever
     # otherwise, permanently jamming this snapshot.

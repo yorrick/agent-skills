@@ -1144,6 +1144,50 @@ def test_a_job_whose_checkout_is_gone_is_inconclusive(
     assert not (tmp_path / "calls.jsonl").exists()  # nothing ran
 
 
+def _dead_pid() -> int:
+    proc = subprocess.Popen(["true"])
+    proc.wait()
+    return proc.pid
+
+
+def test_a_job_left_replaying_by_an_interrupted_run_can_be_resumed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """N5: `replay ID` accepts it, and `--next` picks it after the safe jobs;
+    a job whose run is still alive is left alone."""
+    root = tmp_path / "fc"
+    monkeypatch.setattr(fork_check, "root", lambda: root)
+    for sid in ("20261001-090000-a", "20261001-100000-b", "20261001-110000-c"):
+        (root / "snapshots" / sid).mkdir(parents=True)
+        (root / "snapshots" / sid / "meta.json").write_text("{}")
+    fork_check.set_status("20261001-090000-a", "replaying", "", pid=_dead_pid())  # interrupted
+    fork_check.set_status("20261001-100000-b", "safe")
+    fork_check.set_status("20261001-110000-c", "replaying", "", pid=os.getpid())  # still running
+    replayed: list[str] = []
+
+    def fake_pair(snap: Path, *rest: object) -> dict:
+        replayed.append(snap.name)
+        sides = {"cost": 0.1, "wall_seconds": 1.0, "calls": 1, "warm": True, "delegated": True}
+        return {
+            "id": snap.name,
+            "order": ["keep", "delegate"],
+            "sides": {"keep": sides, "delegate": sides},
+            "inconclusive": False,
+            "reason": "",
+        }
+
+    monkeypatch.setattr(replay, "replay_pair", fake_pair)
+    assert fork_check.main(["replay", "--next"]) == 0
+    assert fork_check.main(["replay", "--next"]) == 0
+    assert replayed == ["20261001-100000-b", "20261001-090000-a"]  # safe first, then the interrupted one
+    assert fork_check.main(["replay", "--next"]) == 1  # only the running one is left
+    assert fork_check.main(["replay", "20261001-110000-c"]) == 1
+    assert "is being replayed by process" in capsys.readouterr().out
+    fork_check.set_status("20261001-090000-a", "replaying", "", pid=_dead_pid())
+    assert fork_check.main(["replay", "20261001-090000-a"]) == 0
+    assert fork_check.statuses()["20261001-090000-a"]["status"] == "replayed"
+
+
 def test_an_unknown_or_escaping_id_is_refused_before_anything_is_touched(
     tmp_path: Path, snap: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

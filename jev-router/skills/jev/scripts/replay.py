@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import json
 import os
+import random
+import re
 import shutil
 import subprocess
 import sys
 import tarfile
+import time
+import uuid
 from pathlib import Path
 
 import snapshot
+import usage
 
 IDENTITY = ["-c", "user.name=jev fork check", "-c", "user.email=jev-fork-check@localhost"]
 
@@ -219,3 +224,160 @@ def restore(snap: Path, dest: Path, *, copy_ignored: bool = True) -> Path:
         _reject_stray_checkouts(clone)
         (dest / "restore.json").write_text(json.dumps({"skipped": sorted(skipped)}, indent=2) + "\n")
     return clone
+
+
+DEFAULT_CLAUDE_HOME = Path.home() / ".claude"
+WARMUP = "Reply with the single word ok and do nothing else."
+ATTEMPTS = 3
+TIMEOUT_SECONDS = 4 * 3600
+
+
+def project_dir(claude_home: Path, cwd: Path) -> Path:
+    """Where Claude Code keeps the sessions of a working directory."""
+    return claude_home / "projects" / re.sub(r"[^A-Za-z0-9-]", "-", str(cwd))
+
+
+def workdir(meta: dict, clone: Path) -> Path:
+    """Where the session ran, inside the clone: a job started in a subdirectory
+    runs its relative commands from the same place."""
+    try:
+        return clone / Path(meta["cwd"]).resolve().relative_to(Path(meta["toplevel"]))
+    except ValueError:
+        return clone
+
+
+def install_session(snap: Path, clone: Path, claude_home: Path) -> str:
+    """Copy the snapshot's conversation in as a new session of the clone.
+
+    Every mention of the original checkout's path becomes the clone's path, so an
+    agent that reuses an absolute path from the conversation edits the clone,
+    never the user's real working copy."""
+    meta = json.loads((snap / "meta.json").read_text())
+    new = str(uuid.uuid4())
+    lines = []
+    for line in (snap / "transcript.jsonl").read_text().splitlines():
+        line = line.replace(meta["toplevel"], str(clone))
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(entry, dict) and "sessionId" in entry:
+            entry["sessionId"] = new
+        lines.append(json.dumps(entry))
+    target = project_dir(claude_home, workdir(meta, clone))
+    target.mkdir(parents=True, exist_ok=True)
+    (target / f"{new}.jsonl").write_text("\n".join(lines) + "\n")
+    return new
+
+
+def run_claude(
+    clone: Path, session_id: str, prompt: str, env_extra: dict, claude_home: Path
+) -> tuple[dict, float, int]:
+    """One headless fork of the session, with the same access as the user's own session."""
+    cmd = [
+        os.environ.get("JEV_FORK_CHECK_CLAUDE", "claude"),
+        "--resume",
+        session_id,
+        "--fork-session",
+        "-p",
+        prompt,
+        "--output-format",
+        "json",
+        "--permission-mode",
+        "bypassPermissions",
+    ]
+    env = {**os.environ, "JEV_ROUTER": "off", **env_extra}
+    # Reason: setting CLAUDE_CONFIG_DIR, even to the default, moves where Claude Code
+    # reads its settings and MCP servers, so it is set only for a test home.
+    if claude_home != DEFAULT_CLAUDE_HOME:
+        env["CLAUDE_CONFIG_DIR"] = str(claude_home)
+    started = time.monotonic()
+    proc = subprocess.run(cmd, cwd=clone, env=env, capture_output=True, text=True, timeout=TIMEOUT_SECONDS)
+    wall = time.monotonic() - started
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        data = {}
+    return (data if isinstance(data, dict) else {}), wall, proc.returncode
+
+
+def measure(claude_home: Path, clone: Path, session_id: str, prompt: str, helper: str) -> dict:
+    pdir = project_dir(claude_home, clone)
+    path = pdir / f"{session_id}.jsonl"
+    entries = usage.read_entries(path) if session_id and path.exists() else []
+    starts = [i for i, e in enumerate(entries) if usage.is_typed(e) and usage.entry_text(e) == prompt.strip()]
+    turn = entries[starts[-1] :] if starts else []
+    main = usage.calls(turn)
+    subs = (
+        [
+            c
+            for f in sorted((pdir / session_id / "subagents").glob("*.jsonl"))
+            for c in usage.calls(usage.read_entries(f), sidechain=True)
+        ]
+        if session_id
+        else []
+    )
+    prices = usage.load_prices()
+    costs = [c.cost(prices) for c in main + subs]
+    handed = any(
+        b.get("type") == "tool_use"
+        and b.get("name") in ("Agent", "Task")
+        and (b.get("input") or {}).get("subagent_type") == helper
+        for e in turn
+        if e.get("type") == "assistant"
+        for b in (e.get("message") or {}).get("content") or []
+        if isinstance(b, dict)
+    )
+    return {
+        "calls": len(main) + len(subs),
+        "cost": sum(c for c in costs if c is not None),
+        "unpriced_calls": sum(c is None for c in costs),
+        "first_cache_read": main[0].read if main else 0,
+        "first_context": main[0].context if main else 0,
+        "delegated": handed,
+    }
+
+
+def replay_pair(snap: Path, work: Path, claude_home: Path, rng: random.Random) -> dict:
+    """Keep and delegate, one after the other in random order, each in a fresh clone
+    with a verified warm cache. A cold side is rerun in a new clone."""
+    meta = json.loads((snap / "meta.json").read_text())
+    prompt = (snap / "message.txt").read_text()
+    order = ["keep", "delegate"]
+    rng.shuffle(order)
+    sides: dict[str, dict] = {}
+    for position, name in enumerate(order, 1):
+        side: dict = {}
+        for attempt in range(1, ATTEMPTS + 1):
+            # Reason: folders are named by run order, which is random, so a path
+            # never tells the judge which side made a result.
+            dest = work / f"side-{position}" / f"attempt-{attempt}"
+            clone = restore(snap, dest)
+            sid = install_session(snap, clone, claude_home)
+            cwd = workdir(meta, clone)
+            # Reason: the warm-up forks the same conversation with the same tools
+            # and system prompt, so the side's first call can read it from cache.
+            warm_data, _, _ = run_claude(cwd, sid, WARMUP, {}, claude_home)
+            warm = measure(claude_home, cwd, str(warm_data.get("session_id") or ""), WARMUP, "")
+            extra = {"JEV_ROUTER_NOTE_FILE": str(snap / "note.txt")} if name == "delegate" else {}
+            data, wall, code = run_claude(cwd, sid, prompt, extra, claude_home)
+            m = measure(claude_home, cwd, str(data.get("session_id") or ""), prompt, meta["helper"])
+            is_warm = warm["calls"] > 0 and m["first_cache_read"] >= 0.99 * warm["first_context"] - 2_000
+            restored = dest / "restore.json"
+            skipped = json.loads(restored.read_text())["skipped"] if restored.exists() else []
+            side = {
+                "attempt": attempt,
+                "clone": str(clone),
+                "session_id": data.get("session_id"),
+                "wall_seconds": round(wall, 1),
+                "exit_code": code,
+                "warm": is_warm,
+                "skipped": skipped,
+                **m,
+            }
+            if is_warm:
+                break
+        sides[name] = side
+    # Reason: a call with no price would count as free and flatter one side.
+    comparable = all(s["warm"] and not s["unpriced_calls"] for s in sides.values())
+    return {"id": meta["id"], "order": order, "sides": sides, "inconclusive": not comparable}

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -180,6 +181,43 @@ def cmd_check() -> int:
     return 0
 
 
+def cmd_replay(sid: str | None, trial: bool) -> int:
+    import random
+
+    import replay
+
+    done = statuses()
+    if sid is None:
+        todo = [p.name for p in snapshot_dirs() if done.get(p.name, {}).get("status") == "safe"]
+        if not todo:
+            print("No snapshot is marked safe and waiting. Mark one with: mark ID safe")
+            return 1
+        sid = todo[0]
+    elif done.get(sid, {}).get("status") != "safe":
+        print(f"{sid} is not marked safe; mark it first.")
+        return 1
+    snap, out = root() / "snapshots" / sid, root() / "results" / sid
+    try:
+        configured = os.environ.get("CLAUDE_CONFIG_DIR")
+        claude_home = Path(configured) if configured else replay.DEFAULT_CLAUDE_HOME
+        result = replay.replay_pair(snap, out, claude_home, random.Random())
+    except replay.Inconclusive as exc:
+        set_status(sid, "inconclusive", str(exc))
+        print(f"{sid}: inconclusive ({exc})")
+        return 0
+    result["trial"] = trial
+    (out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+    reason = "never warm, or a call had no price" if result["inconclusive"] else ""
+    set_status(sid, "inconclusive" if result["inconclusive"] else "replayed", reason)
+    for name in result["order"]:
+        s = result["sides"][name]
+        print(
+            f"{name}: ${s['cost']:.2f}, {s['wall_seconds']:.0f} s, {s['calls']} calls, warm={s['warm']}"
+            + ("" if name == "keep" else f", handed to the helper={s['delegated']}")
+        )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -190,6 +228,10 @@ def main(argv: list[str] | None = None) -> int:
     mark.add_argument("id")
     mark.add_argument("mark", choices=("safe", "skip"))
     mark.add_argument("--reason", default="")
+    rep = sub.add_parser("replay")
+    rep.add_argument("id", nargs="?")
+    rep.add_argument("--next", action="store_true")
+    rep.add_argument("--trial", action="store_true")
     args = parser.parse_args(argv)
     if args.command == "shadow":
         return cmd_shadow()
@@ -199,6 +241,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_list()
     if args.command == "mark":
         return cmd_mark(args.id, args.mark, args.reason)
+    if args.command == "replay":
+        return cmd_replay(None if args.next else args.id, args.trial)
     return 2
 
 

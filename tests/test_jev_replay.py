@@ -253,3 +253,54 @@ def test_check_marks_a_broken_snapshot_restore_failed(
     assert fork_check.main(["check"]) == 0
     assert fork_check.statuses()[snap.name]["status"] == "restore_failed"
     assert not (tmp_path / "fc" / "checks" / snap.name).exists()
+
+
+# --- Task 11: replay both sides and measure them -------------------------------------
+
+import random  # noqa: E402
+
+FAKE = Path(__file__).with_name("fake_claude.py")
+
+
+@pytest.fixture
+def fake_claude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    FAKE.chmod(0o755)
+    monkeypatch.setenv("JEV_FORK_CHECK_CLAUDE", str(FAKE))
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(tmp_path / "calls.jsonl"))
+    return tmp_path / "claude-home"
+
+
+def test_install_session_rewrites_paths_and_ids(tmp_path: Path, repo: Path, snap: Path) -> None:
+    clone = replay.restore(snap, tmp_path / "r")
+    sid = replay.install_session(snap, clone, tmp_path / "claude-home")
+    text = (replay.project_dir(tmp_path / "claude-home", clone) / f"{sid}.jsonl").read_text()
+    assert str(repo.resolve()) not in text
+    assert f"Edited {clone}/app.py" in text
+    assert all(json.loads(line).get("sessionId", sid) == sid for line in text.splitlines())
+
+
+def test_pair_runs_both_sides_and_only_delegate_gets_the_note(tmp_path: Path, snap: Path, fake_claude: Path) -> None:
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert not result["inconclusive"]
+    keep, delegate = result["sides"]["keep"], result["sides"]["delegate"]
+    assert keep["warm"] and delegate["warm"]
+    assert delegate["delegated"] is True and keep["delegated"] is False
+    assert delegate["calls"] == 2 and keep["calls"] == 1
+    assert Path(keep["clone"], "RESULT.txt").read_text() == "done by keep\n"
+    assert keep["skipped"] == []
+    under_work = [str(Path(side["clone"]).relative_to(tmp_path / "work")) for side in (keep, delegate)]
+    assert not any("keep" in p or "delegate" in p for p in under_work)
+    calls = [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
+    assert all(c["router"] == "off" for c in calls)
+    assert [c["note"] is not None for c in calls if not c["args"][c["args"].index("-p") + 1].startswith("Reply")] == [
+        name == "delegate" for name in result["order"]
+    ]
+
+
+def test_cold_side_is_retried_then_inconclusive(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FAKE_CLAUDE_COLD", "1")
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert result["inconclusive"]
+    assert {s["attempt"] for s in result["sides"].values()} == {replay.ATTEMPTS}

@@ -174,6 +174,34 @@ def test_a_copy_of_a_restored_env_under_another_name_is_refused(tmp_path: Path, 
     assert not any(c[:2] == ("pr", "create") for c in calls)
 
 
+def test_a_restored_env_moved_to_another_name_is_refused(tmp_path: Path, repo: Path, snap: Path) -> None:
+    """Ruling F10: `mv .env config.txt` leaves no `.env` to hash at check time;
+    restore recorded its content before the replay ran."""
+    keep, delegate, remote, sid, result = _setup(tmp_path, repo, snap)
+    (keep / ".env").rename(keep / "config.txt")
+    calls: list[tuple[str, ...]] = []
+    with pytest.raises(RuntimeError, match=r"config\.txt in the keep clone holds the content of .* \.env"):
+        publish.publish(snap, result, gh=_gh(calls), remote=str(remote))
+    assert git(remote, "branch", "-a").strip() == ""  # nothing was pushed
+    assert not any(c[:2] == ("pr", "create") for c in calls)
+
+
+def test_restore_records_the_restored_files_content(tmp_path: Path, repo: Path, snap: Path) -> None:
+    """Same selection as the content check: the 8-byte `.env` is recorded, the
+    `node_modules` lock file (a dependency folder, and 2 bytes) is not."""
+    replay.restore(snap, tmp_path / "k")
+    blobs = json.loads((tmp_path / "k" / "restore.json").read_text())["ignored_blobs"]
+    assert blobs == {git(repo, "hash-object", ".env").strip(): ".env"}
+
+
+def test_a_restore_record_without_its_blob_ids_is_refused(tmp_path: Path) -> None:
+    clone = tmp_path / "somewhere" / "repo"
+    clone.mkdir(parents=True)
+    (clone.parent / "restore.json").write_text(json.dumps({"skipped": [], "ignored": [".env"]}))
+    with pytest.raises(RuntimeError, match="ignored_blobs"):
+        replay.restored_blobs(clone)
+
+
 def test_a_copy_committed_then_removed_is_still_refused(tmp_path: Path, repo: Path, snap: Path) -> None:
     """Found among the objects the replay's own commits introduced."""
     keep, delegate, remote, sid, result = _setup(tmp_path, repo, snap)

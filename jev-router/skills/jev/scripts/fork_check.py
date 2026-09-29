@@ -31,7 +31,8 @@ EXTERNAL_SHELL = re.compile(
     # git push, also after `-C <path>` or `-c key=value`
     r"\bgit\s+(?:-[Cc]\s*(?:\"[^\"]*\"|'[^']*'|\S+)\s+)*push\b"
     r"|\bgh\s+(pr|issue|release|repo|secret|workflow)\s+(create|merge|edit|close|comment|delete|run|set)"
-    # gh api with any method but GET, or with fields (a POST unless the method says GET)
+    # gh api with any method but GET, or with fields (a POST unless the method says
+    # GET; counting fields as a write was accepted in Ruling F11)
     r"|\bgh\s+api\b.*(?:-X|--method)\s*=?\s*['\"]?(?!GET\b)[A-Z]"
     r"|\bgh\s+api\b(?!.*(?:-X|--method)\s*=?\s*['\"]?GET\b).*\s(?:-f|-F|--field|--raw-field|--input)\b"
     r"|\bvercel\b|\bsupabase\s+(db\s+push|functions\s+deploy)|\bpulumi\s+up\b|\bterraform\s+apply\b"

@@ -15,6 +15,7 @@ import tarfile
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 import snapshot
 import usage
@@ -238,8 +239,9 @@ def restore(snap: Path, dest: Path, *, copy_ignored: bool = True) -> Path:
                 "the snapshot records no list of ignored entries (it predates this runner), so it cannot be replayed"
             )
         captured = meta["ignored_entries"]
-        # Reason: only the captured entries are ever copied, so only they count;
-        # a new ignored file cannot make the job inconclusive.
+        # Reason (accepted in Ruling F11): the fingerprint covers only the
+        # captured entries, since only they are ever copied; an ignored file
+        # created after the capture cannot make the job inconclusive.
         if snapshot.ignored_fingerprint(top, entries=captured) != meta["ignored_fingerprint"]:
             raise Inconclusive("dependencies or .env files changed since the snapshot")
     dest.mkdir(parents=True)
@@ -315,11 +317,15 @@ def restore(snap: Path, dest: Path, *, copy_ignored: bool = True) -> Path:
         # ".env") lets a later publish step refuse to push one of them even if
         # the clone's own ignore rules later change or are force-added around,
         # since the replay runs with bypass permissions and can rewrite them.
+        # "ignored_blobs" records their content now, before the replay runs, so
+        # the content check still knows a `.env` the replay moved away (Ruling F10).
+        contents = _restored_files(clone, ignored)
         record = {
             "skipped": sorted(skipped),
             "ignored": sorted(ignored),
             "missing": missing,
             "not_captured": not_captured,
+            "ignored_blobs": dict(zip(_blob_ids(clone, contents), contents, strict=True)),
         }
         (dest / "restore.json").write_text(json.dumps(record, indent=2) + "\n")
     return clone
@@ -340,20 +346,30 @@ def refuse_if_unusable(result: dict) -> None:
             raise RuntimeError(f"{sid} has no priced cost for {side}; nothing to publish or judge")
 
 
-def restored_ignored(clone: Path) -> list[str]:
-    """The top-level entries `restore` copied into this clone (from its
-    sibling `restore.json`), which must never end up published or shown to
-    the judge, no matter what the clone's own ignore rules say by the time it
-    is checked. Raises rather than assuming "nothing was ignored" when the
-    record is missing or incomplete: silently returning an empty list here
-    would quietly disable the whole guard instead of refusing to proceed."""
+def _restore_record(clone: Path, key: str) -> Any:
+    """One field of the `restore.json` next to this clone. Raises rather than
+    assuming "nothing was restored" when the record or the field is missing:
+    an empty answer here would quietly disable a guard instead of refusing."""
     info = clone.parent / "restore.json"
     if not info.exists():
         raise RuntimeError(f"{info} is missing; cannot tell what restore copied in, refusing to use {clone}")
     data = json.loads(info.read_text())
-    if "ignored" not in data:
-        raise RuntimeError(f'{info} has no "ignored" list; refusing to use {clone}')
-    return data["ignored"]
+    if key not in data:
+        raise RuntimeError(f'{info} has no "{key}" record; refusing to use {clone}')
+    return data[key]
+
+
+def restored_ignored(clone: Path) -> list[str]:
+    """The top-level entries `restore` copied into this clone, which must never
+    end up published or shown to the judge, no matter what the clone's own
+    ignore rules say by the time it is checked."""
+    return list(_restore_record(clone, "ignored"))
+
+
+def restored_blobs(clone: Path) -> dict[str, str]:
+    """Blob id to path of the restored ignored files, as `restore` hashed them
+    before the replay ran."""
+    return dict(_restore_record(clone, "ignored_blobs"))
 
 
 def _matches_ignored(path: str, ignored: list[str]) -> str | None:
@@ -434,34 +450,31 @@ def _blob_ids(clone: Path, paths: list[str]) -> list[str]:
     return result.stdout.split()
 
 
-def _refuse_if_content_leaked(
-    clone: Path, ignored: list[str], tree: list[tuple[str, str, str]], status: list[str], label: str
-) -> None:
+def _refuse_if_content_leaked(clone: Path, tree: list[tuple[str, str, str]], status: list[str], label: str) -> None:
     """Refuses if a restored ignored file's exact content shows up under another
     path: in HEAD's tree, in any object the replay's commits introduced, or in a
-    working-tree file `git status` lists. A replay that copies `.env` to
+    working-tree file `git status` lists. A replay that copies or moves `.env` to
     `config.txt` would otherwise publish the secret, or show it to the judge,
-    under a name no path check knows."""
-    secret_paths = _restored_files(clone, ignored)
-    if not secret_paths:
-        return
-    worktree = [p for p in status if (clone / p).is_file() and not (clone / p).is_symlink() and "\n" not in p]
-    hashed = _blob_ids(clone, secret_paths + worktree)
-    secrets = dict(zip(hashed[: len(secret_paths)], secret_paths, strict=True))
-    # Reason: content already in the start state is published anyway (it sits in
-    # the base history or the start tree), so matching it leaks nothing new; a
-    # `.env` copied from a tracked `.env.example` must not refuse every job.
+    under a name no path check knows. The restored files' ids come from
+    `restore.json`, hashed before the replay ran, so a moved file still counts;
+    only the working-tree files are hashed here."""
+    secrets = restored_blobs(clone)
+    # Reason (accepted in Ruling F11): content already in the start state is
+    # published anyway (it sits in the base history or the start tree), so
+    # matching it leaks nothing new; a `.env` copied from a tracked
+    # `.env.example` must not refuse every job.
     for kind, oid, _ in _tree(clone, "refs/jev/start"):
         if kind == "blob":
             secrets.pop(oid, None)
     if not secrets:
         return
+    worktree = [p for p in status if (clone / p).is_file() and not (clone / p).is_symlink() and "\n" not in p]
     introduced = run("git", "-C", str(clone), "rev-list", "--objects", "refs/jev/start..HEAD")
     candidates = [(oid, path) for kind, oid, path in tree if kind == "blob"]
     for line in introduced.splitlines():
         oid, _, path = line.partition(" ")
         candidates.append((oid, path or "(no path)"))
-    candidates += list(zip(hashed[len(secret_paths) :], worktree, strict=True))
+    candidates += list(zip(_blob_ids(clone, worktree), worktree, strict=True))
     for oid, path in candidates:
         if oid in secrets:
             raise RuntimeError(
@@ -500,7 +513,7 @@ def refuse_if_ignored_leaked(clone: Path, ignored: list[str], label: str) -> Non
         hit = _matches_ignored(path, ignored)
         if hit:
             raise RuntimeError(f"{hit} would be published or shown from the {label} clone (found as {path}); refusing")
-    _refuse_if_content_leaked(clone, ignored, tree, status, label)
+    _refuse_if_content_leaked(clone, tree, status, label)
 
 
 DEFAULT_CLAUDE_HOME = Path.home() / ".claude"

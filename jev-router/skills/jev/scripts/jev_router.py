@@ -731,9 +731,9 @@ def cmd_off() -> int:
 def cmd_mode(mode: str, directory: str | None) -> int:
     config = load_config()
     # Reason: the fork check's report counts Jev's cost and wait from here, not
-    # from its first scored job. Set when capture starts, not again when `mode
-    # capture` is run while already capturing (to change `--dir`, say), which
-    # would drop the calls made so far from the period.
+    # from its first scored job. Set when capture starts, and kept (accepted in
+    # Ruling F11) when `mode capture` is run while already capturing (to change
+    # `--dir`, say), which would otherwise drop the calls made so far.
     if mode == "capture" and (config.get("mode") != "capture" or "capture_started" not in config):
         config["capture_started"] = datetime.now(UTC).isoformat(timespec="seconds")
     config["mode"] = mode

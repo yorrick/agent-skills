@@ -13,7 +13,9 @@ from replay import IDENTITY, refuse_if_ignored_leaked, refuse_if_unusable, resto
 
 LOGIN_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 # Reason: the clone's own git hooks (husky, pre-commit) could reformat the result
-# after the judge saw it, or reject the commit or the push outright.
+# after the judge saw it, or reject the commit or the push outright. Used on the
+# commit, commit-tree, fetch and both pushes: skipping pre-push hooks too was
+# accepted in Ruling F11.
 NO_HOOKS = ("-c", "core.hooksPath=/dev/null")
 
 

@@ -174,9 +174,11 @@ def _refuse_links_into_the_runner(copy: Path, fork_root: Path, label: str) -> No
     """A replay runs with full access and can leave a link such as
     `sides -> <fork root>/results/<id>/result.json`, and following it would tell
     the judge which side is which. Refuses any symlink in the blind copy that
-    resolves inside the fork-check folder but outside the copy itself. Links
-    that point elsewhere stay: a uv venv's `python` is an absolute link to the
-    interpreter. A link loop leads nowhere and is left alone."""
+    resolves inside the fork-check folder but outside the copy itself. By now
+    only a link inside a dependency folder or a virtualenv can point out of
+    the copy (`copy_for_judge` removed the others, Ruling F29); one that points
+    elsewhere stays, as a uv venv's `python` does. A link loop leads nowhere
+    and is left alone."""
     root, own = fork_root.resolve(), copy.resolve()
     for dirpath, dirnames, filenames in os.walk(copy):
         for name in dirnames + filenames:

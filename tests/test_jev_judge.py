@@ -431,13 +431,24 @@ def test_a_blob_only_ever_staged_never_reaches_the_judge(tmp_path: Path, snap: P
 
 
 # F14: a replay-made link into the fork-check folder would unblind the judge.
+def _make_venv(clone: Path, interpreter: Path) -> Path:
+    """What `uv sync` leaves in a clone: an ignored `.venv` holding `pyvenv.cfg`,
+    an absolute link to the interpreter, and installed packages."""
+    venv = clone / ".venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text(f"home = {interpreter.parent}\n")
+    (venv / "bin" / "python").symlink_to(interpreter)
+    (venv / "lib" / "site-packages").mkdir(parents=True)
+    (venv / "lib" / "site-packages" / "pkg.py").write_text("x = 1\n")
+    return venv
+
+
 def _link_case(tmp_path: Path, snap: Path, target: Path) -> tuple[dict, list[str], Callable[[str, Path], str]]:
     keep = replay.restore(snap, tmp_path / "k")
     delegate = replay.restore(snap, tmp_path / "d")
-    # Reason: an untracked, not ignored folder, so the link reaches the judge's
-    # copy (an ignored `.venv` no longer does, Ruling F23a).
-    (delegate / "tools").mkdir()
-    (delegate / "tools" / "python").symlink_to(target)
+    # Reason: inside a virtualenv, where the judge's copy keeps links that
+    # point out of it (Ruling F29), so only F14's check stands in the way.
+    _make_venv(delegate, target)
     calls: list[str] = []
 
     def codex(prompt: str, work: Path) -> str:
@@ -457,19 +468,67 @@ def test_a_link_into_the_fork_check_folder_is_refused_with_no_codex_call(tmp_pat
     mapping.parent.mkdir(parents=True)
     mapping.write_text('{"order": ["keep", "delegate"]}\n')
     result, calls, codex = _link_case(tmp_path, snap, mapping)
-    with pytest.raises(RuntimeError, match=r"tools/python, a link into the fork-check folder"):
+    with pytest.raises(RuntimeError, match=r"\.venv/bin/python, a link into the fork-check folder"):
         judge.judge(snap, result, tmp_path / "j", codex=codex, rng=random.Random(1))
     assert calls == []
 
 
-def test_a_link_out_of_the_fork_check_folder_stays(tmp_path: Path, snap: Path) -> None:
-    """An absolute link to an interpreter outside the folder is normal."""
+def test_a_virtualenv_the_replay_made_stays_in_the_judge_copy(tmp_path: Path, snap: Path) -> None:
+    """A folder holding `pyvenv.cfg` at its root is kept like a dependency
+    folder, links inside it included, so the judge can run Python tests: the
+    `.venv` the replay built (ignored), and one inside an ignored `.tox`, whose
+    other contents are still left out. A copy of a secret inside a kept
+    virtualenv is still left out, by its content."""
     interpreter = tmp_path / "uv-python" / "bin" / "python3.12"
-    result, calls, codex = _link_case(tmp_path, snap, interpreter)
-    verdict = judge.judge(snap, result, tmp_path / "j", codex=codex, rng=random.Random(1))
-    assert len(calls) == 1 and verdict["prefer"] in ("keep", "delegate")
-    links = [tmp_path / "j" / letter / "tools" / "python" for letter in ("A", "B")]
-    assert [os.readlink(link) for link in links if os.path.lexists(link)] == [str(interpreter)]
+    clones = [replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d")]
+    for clone in clones:
+        shutil.copy(clone / ".env", _make_venv(clone, interpreter) / "saved.env")
+        (clone / ".gitignore").write_text((clone / ".gitignore").read_text() + ".tox/\n")
+        (clone / ".tox" / "py312").mkdir(parents=True)
+        (clone / ".tox" / "py312" / "pyvenv.cfg").write_text("home = /usr/bin\n")
+        (clone / ".tox" / "log.txt").write_text("a tox run log\n")
+    _judge_both(tmp_path, snap, *clones)
+    for letter in ("A", "B"):
+        copy = tmp_path / "j" / letter
+        assert (copy / ".venv" / "pyvenv.cfg").read_text() == f"home = {interpreter.parent}\n"
+        assert os.readlink(copy / ".venv" / "bin" / "python") == str(interpreter)
+        assert (copy / ".venv" / "lib" / "site-packages" / "pkg.py").read_text() == "x = 1\n"
+        assert not os.path.lexists(copy / ".venv" / "saved.env")
+        assert (copy / ".tox" / "py312" / "pyvenv.cfg").exists()
+        assert not os.path.lexists(copy / ".tox" / "log.txt")
+
+
+def test_links_out_of_the_copy_are_removed_except_in_dependency_folders_and_virtualenvs(
+    tmp_path: Path, snap: Path
+) -> None:
+    """F29: a replay-made link to a secret outside the fork-check folder
+    (`key -> ~/.ssh/id_rsa`) is removed from A and B, and only the link: its
+    target is untouched. A link that stays inside the copy, a venv's interpreter
+    link and a link in `node_modules` are kept."""
+    secret = tmp_path / "home" / ".ssh" / "id_rsa"
+    secret.parent.mkdir(parents=True)
+    secret.write_text("PRIVATE KEY\n")
+    interpreter = tmp_path / "uv-python" / "bin" / "python3.12"
+    tool = tmp_path / "global" / "bin" / "tool"
+    clones = [replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d")]
+    for clone in clones:
+        (clone / "key").symlink_to(secret)
+        (clone / "docs").mkdir()
+        (clone / "docs" / "home").symlink_to("../../../home")  # relative, and climbs out
+        (clone / "docs" / "app.py").symlink_to("../app.py")  # stays inside
+        _make_venv(clone, interpreter)
+        (clone / "node_modules" / ".bin").mkdir()
+        (clone / "node_modules" / ".bin" / "tool").symlink_to(tool)
+    _judge_both(tmp_path, snap, *clones)
+    for letter in ("A", "B"):
+        copy = tmp_path / "j" / letter
+        assert not os.path.lexists(copy / "key")
+        assert not os.path.lexists(copy / "docs" / "home")
+        assert os.readlink(copy / "docs" / "app.py") == "../app.py"
+        assert os.readlink(copy / ".venv" / "bin" / "python") == str(interpreter)
+        assert os.readlink(copy / "node_modules" / ".bin" / "tool") == str(tool)
+    assert secret.read_text() == "PRIVATE KEY\n"
+    assert all(os.readlink(clone / "key") == str(secret) for clone in clones)
 
 
 # Final Minor 13: a timed-out judge takes the processes it started down with it.

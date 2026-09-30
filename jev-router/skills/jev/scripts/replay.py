@@ -531,20 +531,96 @@ def _secrets(clone: Path, ignored: list[str]) -> dict[str, tuple[str, int]]:
     return secrets
 
 
+def _is_venv(path: Path) -> bool:
+    """Whether `path` is a real folder (not a link) holding a regular file
+    `pyvenv.cfg` at its root: a Python virtualenv."""
+    try:
+        return not path.is_symlink() and stat.S_ISREG(os.lstat(path / "pyvenv.cfg").st_mode)
+    except OSError:
+        return False
+
+
+def _around_venvs(clone: Path, rel: str) -> set[str]:
+    """The ignored entry `rel` itself, or, when a virtualenv sits inside it
+    (`.tox/py312`), every path under `rel` that is neither a virtualenv nor on
+    the way to one. Looks without following links."""
+    path = clone / rel
+    venvs: list[str] = []
+    if not path.is_symlink() and path.is_dir():
+        for dirpath, dirnames, _ in os.walk(path):
+            base = os.path.relpath(dirpath, clone)
+            found = [d for d in dirnames if _is_venv(Path(dirpath) / d)]
+            venvs += [f"{base}/{d}" for d in found]
+            dirnames[:] = [d for d in dirnames if d not in found]
+    if not venvs:
+        return {rel}
+    left_out: set[str] = set()
+
+    def open_up(folder: str) -> None:
+        for child in os.scandir(clone / folder):
+            sub = f"{folder}/{child.name}"
+            if any(v.startswith(f"{sub}/") for v in venvs):
+                open_up(sub)
+            elif sub not in venvs:
+                left_out.add(sub)
+
+    open_up(rel)
+    return left_out
+
+
+def _judge_left_out(clone: Path) -> set[str]:
+    """What the clone ignores now, apart from what the judge needs to run the
+    tests: dependency folders, and virtualenvs (a folder holding `pyvenv.cfg`
+    at its root) with everything in them. A virtualenv here is the one the
+    replay built in the clone: restore never copies the user's own (Ruling
+    T9d). The clone's own root never counts as one."""
+    left_out: set[str] = set()
+    for rel in snapshot.ignored_entries(clone):
+        parts = Path(rel).parts
+        if _in_dependency_folder(rel) or any(_is_venv(clone.joinpath(*parts[:i])) for i in range(1, len(parts) + 1)):
+            continue
+        left_out |= _around_venvs(clone, rel)
+    return left_out
+
+
+def _drop_links_out(copy: Path) -> None:
+    """Remove every symlink in `copy` whose target resolves outside it (Ruling
+    F29): a replay can leave `key -> ~/.ssh/id_rsa`, which the judge would
+    follow. Links inside dependency folders and virtualenvs stay, since tests
+    need them (a venv's `python` is an absolute link to the interpreter), and
+    those folders are not walked. The walk looks with lstat and never enters a
+    linked folder; a link counts as out when its target is absolute, climbs
+    above `copy`, or resolves outside it (a loop included), and only the link
+    itself is removed."""
+    for dirpath, dirnames, filenames in os.walk(copy):
+        here = Path(dirpath)
+        walk_on = []
+        for name in dirnames + filenames:
+            path = here / name
+            if path.is_symlink():
+                if not _resolves_inside(copy, path):
+                    path.unlink()
+            elif name in dirnames and name not in snapshot.DEPENDENCY_DIRS and not _is_venv(path):
+                walk_on.append(name)
+        dirnames[:] = walk_on
+
+
 def copy_for_judge(clone: Path, target: Path) -> None:
     """Copy `clone` to `target` with only what the judge needs (Rulings F23a,
-    F24): tracked files, untracked files the clone does not ignore, and
-    dependency folders, so tests can run. Left out:
+    F24): tracked files, untracked files the clone does not ignore, dependency
+    folders and virtualenvs, so tests can run. Left out:
 
-    - every path the clone itself ignores now, outside dependency folders
-      (`.env`, `.env.local`, caches), whatever put it there;
+    - every path the clone itself ignores now, outside dependency folders and
+      virtualenvs (`.env`, `.env.local`, caches), whatever put it there;
     - every other file whose content is a secret (`_secrets`), whatever its
       path (`.env` copied under another name, or into `node_modules`). Only
-      files of a secret's size are hashed.
+      files of a secret's size are hashed;
+    - every symlink that points out of the copy, outside dependency folders and
+      virtualenvs (`_drop_links_out`).
 
-    Paths are left out while copying, never deleted afterwards, and nothing is
-    read through a symlink."""
-    left_out = {p for p in snapshot.ignored_entries(clone) if not _in_dependency_folder(p)}
+    Files are left out while copying, never deleted afterwards, and nothing is
+    read through a symlink; only links out are removed from the finished copy."""
+    left_out = _judge_left_out(clone)
     secrets = _secrets(clone, restored_ignored(clone))
     sizes = {size for _, size in secrets.values()}
     candidates: list[str] = []
@@ -559,6 +635,7 @@ def copy_for_judge(clone: Path, target: Path) -> None:
                 candidates.append(rel)
     left_out.update(rel for rel, oid in zip(candidates, _blob_ids(clone, candidates), strict=True) if oid in secrets)
     _copy_selective(clone.parent, clone.name, target, {f"{clone.name}/{p}" for p in left_out})
+    _drop_links_out(target)
 
 
 def _blob_ids(clone: Path, paths: list[str]) -> list[str]:

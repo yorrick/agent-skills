@@ -45,10 +45,10 @@ EXTERNAL_SHELL = re.compile(
     # httpie: a writing method, or a data item (`k=v`, `k:=json`) that makes it a POST
     r"|\bhttps?\s+(POST|PUT|PATCH|DELETE)\b"
     r"|\bhttps?\s+(?!(?:GET|HEAD|OPTIONS)\b)[^|;&\n]*?\s[\w.\[\]@-]+:?=(?!=)"
-    # any aws command, by the CLI's own `aws <service> <operation>` shape, lower
-    # case, wherever it sits (a loop, `$(...)`, sudo, env, a full path, bash -c),
-    # but not `~/.aws/`, `aws/` or "AWS" in a message
-    r"|(?<![\w.-])(?-i:aws)\s+[a-z][\w-]*\s+[a-z]"
+    # any aws command, by the CLI's own `aws [--global-option [value]]... <service>
+    # <operation>` shape, lower case, wherever it sits (a loop, `$(...)`, sudo, env,
+    # a full or quoted path, bash -c), but not `~/.aws/`, `aws/` or "AWS" in a message
+    r"|(?<![\w.-])(?-i:aws)[\"']?(?:\s+--[\w-]+(?:=\S+|\s+(?!-)\S+)?)*\s+[a-z][\w-]*\s+[a-z]"
     r"|\bnpm\s+publish\b|\bdeploy\b",
     re.IGNORECASE,
 )

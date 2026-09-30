@@ -74,6 +74,12 @@ def test_external_actions_name_pushes_prs_deploys_and_mcp_writes() -> None:
         'AWS_PROFILE="aura prod" aws s3 ls',
         "timeout 60 aws s3 ls",
         "{ aws s3 ls; }",
+        # F23e: global options before the service, and a quoted path to the binary.
+        "aws --profile prod s3 rm s3://bucket/x",
+        "aws --region eu-west-1 lambda invoke --function-name x out.json",
+        "aws --no-cli-pager s3 ls",
+        "aws --region=eu-west-1 --output json sts get-caller-identity",
+        '"$HOME/bin/aws" s3 ls',
     ],
 )
 def test_external_actions_catch_the_common_writing_forms(command: str) -> None:

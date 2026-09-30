@@ -464,10 +464,18 @@ def _touched_since(path: Path, cutoff: float) -> bool:
     return False
 
 
+def _never_restored(folder: Path) -> bool:
+    """A folder restore never copies, as `_collect_exclusions` decides: a nested
+    checkout or a virtualenv. Whatever sits there later, such as the `.venv` the
+    replay's `uv sync` built where the user's own was captured, is the replay's
+    own, not restored content."""
+    return os.path.lexists(folder / ".git") or os.path.lexists(folder / "pyvenv.cfg")
+
+
 def _restored_files(clone: Path, ignored: list[str]) -> list[str]:
     """The regular files now under the restored ignored entries, relative to the
-    clone, outside dependency folders, of at most CONTENT_MAX_BYTES. Nothing
-    here follows a symlink."""
+    clone, outside dependency folders and folders restore never copies, of at
+    most CONTENT_MAX_BYTES. Nothing here follows a symlink."""
     found: list[str] = []
 
     def consider(rel: str) -> None:
@@ -482,8 +490,14 @@ def _restored_files(clone: Path, ignored: list[str]) -> list[str]:
         if path.is_symlink() or not path.is_dir():
             consider(rel)
             continue
+        if _never_restored(path):
+            continue
         for dirpath, dirnames, filenames in os.walk(path):
-            dirnames[:] = [name for name in dirnames if name not in snapshot.DEPENDENCY_DIRS]
+            dirnames[:] = [
+                name
+                for name in dirnames
+                if name not in snapshot.DEPENDENCY_DIRS and not _never_restored(Path(dirpath) / name)
+            ]
             base = os.path.relpath(dirpath, clone)
             for name in filenames:
                 consider(f"{base}/{name}")
@@ -728,7 +742,7 @@ def refuse_if_ignored_leaked(clone: Path, ignored: list[str], label: str) -> Non
     index, are checked for a restored ignored file's content under another
     name (`_refuse_if_content_leaked`).
 
-    All three listings are read with `-z`: without it, git quotes a path that
+    Every listing is read with `-z`: without it, git quotes a path that
     holds a non-ASCII byte, a `"`, a backslash or a control character, so the
     quoted form would never equal the plain name recorded in `restore.json`
     and the check would silently miss it."""

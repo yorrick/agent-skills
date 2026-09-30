@@ -498,6 +498,25 @@ def test_a_virtualenv_the_replay_made_stays_in_the_judge_copy(tmp_path: Path, sn
         assert not os.path.lexists(copy / ".tox" / "log.txt")
 
 
+def test_the_replays_virtualenv_stays_whole_when_the_user_has_one_too(tmp_path: Path, repo: Path) -> None:
+    """The user's own `.venv` is a captured ignored entry that restore never
+    copies (Ruling T9d), so the replay's `uv sync` builds its own where a
+    restored entry would sit. Nothing in it was restored, so none of its files
+    counts as a secret, and the judge's copy keeps it whole."""
+    interpreter = tmp_path / "uv-python" / "bin" / "python3.12"
+    _make_venv(repo, interpreter)
+    snap = _snapshot_of(tmp_path, repo)
+    clones = [replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d")]
+    for clone in clones:
+        assert not os.path.lexists(clone / ".venv")
+        _make_venv(clone, interpreter)
+    _judge_both(tmp_path, snap, *clones)
+    for letter in ("A", "B"):
+        copy = tmp_path / "j" / letter
+        assert (copy / ".venv" / "pyvenv.cfg").read_text() == f"home = {interpreter.parent}\n"
+        assert (copy / ".venv" / "lib" / "site-packages" / "pkg.py").read_text() == "x = 1\n"
+
+
 def test_links_out_of_the_copy_are_removed_except_in_dependency_folders_and_virtualenvs(
     tmp_path: Path, snap: Path
 ) -> None:

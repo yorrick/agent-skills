@@ -29,6 +29,9 @@ import jev_router
 import report
 import usage
 
+# One aws CLI option: `--name`, `--name value` or `--name=value`, the value
+# possibly quoted (`--profile "prod team"`).
+_AWS_OPTION = r"(?:\s+--[\w-]+(?:=(?:\"[^\"]*\"|'[^']*'|\S+)|\s+(?:\"[^\"]*\"|'[^']*'|(?!-)\S+))?)"
 EXTERNAL_SHELL = re.compile(
     # git push, also after `-C <path>` or `-c key=value`
     r"\bgit\s+(?:-[Cc]\s*(?:\"[^\"]*\"|'[^']*'|\S+)\s+)*push\b"
@@ -45,10 +48,13 @@ EXTERNAL_SHELL = re.compile(
     # httpie: a writing method, or a data item (`k=v`, `k:=json`) that makes it a POST
     r"|\bhttps?\s+(POST|PUT|PATCH|DELETE)\b"
     r"|\bhttps?\s+(?!(?:GET|HEAD|OPTIONS)\b)[^|;&\n]*?\s[\w.\[\]@-]+:?=(?!=)"
-    # any aws command, by the CLI's own `aws [--global-option [value]]... <service>
+    # any aws command, by the CLI's own `aws [option]... <service> [option]...
     # <operation>` shape, lower case, wherever it sits (a loop, `$(...)`, sudo, env,
-    # a full or quoted path, bash -c), but not `~/.aws/`, `aws/` or "AWS" in a message
-    r"|(?<![\w.-])(?-i:aws)[\"']?(?:\s+--[\w-]+(?:=\S+|\s+(?!-)\S+)?)*\s+[a-z][\w-]*\s+[a-z]"
+    # a full path, bash -c), or a quoted path with a `/` inside the quotes
+    # (`"$HOME/bin/aws"`), but not `~/.aws/`, `aws/`, a quoted "aws" search word
+    # (`grep -rn "aws" src tests`) or "AWS" in a message
+    r"|(?:\"[^\"]*/(?-i:aws)\"|'[^']*/(?-i:aws)'|(?<![\w.-])(?-i:aws))"
+    rf"{_AWS_OPTION}*\s+[a-z][\w-]*{_AWS_OPTION}*\s+[a-z]"
     r"|\bnpm\s+publish\b|\bdeploy\b",
     re.IGNORECASE,
 )

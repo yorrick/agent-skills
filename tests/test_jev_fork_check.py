@@ -80,6 +80,14 @@ def test_external_actions_name_pushes_prs_deploys_and_mcp_writes() -> None:
         "aws --no-cli-pager s3 ls",
         "aws --region=eu-west-1 --output json sts get-caller-identity",
         '"$HOME/bin/aws" s3 ls',
+        # F31: quoted option values, and options between the service and the operation.
+        'aws --profile "prod team" s3 rm s3://bucket/x',
+        "aws --profile 'prod team' s3 rm s3://bucket/x",
+        'aws --profile="prod team" s3 ls',
+        "aws s3 --profile prod rm s3://bucket/x",
+        'aws s3 --profile "prod team" --region eu-west-1 rm s3://bucket/x',
+        "aws s3 --no-cli-pager ls",
+        "'/opt/aws cli/bin/aws' s3 ls",
     ],
 )
 def test_external_actions_catch_the_common_writing_forms(command: str) -> None:
@@ -107,6 +115,9 @@ def test_external_actions_catch_the_common_writing_forms(command: str) -> None:
         "grep -rn aws src/",
         "cat ~/.aws/config",
         "ls aws/",
+        # F31: a quoted "aws" with no path in the quotes is a search word, not the binary.
+        'grep -rn "aws" src tests',
+        "rg -n 'aws' scripts docs",
     ],
 )
 def test_external_actions_leave_reads_alone(command: str) -> None:

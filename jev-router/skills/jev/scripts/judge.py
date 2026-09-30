@@ -6,11 +6,12 @@ import json
 import os
 import random
 import signal
+import stat
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from replay import copy_for_judge, refuse_if_ignored_leaked, refuse_if_unusable, restored_ignored
+from replay import clone_spellings, copy_for_judge, refuse_if_ignored_leaked, refuse_if_unusable, restored_ignored
 
 EXAMPLE = json.dumps(
     {
@@ -121,15 +122,35 @@ def parse(text: str) -> dict:
     raise ValueError("the judge gave no verdict line")
 
 
-def _refuse_if_source_path_leaked(git_dir: Path, source: Path, label: str) -> None:
+def _names_any(path: Path, needles: list[bytes]) -> bool:
+    """Whether the file at `path` holds any of `needles`, read in pieces, so a
+    large binary (a compiled extension in a venv) is never held whole."""
+    overlap = max(len(n) for n in needles) - 1
+    tail = b""
+    with path.open("rb") as handle:
+        while chunk := handle.read(1 << 20):
+            window = tail + chunk
+            if any(n in window for n in needles):
+                return True
+            tail = window[-overlap:]
+    return False
+
+
+def _refuse_if_source_path_leaked(copy: Path, folders: list[str], source: Path, label: str) -> None:
     """Defense in depth: the copy's `.git` is fetched fresh from `source`, and
     `copy_for_judge` removed the origin, the reflogs and FETCH_HEAD, which all
-    name it (Ruling F33). Confirm no file left under `git_dir` still spells out
-    `source`'s own path, before the judge is ever shown this copy."""
-    needle = str(source).encode()
-    for f in git_dir.rglob("*"):
-        if f.is_file() and needle in f.read_bytes():
-            raise RuntimeError(f"{label}'s copy still names its source clone, in {f}; refusing")
+    name it (Ruling F33), and pointed each virtualenv at the copy (Ruling
+    F36). Confirm no regular file left under `folders` (`.git` and the
+    virtualenvs, relative to `copy`) still spells out `source`'s own path,
+    before the judge is ever shown this copy: a venv that still names the clone
+    could load the clone's code, which can read the clone's restored `.env`."""
+    needles = clone_spellings(source)
+    for folder in folders:
+        for dirpath, _, filenames in os.walk(copy / folder):
+            for name in filenames:
+                f = Path(dirpath) / name
+                if stat.S_ISREG(os.lstat(f).st_mode) and _names_any(f, needles):
+                    raise RuntimeError(f"{label}'s copy still names its source clone, in {f}; refusing")
 
 
 def _refuse_links_into_the_runner(copy: Path, fork_root: Path, label: str) -> None:
@@ -180,8 +201,8 @@ def judge(
         # says what is left out), while dependency folders stay so tests can run.
         # Its `.git` is fetched fresh, with no origin, reflogs or FETCH_HEAD:
         # each would name the replay folder, which result.json maps to a side.
-        copy_for_judge(source, work / letter)
-        _refuse_if_source_path_leaked(work / letter / ".git", source, letter)
+        venvs = copy_for_judge(source, work / letter)
+        _refuse_if_source_path_leaked(work / letter, [".git", *venvs], source, letter)
         # Reason: the snapshot lives at <fork root>/snapshots/<id>.
         _refuse_links_into_the_runner(work / letter, snap.parent.parent, letter)
     raw = parse(codex(PROMPT.format(message=(snap / "message.txt").read_text(), example=EXAMPLE), work))

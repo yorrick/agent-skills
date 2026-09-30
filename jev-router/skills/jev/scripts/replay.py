@@ -341,12 +341,15 @@ def restore(snap: Path, dest: Path, *, copy_ignored: bool = True) -> Path:
         # "ignored_blobs" records their content now, before the replay runs, so
         # the content check still knows a `.env` the replay moved away (Ruling
         # F10): every restored ignored regular file outside dependency folders,
-        # up to CONTENT_MAX_BYTES, however small (Ruling F32). The exemptions
-        # (`_secrets`) apply where the record is used, not here.
+        # up to CONTENT_MAX_BYTES, however small (Ruling F32), that holds an
+        # ASCII letter or digit (Ruling F38: nothing else is ever a secret, and
+        # only now is the content at hand). The history exemption (`_secrets`)
+        # applies where the record is used.
         # "ignored_blob_sizes" lets the checks look for those contents anywhere
         # by hashing only the files of a matching size.
         contents = _restored_files(clone, ignored)
-        blobs = dict(zip(_blob_ids(clone, contents), contents, strict=True))
+        hashed = zip(_hash_files(clone, contents), contents, strict=True)
+        blobs = {oid: path for (oid, telling), path in hashed if telling}
         record = {
             "skipped": sorted(skipped),
             "ignored": sorted(ignored),
@@ -469,6 +472,8 @@ def _never_restored(folder: Path) -> bool:
     checkout or a virtualenv. Whatever sits there later, such as the `.venv` the
     replay's `uv sync` built where the user's own was captured, is the replay's
     own, not restored content."""
+    # Known limit (N4, deliberate smuggling, Ruling F35): a `.git` or `pyvenv.cfg` planted in a restored ignored
+    # folder hides that folder's edited files from the check-time hashing, for publish as for the judge.
     return os.path.lexists(folder / ".git") or os.path.lexists(folder / "pyvenv.cfg")
 
 
@@ -521,13 +526,15 @@ def _secrets(clone: Path, ignored: list[str]) -> dict[str, tuple[str, int]]:
     moved `.env` still counts, Ruling F10), and the restored files as they are
     now (so one the replay edited, then copied, counts too).
 
-    Two contents are never secrets. The empty file: an empty restored cache file
-    would otherwise match every empty file in the repository. And any blob
-    reachable from `refs/jev/start^` (Rulings F11, F13): the user's committed
-    history already holds it, and the push carries that history anyway, so a
-    `.env` made from a tracked `.env.example` must not refuse every job. Only
-    the snapshot HEAD's history is exempt, never the start tree's untracked
-    files from the tar.
+    Two kinds of content are never secrets. Content with no ASCII letter or
+    digit, the empty file included (Ruling F38, `_TELLING`): a restored cache
+    file holding `{}` would otherwise match every `{}` in the repository;
+    restore leaves such content out of its record, and it is dropped here from
+    the files as they are now. And any blob reachable from `refs/jev/start^`
+    (Rulings F11, F13): the user's committed history already holds it, and the
+    push carries that history anyway, so a `.env` made from a tracked
+    `.env.example` must not refuse every job. Only the snapshot HEAD's history
+    is exempt, never the start tree's untracked files from the tar.
 
     With nothing to protect, this returns before any file is hashed (one that
     cannot be read would fail the check) or any history is walked."""
@@ -537,9 +544,9 @@ def _secrets(clone: Path, ignored: list[str]) -> dict[str, tuple[str, int]]:
         return {}
     sizes = _restore_record(clone, "ignored_blob_sizes")
     secrets = {oid: (path, int(sizes[oid])) for oid, path in recorded.items()}
-    for oid, path in zip(_blob_ids(clone, now), now, strict=True):
-        secrets.setdefault(oid, (path, os.lstat(clone / path).st_size))
-    secrets = {oid: found for oid, found in secrets.items() if found[1] > 0}
+    for (oid, telling), path in zip(_hash_files(clone, now), now, strict=True):
+        if telling:
+            secrets.setdefault(oid, (path, os.lstat(clone / path).st_size))
     if secrets:
         for oid, _ in _object_ids(clone, "refs/jev/start^"):
             secrets.pop(oid, None)
@@ -606,25 +613,71 @@ def _judge_left_out(clone: Path) -> tuple[set[str], list[str]]:
 
 
 def _drop_links_out(copy: Path) -> None:
-    """Remove every symlink in `copy` whose target resolves outside it (Ruling
-    F29): a replay can leave `key -> ~/.ssh/id_rsa`, which the judge would
-    follow. Links inside dependency folders and virtualenvs stay, since tests
-    need them (a venv's `python` is an absolute link to the interpreter), and
-    those folders are not walked. The walk looks with lstat and never enters a
-    linked folder; a link counts as out when its target is absolute, climbs
-    above `copy`, or resolves outside it (a loop included), and only the link
-    itself is removed."""
+    """Deal with every symlink in `copy` whose target points outside it
+    (Rulings F29, F37): a replay can leave `key -> ~/.ssh/id_rsa`, which the
+    judge would follow. Links inside dependency folders and virtualenvs stay,
+    since tests need them (a venv's `python` is an absolute link to the
+    interpreter), and those folders are not walked.
+
+    Outside `.git`, every path here is the replay's result, tracked or
+    untracked and not ignored, since the copy leaves ignored paths out. Such a
+    link is never removed silently: the judge would measure a result that is
+    not the replay's, so judging is refused. One inside `.git` is removed.
+
+    The walk looks with lstat and never enters a linked folder. A link counts
+    as out when its own target is absolute or climbs above `copy`, read as
+    text: one that stays inside can only lead out through another link, which
+    is either out itself or kept in a dependency folder or virtualenv (a
+    convenience `python -> .venv/bin/python` must not refuse the job). Only
+    the link itself is ever removed."""
     for dirpath, dirnames, filenames in os.walk(copy):
         here = Path(dirpath)
         walk_on = []
         for name in dirnames + filenames:
             path = here / name
             if path.is_symlink():
-                if not _resolves_inside(copy, path):
-                    path.unlink()
+                if not _climbs_out(os.path.relpath(here, copy), os.readlink(path)):
+                    continue
+                rel = path.relative_to(copy)
+                if rel.parts[0] != ".git":
+                    raise RuntimeError(f"the result holds a link outside the repository: {rel}; refusing")
+                path.unlink()
             elif name in dirnames and name not in snapshot.DEPENDENCY_DIRS and not _is_venv(path):
                 walk_on.append(name)
         dirnames[:] = walk_on
+
+
+def clone_spellings(clone: Path) -> list[bytes]:
+    """The clone's path as written into files: as given, and fully resolved
+    when that differs (`/var` is `/private/var` on macOS). Longest first."""
+    return sorted({str(clone).encode(), str(clone.resolve()).encode()}, key=len, reverse=True)
+
+
+def _relocate_venvs(clone: Path, target: Path, venvs: list[str]) -> None:
+    """Point each virtualenv in the copy at the copy instead of the clone
+    (Ruling F36). uv writes the clone's absolute path into the editable
+    `_editable_impl_*.pth`, `direct_url.json`, every `bin/*` entry script and
+    shebang and the `activate*` scripts, so the copy's `python` would import
+    the clone's code, which can read the clone's restored `.env`. In text files
+    (no NUL byte) of up to 1 MB, each spelling of the clone's path followed by a
+    path boundary becomes the copy's path, byte for byte. Binary files are left
+    alone: `judge` scans the venvs afterwards and refuses on any path left."""
+    pattern = re.compile(b"(?:" + b"|".join(re.escape(s) for s in clone_spellings(clone)) + rb")(?![\w.-])")
+    replacement = str(target).encode()
+    for venv in venvs:
+        for dirpath, _, filenames in os.walk(target / venv):
+            for name in filenames:
+                path = Path(dirpath) / name
+                size = _regular_size(path)
+                if size is None or size > CONTENT_MAX_BYTES:
+                    continue
+                data = path.read_bytes()
+                if b"\0" in data or not pattern.search(data):
+                    continue
+                mode = os.lstat(path).st_mode
+                path.chmod(mode | stat.S_IWUSR)
+                path.write_bytes(pattern.sub(lambda _m: replacement, data))
+                path.chmod(stat.S_IMODE(mode))
 
 
 def _fresh_git(clone: Path, target: Path) -> None:
@@ -690,35 +743,46 @@ def _ignore_kept(target: Path, kept: list[str]) -> None:
     exclude.write_text("".join(lines))
 
 
-def copy_for_judge(clone: Path, target: Path) -> None:
+def copy_for_judge(clone: Path, target: Path) -> list[str]:
     """Copy `clone` to `target` with only what the judge needs (Rulings F23a,
     F24, F33): tracked files, untracked files the clone does not ignore,
     dependency folders and virtualenvs, so tests can run, and a fresh `.git`
     (`_fresh_git`) whose index is built from HEAD, so status shows the replay's
-    changes. Left out:
+    changes. Each virtualenv is pointed at the copy (`_relocate_venvs`).
+    Returns the virtualenvs, relative to the copy. Left out:
 
     - the clone's `.git`, and any nested `.git` the replay made (a repository
       of its own, or a gitfile pointing back at the clone's): only the working
       files around it are copied;
     - every path the clone itself ignores now, outside dependency folders and
       virtualenvs (`.env`, `.env.local`, caches), whatever put it there;
+    - the `__pycache__` folders inside virtualenvs: compiled with the clone's
+      paths, and rebuilt by Python as needed;
     - every other file whose content is a secret (`_secrets`), whatever its
       path (`.env` copied under another name, or into `node_modules`). Only
-      files of a secret's size are hashed;
-    - every symlink that points out of the copy, outside dependency folders and
-      virtualenvs (`_drop_links_out`).
+      files of a secret's size are hashed.
 
-    Files are left out while copying, never deleted afterwards, and nothing is
-    read through a symlink; only links out are removed from the finished copy."""
+    A link out of the copy in the replay's result refuses judging
+    (`_drop_links_out`). Files are left out while copying, never deleted
+    afterwards, and nothing is read through a symlink."""
     left_out, kept = _judge_left_out(clone)
     left_out.add(".git")
     secrets = _secrets(clone, restored_ignored(clone))
     sizes = {size for _, size in secrets.values()}
     candidates: list[str] = []
+    venvs: list[str] = []
     for dirpath, dirnames, filenames in os.walk(clone):
         base = os.path.relpath(dirpath, clone)
         prefix = "" if base == "." else f"{base}/"
+        # Known limit (N3): the gitfile of an initialized submodule goes too, so edits inside one are invisible to the
+        # judge; restore never initializes submodules.
         left_out.update(f"{prefix}{name}" for name in dirnames + filenames if name == ".git")
+        in_venv = any(prefix.startswith(f"{v}/") for v in venvs)
+        for name in dirnames:
+            if in_venv and name == "__pycache__":
+                left_out.add(f"{prefix}{name}")
+            elif not in_venv and _is_venv(Path(dirpath) / name) and f"{prefix}{name}" not in left_out:
+                venvs.append(f"{prefix}{name}")
         dirnames[:] = [d for d in dirnames if f"{prefix}{d}" not in left_out]
         for name in filenames:
             rel = f"{prefix}{name}"
@@ -731,18 +795,27 @@ def copy_for_judge(clone: Path, target: Path) -> None:
     run("git", "-C", str(target), "read-tree", "HEAD")
     run("git", "-C", str(target), "update-index", "-q", "--refresh")
     _drop_links_out(target)
+    _relocate_venvs(clone, target, venvs)
+    return venvs
 
 
-def _blob_ids(clone: Path, paths: list[str]) -> list[str]:
-    """The git blob id of each of `paths` (relative to the clone), computed here
-    from the bytes on disk (Ruling F27): `git hash-object --stdin-paths` reads one
-    path per line, so a name holding a newline would slip past it. The hash is
-    the clone's own object format (sha1, or sha256 in a repository made with
-    it), and each file is opened without following a symlink."""
+# Content with no ASCII letter or digit (`{}`, `[]`, blank lines, the empty
+# file) is never a secret (Ruling F38): a restored cache file holding `{}` would
+# otherwise match every `{}` in the repository, `node_modules` included.
+_TELLING = re.compile(rb"[A-Za-z0-9]")
+
+
+def _hash_files(clone: Path, paths: list[str]) -> list[tuple[str, bool]]:
+    """The git blob id of each of `paths` (relative to the clone), and whether
+    that content can be a secret at all (`_TELLING`). Computed here from the
+    bytes on disk (Ruling F27): `git hash-object --stdin-paths` reads one path
+    per line, so a name holding a newline would slip past it. The hash is the
+    clone's own object format (sha1, or sha256 in a repository made with it),
+    and each file is opened without following a symlink."""
     if not paths:
         return []
     algorithm = run("git", "-C", str(clone), "rev-parse", "--show-object-format").strip()
-    ids = []
+    hashed = []
     for rel in paths:
         try:
             fd = os.open(clone / rel, os.O_RDONLY | os.O_NOFOLLOW)
@@ -750,8 +823,14 @@ def _blob_ids(clone: Path, paths: list[str]) -> list[str]:
             raise RuntimeError(f"cannot read {rel} to compare it with the restored secrets: {exc}") from exc
         with os.fdopen(fd, "rb") as handle:
             data = handle.read()
-        ids.append(hashlib.new(algorithm, b"blob %d\0" % len(data) + data).hexdigest())
-    return ids
+        oid = hashlib.new(algorithm, b"blob %d\0" % len(data) + data).hexdigest()
+        hashed.append((oid, _TELLING.search(data) is not None))
+    return hashed
+
+
+def _blob_ids(clone: Path, paths: list[str]) -> list[str]:
+    """The git blob id of each of `paths` (`_hash_files`)."""
+    return [oid for oid, _ in _hash_files(clone, paths)]
 
 
 def _index(clone: Path) -> list[tuple[str, str]]:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import random
 import shutil
@@ -626,37 +627,178 @@ def test_the_replays_virtualenv_stays_whole_when_the_user_has_one_too(tmp_path: 
         assert (copy / ".venv" / "lib" / "site-packages" / "pkg.py").read_text() == "x = 1\n"
 
 
-def test_links_out_of_the_copy_are_removed_except_in_dependency_folders_and_virtualenvs(
-    tmp_path: Path, snap: Path
-) -> None:
-    """F29: a replay-made link to a secret outside the fork-check folder
-    (`key -> ~/.ssh/id_rsa`) is removed from A and B, and only the link: its
-    target is untouched. A link that stays inside the copy, a venv's interpreter
-    link and a link in `node_modules` are kept."""
+def _outside_secret(tmp_path: Path) -> Path:
     secret = tmp_path / "home" / ".ssh" / "id_rsa"
     secret.parent.mkdir(parents=True)
     secret.write_text("PRIVATE KEY\n")
+    return secret
+
+
+@pytest.mark.parametrize("how", ["tracked", "untracked"])
+def test_a_link_out_in_the_result_refuses_the_judge(tmp_path: Path, snap: Path, how: str) -> None:
+    """F37: a link out of the repository that is part of the replay's result
+    (`key -> ~/.ssh/id_rsa`, committed, or untracked and not ignored) is never
+    removed silently: the judge would measure a result that is not the
+    replay's. Judging is refused before codex runs, and nothing is touched."""
+    secret = _outside_secret(tmp_path)
+    keep, delegate = replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d")
+    (delegate / "docs").mkdir()
+    (delegate / "docs" / "key").symlink_to(secret if how == "tracked" else "../../../home/.ssh/id_rsa")
+    if how == "tracked":
+        assert _git(delegate, "add", "docs/key").returncode == 0
+        assert _git(delegate, "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-qm", "a key").returncode == 0
+    calls: list[str] = []
+
+    def codex(prompt: str, work: Path) -> str:
+        calls.append(prompt)
+        return ANSWER
+
+    result = {
+        "id": "x",
+        "sides": {"keep": {"clone": str(keep), "cost": 1.0}, "delegate": {"clone": str(delegate), "cost": 1.0}},
+    }
+    with pytest.raises(RuntimeError, match=r"the result holds a link outside the repository: docs/key"):
+        judge.judge(snap, result, tmp_path / "j", codex=codex, rng=random.Random(1))
+    assert calls == []
+    assert secret.read_text() == "PRIVATE KEY\n" and os.path.lexists(delegate / "docs" / "key")
+
+
+def test_links_out_outside_the_result_never_stop_the_judge(tmp_path: Path, snap: Path) -> None:
+    """F29, F37: an ignored link out (`__pycache__/key`) never reaches A or B
+    and does not stop the judge. A link that stays inside the copy, a venv's
+    interpreter link, a link in `node_modules`, and a result link that only
+    leads out through the venv's own link (`python -> .venv/bin/python`) are
+    kept."""
+    secret = _outside_secret(tmp_path)
     interpreter = tmp_path / "uv-python" / "bin" / "python3.12"
     tool = tmp_path / "global" / "bin" / "tool"
     clones = [replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d")]
     for clone in clones:
-        (clone / "key").symlink_to(secret)
+        (clone / "__pycache__").mkdir()
+        (clone / "__pycache__" / "key").symlink_to(secret)
         (clone / "docs").mkdir()
-        (clone / "docs" / "home").symlink_to("../../../home")  # relative, and climbs out
         (clone / "docs" / "app.py").symlink_to("../app.py")  # stays inside
         _make_venv(clone, interpreter)
+        (clone / "python").symlink_to(".venv/bin/python")
         (clone / "node_modules" / ".bin").mkdir()
         (clone / "node_modules" / ".bin" / "tool").symlink_to(tool)
     _judge_both(tmp_path, snap, *clones)
     for letter in ("A", "B"):
         copy = tmp_path / "j" / letter
-        assert not os.path.lexists(copy / "key")
-        assert not os.path.lexists(copy / "docs" / "home")
+        assert not os.path.lexists(copy / "__pycache__")
         assert os.readlink(copy / "docs" / "app.py") == "../app.py"
+        assert os.readlink(copy / "python") == ".venv/bin/python"
         assert os.readlink(copy / ".venv" / "bin" / "python") == str(interpreter)
         assert os.readlink(copy / "node_modules" / ".bin" / "tool") == str(tool)
     assert secret.read_text() == "PRIVATE KEY\n"
-    assert all(os.readlink(clone / "key") == str(secret) for clone in clones)
+    assert all(os.readlink(clone / "__pycache__" / "key") == str(secret) for clone in clones)
+
+
+def _editable_venv(clone: Path) -> None:
+    """What `uv sync` leaves for an editable src-layout project `probe`: a real
+    virtualenv whose `.pth`, `direct_url.json`, entry script and activate
+    scripts name the clone, and a `.pyc` a test run compiled in it. Like uv,
+    the `.pth` and `direct_url.json` spell the clone's resolved path."""
+    (clone / "src" / "probe").mkdir(parents=True)
+    (clone / "src" / "probe" / "__init__.py").write_text("from pathlib import Path\nHERE = Path(__file__).resolve()\n")
+    venv = clone / ".venv"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True, capture_output=True)
+    (site,) = (venv / "lib").glob("python*/site-packages")
+    (site / "_editable_impl_probe.pth").write_text(f"{clone.resolve() / 'src'}\n")
+    (site / "probe-0.1.0.dist-info").mkdir()
+    (site / "probe-0.1.0.dist-info" / "direct_url.json").write_text(
+        json.dumps({"url": f"file://{clone.resolve()}", "dir_info": {"editable": True}})
+    )
+    (venv / "bin" / "probe").write_text(f"#!{venv / 'bin' / 'python'}\nimport probe\n")
+    (site / "helper.py").write_text("X = 1\n")
+    subprocess.run(
+        [str(venv / "bin" / "python"), "-c", "import helper"], cwd=clone.parent, check=True, env=_plain_env()
+    )
+    assert list((site / "__pycache__").glob("helper.*.pyc"))
+
+
+def _plain_env() -> dict[str, str]:
+    return {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV")}
+
+
+def _naming(root: Path, *paths: Path) -> list[str]:
+    needles = [str(p).encode() for p in paths]
+    return [
+        str(f.relative_to(root))
+        for f in root.rglob("*")
+        if f.is_file() and not f.is_symlink() and any(n in f.read_bytes() for n in needles)
+    ]
+
+
+def test_a_kept_virtualenv_runs_the_copys_own_code_and_names_no_clone(tmp_path: Path, snap: Path) -> None:
+    """F36: uv writes the clone's path into the editable `.pth`,
+    `direct_url.json`, entry scripts and activate scripts, so the copy's venv
+    imported the clone's code, which can read the clone's restored `.env`.
+    Each kept venv is relocated to its copy, its `__pycache__` (compiled with
+    the clone's paths) is left out, and nothing under A or B names a clone.
+    The clones sit behind a linked folder, so the clone's path as given and
+    as resolved (which uv writes) differ, as `/var` and `/private/var` do."""
+    (tmp_path / "linked").symlink_to(tmp_path, target_is_directory=True)
+    keep, delegate = replay.restore(snap, tmp_path / "linked" / "k"), replay.restore(snap, tmp_path / "linked" / "d")
+    for clone in (keep, delegate):
+        _editable_venv(clone)
+        assert _naming(clone / ".venv", clone) and _naming(clone / ".venv", clone.resolve())  # as uv's venv does
+    _judge_both(tmp_path, snap, keep, delegate)
+    for letter in ("A", "B"):
+        copy = tmp_path / "j" / letter
+        imported = subprocess.run(
+            [str(copy / ".venv" / "bin" / "python"), "-c", "import probe; print(probe.HERE)"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            env=_plain_env(),
+        )
+        assert imported.stdout.strip() == str((copy / "src" / "probe" / "__init__.py").resolve()), imported.stderr
+        assert (copy / ".venv" / "bin" / "probe").read_text().startswith(f"#!{copy / '.venv' / 'bin' / 'python'}\n")
+        assert not list(copy.glob(".venv/lib/python*/site-packages/__pycache__"))
+        assert _naming(copy, keep, delegate, keep.resolve(), delegate.resolve()) == []
+
+
+def test_a_venv_file_still_naming_the_clone_refuses_the_judge(tmp_path: Path, snap: Path) -> None:
+    """F36: a binary file (one holding a NUL byte) is never rewritten, so one
+    that names the clone is still found by the scan, and judging is refused."""
+    interpreter = tmp_path / "uv-python" / "bin" / "python3.12"
+    keep, delegate = replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d")
+    for clone in (keep, delegate):
+        _make_venv(clone, interpreter)
+        (clone / ".venv" / "lib" / "native.so").write_bytes(b"\x7fELF\0" + str(clone).encode() + b"\0")
+    calls: list[str] = []
+
+    def codex(prompt: str, work: Path) -> str:
+        calls.append(prompt)
+        return ANSWER
+
+    result = {"sides": {"keep": {"clone": str(keep), "cost": 1.0}, "delegate": {"clone": str(delegate), "cost": 1.0}}}
+    with pytest.raises(RuntimeError, match=r"still names its source clone, in .*native\.so"):
+        judge.judge(snap, result, tmp_path / "j", codex=codex, rng=random.Random(1))
+    assert calls == []
+
+
+def test_content_with_no_letter_or_digit_is_never_a_secret(tmp_path: Path, repo: Path) -> None:
+    """F38: a restored `.pytest_cache` file holding `{}` is no secret: restore
+    does not record it, a replay's new `{}` file is not refused, and the `{}`
+    in `node_modules/.package-lock.json` reaches the judge."""
+    (repo / ".gitignore").write_text((repo / ".gitignore").read_text() + ".pytest_cache/\n")
+    assert _git(repo, "add", ".gitignore").returncode == 0
+    assert _git(repo, "commit", "-qm", "ignore .pytest_cache").returncode == 0
+    (repo / ".pytest_cache" / "v" / "cache").mkdir(parents=True)
+    (repo / ".pytest_cache" / "v" / "cache" / "lastfailed").write_text("{}")
+    snap = _snapshot_of(tmp_path, repo)
+    clones = [replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d")]
+    for clone in clones:
+        assert (clone / ".pytest_cache" / "v" / "cache" / "lastfailed").read_text() == "{}"
+        assert list(replay.restored_blobs(clone).values()) == [".env"]
+        (clone / "config.json").write_text("{}")
+    _judge_both(tmp_path, snap, *clones)
+    for letter in ("A", "B"):
+        copy = tmp_path / "j" / letter
+        assert (copy / "node_modules" / ".package-lock.json").read_text() == "{}"
+        assert (copy / "config.json").read_text() == "{}"
 
 
 # Final Minor 13: a timed-out judge takes the processes it started down with it.

@@ -97,9 +97,9 @@ commands, in order: `check`, `list`, `mark`, `replay`, `judge`, `publish`, `repo
 captured in a worktree before removing that worktree: once its checkout is gone, the job is
 inconclusive. The judge (Codex) reads both results, but its copies leave out every ignored
 file outside dependency folders and virtualenvs, any other copy of a restored secret such as
-`.env`, any link pointing out of the copy from outside those folders, and anything in git
-beyond HEAD's history and the replay's starting point: each copy's `.git` is fetched fresh
-from the replay's clone, never copied. See
+`.env`, and anything in git beyond HEAD's history and the replay's starting point: each
+copy's `.git` is fetched fresh from the replay's clone, never copied, and each virtualenv is
+pointed at its copy. A result holding a link out of the repository is not judged. See
 [the design spec](../docs/superpowers/specs/2026-09-28-jev-router-cache-aware-design.md)
 for the full design and the validation it must pass.
 

@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 from collections.abc import Iterator
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -28,12 +29,15 @@ PLUGIN = REPO / "jev-router"
 SCRIPT = PLUGIN / "skills" / "jev" / "scripts" / "jev_router.py"
 TIERS_FILE = SCRIPT.with_name("tiers.json")
 
+sys.path.insert(0, str(SCRIPT.parent))
 _spec = importlib.util.spec_from_file_location("jev_router", SCRIPT)
 assert _spec and _spec.loader
 jev_router = importlib.util.module_from_spec(_spec)
 # Reason: dataclasses look their module up in sys.modules while it executes.
 sys.modules["jev_router"] = jev_router
 _spec.loader.exec_module(jev_router)
+
+from test_jev_usage import assistant, typed  # noqa: E402
 
 
 def jev_answers(size: str, confidence: float, follow_up: bool) -> dict:
@@ -112,15 +116,15 @@ def home(tmp_path: Path) -> Path:
 
 
 def run(
-    home: Path, jev: FakeJev, *args: str, stdin: str = "", attended: str | None = "1"
+    home: Path, jev: FakeJev, *args: str, stdin: str = "", attended: str | None = "1", env: dict | None = None
 ) -> subprocess.CompletedProcess[str]:
     """Run the script as a harness would. `attended` is what Claude Code sets in
     CLAUDE_CODE_SESSION_ATTENDED: "1" in the TUI, "0" under `claude -p`."""
-    env = {"JEV_ROUTER_HOME": str(home), "JEV_ROUTER_API_URL": jev.url, "PATH": "/usr/bin:/bin"}
+    full = {"JEV_ROUTER_HOME": str(home), "JEV_ROUTER_API_URL": jev.url, "PATH": "/usr/bin:/bin", **(env or {})}
     if attended is not None:
-        env["CLAUDE_CODE_SESSION_ATTENDED"] = attended
+        full["CLAUDE_CODE_SESSION_ATTENDED"] = attended
     return subprocess.run(
-        [sys.executable, str(SCRIPT), *args], input=stdin, env=env, capture_output=True, text=True, timeout=30
+        [sys.executable, str(SCRIPT), *args], input=stdin, env=full, capture_output=True, text=True, timeout=30
     )
 
 
@@ -134,11 +138,12 @@ def switch_on(home: Path, jev: FakeJev, **extra: object) -> None:
 def hook(
     home: Path,
     jev: FakeJev,
-    harness: str = "claude",
+    harness: str = "codex",
     prompt: str = "rename foo to bar",
     attended: str | None = "1",
     source: str | None = "cli",
     permission_mode: str = "default",
+    env: dict | None = None,
 ) -> str:
     """One message through the hook. `source` is what the Codex transcript's first
     line records: "cli" or "vscode" when a person types, "exec" under `codex exec`;
@@ -152,7 +157,7 @@ def hook(
         "transcript_path": str(transcript),
         "permission_mode": permission_mode,
     }
-    result = run(home, jev, "hook", harness, stdin=json.dumps(payload), attended=attended)
+    result = run(home, jev, "hook", harness, stdin=json.dumps(payload), attended=attended, env=env)
     assert result.returncode == 0, result.stderr
     return result.stdout
 
@@ -196,27 +201,16 @@ def test_key_file_formats() -> None:
 # --- routing -------------------------------------------------------------------------
 
 
-def test_confident_job_is_handed_to_the_matching_claude_helper(home: Path, jev: FakeJev) -> None:
-    switch_on(home, jev)
-    out = json.loads(hook(home, jev))["hookSpecificOutput"]
-    assert out["hookEventName"] == "UserPromptSubmit"
-    assert "`jev-router:tiny`" in out["additionalContext"]
-    assert "Claude Haiku 4.5" in out["additionalContext"]
-    assert "97% sure" in out["additionalContext"]
-    [event] = log(home)
-    assert event["outcome"] == "routed" and event["size"] == "tiny" and event["cost"] == 0.00002
-    assert "rename" not in json.dumps(event), "the log must not keep message text"
-
-
 def test_sixty_percent_is_sure_enough_and_below_is_kept(home: Path, jev: FakeJev) -> None:
     switch_on(home, jev)
     jev.answer = {"size": "large", "confidence": 60, "follow_up": False}
-    assert "jev-router:large" in hook(home, jev)
+    routed = json.loads(hook(home, jev))["hookSpecificOutput"]["additionalContext"]
+    assert 'spawn_agent with fork_turns "none", model "gpt-6-sol", reasoning_effort "high"' in routed
     jev.answer = {"size": "large", "confidence": 59, "follow_up": False}
     context = json.loads(hook(home, jev))["hookSpecificOutput"]["additionalContext"]
     assert "not routing this message" in context and "59% sure" in context
     assert "Carry on with it as you normally would" in context
-    assert "jev-router:" not in context
+    assert "spawn_agent" not in context
     assert [e["outcome"] for e in log(home)] == ["routed", "unsure"]
 
 
@@ -265,15 +259,6 @@ def test_codex_spawns_with_the_model_and_thinking_level(home: Path, jev: FakeJev
     assert "If you are running on exactly GPT-6 Luna at max thinking, handle it yourself" in context
 
 
-def test_claude_hands_off_unless_the_session_is_certain_it_matches(home: Path, jev: FakeJev) -> None:
-    switch_on(home, jev)
-    jev.answer = {"size": "large", "confidence": 90, "follow_up": False}
-    context = json.loads(hook(home, jev))["hookSpecificOutput"]["additionalContext"]
-    assert "`jev-router:large` subagent, which runs on Claude Opus 5.5 at high thinking" in context
-    assert "If you are running on exactly Claude Opus 5.5 at high thinking, handle it yourself" in context
-    assert "if you cannot tell, hand it off" in context
-
-
 def test_opencode_gets_a_switch_it_can_apply(home: Path, jev: FakeJev) -> None:
     switch_on(home, jev)
     jev.answer = {"size": "hardest", "confidence": 90, "follow_up": False}
@@ -289,7 +274,7 @@ def test_opencode_gets_a_switch_it_can_apply(home: Path, jev: FakeJev) -> None:
 def test_headless_claude_is_never_routed_or_sent_to_jev(home: Path, jev: FakeJev, attended: str | None) -> None:
     """`claude -p` sets CLAUDE_CODE_SESSION_ATTENDED=0: a review pins its own model."""
     switch_on(home, jev)
-    assert hook(home, jev, attended=attended) == ""
+    assert hook(home, jev, harness="claude", attended=attended) == ""
     assert jev.requests == [] and log(home) == []
 
 
@@ -312,6 +297,43 @@ def test_codex_exec_resuming_an_interactive_session_is_headless(home: Path, jev:
 def test_codex_from_the_ide_is_interactive(home: Path, jev: FakeJev) -> None:
     switch_on(home, jev)
     assert "spawn_agent" in hook(home, jev, "codex", source="vscode")
+
+
+# --- JEV_ROUTER on/off and the replay note --------------------------------------------
+
+
+def test_jev_router_off_wins_even_when_switched_on(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev)
+    assert hook(home, jev, harness="codex", env={"JEV_ROUTER": "off"}) == ""
+    assert jev.requests == []
+
+
+def test_jev_router_on_routes_a_headless_run(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev)
+    out = hook(home, jev, harness="codex", source="exec", env={"JEV_ROUTER": "on"})
+    assert "spawn_agent" in out
+    assert len(jev.requests) == 1
+
+
+def test_note_file_is_printed_verbatim_without_asking_jev(home: Path, jev: FakeJev, tmp_path: Path) -> None:
+    note = tmp_path / "note.txt"
+    note.write_text("Jev router: hand this to the large subagent.")
+    out = hook(home, jev, harness="claude", attended="0", env={"JEV_ROUTER": "off", "JEV_ROUTER_NOTE_FILE": str(note)})
+    assert json.loads(out)["hookSpecificOutput"]["additionalContext"] == "Jev router: hand this to the large subagent."
+    assert jev.requests == []
+    assert log(home) == []
+
+
+def test_note_file_is_never_printed_for_a_notice_or_a_command(home: Path, jev: FakeJev, tmp_path: Path) -> None:
+    """Final Important 2: in the delegate replay, the helper's completion notice
+    comes through the same hook; the note again would hand the job off twice."""
+    note = tmp_path / "note.txt"
+    note.write_text("Jev router: hand this job to the `jev-router:large` subagent.")
+    env = {"JEV_ROUTER": "off", "JEV_ROUTER_NOTE_FILE": str(note)}
+    notice = "<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n</task-notification>"
+    for prompt in (notice, "/jev status", "$jev status", "   "):
+        assert hook(home, jev, harness="claude", prompt=prompt, attended="0", env=env) == ""
+    assert jev.requests == [] and log(home) == []
 
 
 # --- never in the way ----------------------------------------------------------------
@@ -381,10 +403,29 @@ def test_the_log_never_keeps_what_jev_said(home: Path, jev: FakeJev, routed: boo
     assert "SECRET" not in (home / "log.jsonl").read_text()
 
 
+@pytest.mark.parametrize("usable", [True, False])
+def test_the_claude_code_log_never_keeps_the_reply_or_what_jev_said(home: Path, jev: FakeJev, usable: bool) -> None:
+    """The version-3 path: neither the previous reply ("Ready.") nor any string
+    Jev returned reaches the event, whether or not the answer is usable."""
+    switch_on(home, jev)
+    jev.model = "customer/SECRET-PROJECT-X"
+    answers = steps_answers(3.5)
+    if not usable:
+        answers["size"]["choice"] = "SECRET-PROJECT-X"
+    jev.raw_answers = answers
+    claude_hook(home, jev, prompt="rename SECRET-PROJECT-X in the export")
+    (event,) = log(home)
+    assert event["version"] == 3
+    assert event["outcome"] == ("delegate" if usable else "error")
+    text = (home / "log.jsonl").read_text()
+    assert "SECRET" not in text and "Ready." not in text and "export" not in text
+
+
 def test_status_counts_an_answered_call_that_reported_no_cost(home: Path, jev: FakeJev) -> None:
     switch_on(home, jev)
     jev.usage = {}
-    assert "jev-router:tiny" in hook(home, jev)
+    routed = json.loads(hook(home, jev))["hookSpecificOutput"]["additionalContext"]
+    assert 'spawn_agent with fork_turns "none", model "gpt-6-luna", reasoning_effort "medium"' in routed
     text = run(home, jev, "status").stdout
     assert "$0.0000 over 1 answered calls, 1 of which reported no cost." in text
 
@@ -423,6 +464,273 @@ def test_garbage_on_stdin_is_ignored(home: Path, jev: FakeJev) -> None:
     switch_on(home, jev)
     result = run(home, jev, "hook", "claude", stdin="not json")
     assert (result.returncode, result.stdout) == (0, "")
+
+
+# --- Claude Code: keep the job, or brief a fresh subagent ----------------------------
+
+CALIBRATION = {
+    "bins": [{"max_score": 1.0, "calls": [1, 1, 2, 2, 3]}, {"max_score": None, "calls": [12, 20, 30, 40, 60]}]
+}
+
+
+def steps_answers(score: float, size: str = "large", p: float = 0.8) -> dict:
+    others = [s for s in ("tiny", "everyday", "large", "hardest") if s != size]
+    return {
+        "steps": {"type": "score", "score": score, "probabilities": dict.fromkeys("01234", 0.2)},
+        "size": {
+            "type": "choice",
+            "choice": size,
+            "confidence": 0.5,
+            "probabilities": {**dict.fromkeys(others, round((1 - p) / 3, 4)), size: p},
+        },
+    }
+
+
+def claude_hook(
+    home: Path,
+    jev: FakeJev,
+    *,
+    prompt: str = "build the whole export feature",
+    entries: list[dict] | None = None,
+    env: dict | None = None,
+) -> str:
+    calibration = home.parent / "calibration.json"
+    calibration.write_text(json.dumps(CALIBRATION))
+    transcript = home.parent / "claude-transcript.jsonl"
+    if entries is None:
+        entries = [typed("start"), assistant("r1", read=800_000, w1h=3_000, out=1_500, text="Ready.")]
+    transcript.write_text("".join(json.dumps(e) + "\n" for e in entries))
+    payload = {
+        "prompt": prompt,
+        "session_id": "sess-1",
+        "transcript_path": str(transcript),
+        "cwd": str(home.parent),
+        "permission_mode": "default",
+    }
+    result = run(
+        home,
+        jev,
+        "hook",
+        "claude",
+        stdin=json.dumps(payload),
+        env={"JEV_ROUTER_CALIBRATION": str(calibration), **(env or {})},
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
+def test_shadow_mode_decides_and_logs_but_tells_the_session_nothing(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev)
+    jev.raw_answers = steps_answers(3.5)
+    assert claude_hook(home, jev) == ""
+    (event,) = log(home)
+    assert event["version"] == 3 and event["mode"] == "shadow" and event["outcome"] == "delegate"
+    assert event["expected_saving"] >= 0.25 and event["loss_probability"] == 0
+    assert event["helper"] == "jev-router:large" and event["median_calls"] == 30
+    assert len(event["prompt_sha"]) == 16
+    assert "export feature" not in json.dumps(event)
+
+
+def test_live_mode_tells_the_session_to_brief_a_fresh_subagent(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev, mode="live")
+    jev.raw_answers = steps_answers(3.5)
+    note = json.loads(claude_hook(home, jev))["hookSpecificOutput"]["additionalContext"]
+    assert "`jev-router:large` subagent" in note
+    assert "never the `fork` type" in note
+    assert "not to commit, push, open pull requests or deploy" in note
+    assert chr(0x2014) not in note
+
+
+def test_short_jobs_stay_quiet_even_in_live_mode(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev, mode="live")
+    jev.raw_answers = steps_answers(0.2)
+    assert claude_hook(home, jev) == ""
+    assert log(home)[0]["outcome"] == "keep"
+
+
+def test_follow_ups_are_decided_like_any_message(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev, mode="live")
+    jev.raw_answers = steps_answers(3.5)
+    assert claude_hook(home, jev, prompt="ok go, iterate until the PR is ready") != ""
+
+
+def test_first_message_of_a_session_has_no_opinion(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev, mode="live")
+    assert claude_hook(home, jev, entries=[typed("hello")]) == ""
+    assert log(home)[0]["outcome"] == "no_session"
+    assert jev.requests == []
+
+
+def test_jev_gets_the_steps_and_size_questions_with_the_previous_reply(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev)
+    jev.raw_answers = steps_answers(3.5)
+    claude_hook(home, jev)
+    (request,) = jev.requests
+    assert list(request["state"]) == ["agent_previous_reply", "message"]
+    assert request["state"]["agent_previous_reply"] == "Ready."
+    assert set(request["questions"]) == {"steps", "size"}
+    assert request["questions"]["steps"]["type"] == "score"
+    assert len(request["questions"]["steps"]["criteria"]) == 5
+    assert request["provider"] == {"only": ["typesafe"], "allow_fallbacks": False}
+
+
+def test_a_session_on_an_unpriced_model_is_not_decided(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev, mode="live")
+    jev.raw_answers = steps_answers(3.5)
+    entries = [assistant("r1", model="claude-future-9", read=800_000)]
+    assert claude_hook(home, jev, entries=entries) == ""
+    (event,) = log(home)
+    assert event["outcome"] == "unpriced" and event["model"] == "claude-future-9"
+    assert jev.requests == []  # nothing was paid for
+
+
+def test_a_step_score_out_of_range_is_an_error(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev, mode="live")
+    jev.raw_answers = steps_answers(5.0)
+    assert claude_hook(home, jev) == ""
+    assert log(home)[0]["outcome"] == "error"
+
+
+def test_a_broken_calibration_file_never_blocks_the_message(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev, mode="live")
+    jev.raw_answers = steps_answers(3.5)
+    bad = home.parent / "bad.json"
+    bad.write_text("not json")
+    assert claude_hook(home, jev, env={"JEV_ROUTER_CALIBRATION": str(bad)}) == ""
+    assert log(home)[0]["outcome"] == "error"
+    assert jev.requests == []  # nothing was paid for
+    # Reason: the steps answers have no follow_up, so Codex would reject them for
+    # the wrong reason; its default answer shows the broken file does not reach it.
+    jev.raw_answers = None
+    assert "spawn_agent" in hook(home, jev, harness="codex", env={"JEV_ROUTER_CALIBRATION": str(bad)})
+
+
+def test_shadow_log_keeps_the_priced_call_distribution(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev)
+    jev.raw_answers = steps_answers(3.5)
+    claude_hook(home, jev)
+    assert log(home)[0]["calls"] == [12, 20, 30, 40, 60]
+
+
+def test_mode_command_sets_the_mode_and_capture_dir(home: Path, jev: FakeJev, tmp_path: Path) -> None:
+    result = run(home, jev, "mode", "capture", "--dir", str(tmp_path / "fc"))
+    assert result.returncode == 0
+    config = json.loads((home / "config.json").read_text())
+    assert config["mode"] == "capture" and config["fork_check_dir"] == str(tmp_path / "fc")
+    assert "snapshot" in result.stdout
+
+
+def test_the_fork_check_folder_is_absolute_under_a_relative_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling F43: with a relative JEV_ROUTER_HOME and no `--dir`, the default
+    folder is still an absolute, resolved path, so every clone path under it
+    (and every path a replay's venv records) is absolute too. A relative
+    `fork_check_dir` in the config is resolved the same way."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("JEV_ROUTER_HOME", "relative-home")
+    assert jev_router.fork_check_dir({}) == (tmp_path / "relative-home" / "fork-check").resolve()
+    assert jev_router.fork_check_dir({"fork_check_dir": "relative-fork"}) == (tmp_path / "relative-fork").resolve()
+    assert jev_router.fork_check_dir({}).is_absolute()
+
+
+@pytest.mark.parametrize("name", ["fork check", "fork-chéck"], ids=["space", "non-ascii"])
+def test_capture_refuses_a_folder_a_file_url_would_spell_differently(
+    home: Path, jev: FakeJev, tmp_path: Path, name: str
+) -> None:
+    """Ruling F42: a replay's editable install records the clone's path as a
+    percent-encoded `file://` URL, so the fork-check folder's absolute path
+    must read the same once encoded. Such a folder is refused with a one-line
+    reason, and the config is left as it was."""
+    assert run(home, jev, "mode", "shadow").returncode == 0
+    before = (home / "config.json").read_text()
+    result = run(home, jev, "mode", "capture", "--dir", str(tmp_path / name))
+    assert result.returncode == 1
+    assert len(result.stdout.strip().splitlines()) == 1
+    assert str(tmp_path / name) in result.stdout and "file://" in result.stdout
+    assert (home / "config.json").read_text() == before
+
+
+def test_capture_mode_records_when_capture_started(home: Path, jev: FakeJev, tmp_path: Path) -> None:
+    """Ruling F8: the fork check's report period starts here. Running `mode
+    capture` again while capturing (to move the folder) keeps the first time."""
+    assert run(home, jev, "mode", "shadow").returncode == 0
+    assert "capture_started" not in json.loads((home / "config.json").read_text())
+    assert run(home, jev, "mode", "capture").returncode == 0
+    started = json.loads((home / "config.json").read_text())["capture_started"]
+    assert datetime.fromisoformat(started).utcoffset() == timedelta(0)
+    config = json.loads((home / "config.json").read_text())
+    (home / "config.json").write_text(json.dumps({**config, "capture_started": "2026-10-01T08:00:00+00:00"}))
+    assert run(home, jev, "mode", "capture", "--dir", str(tmp_path / "fc")).returncode == 0
+    assert json.loads((home / "config.json").read_text())["capture_started"] == "2026-10-01T08:00:00+00:00"
+
+
+def test_capture_mode_snapshots_a_job_it_would_delegate(home: Path, jev: FakeJev, tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.email=t@e",
+            "-c",
+            "user.name=T",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ],
+        check=True,
+    )
+    switch_on(home, jev, mode="capture", fork_check_dir=str(tmp_path / "fc"))
+    jev.raw_answers = steps_answers(3.5)
+    transcript = home.parent / "claude-transcript.jsonl"
+    transcript.write_text(json.dumps(assistant("r1", read=800_000, text="Ready.")) + "\n")
+    calibration = home.parent / "calibration.json"
+    calibration.write_text(json.dumps(CALIBRATION))
+    payload = {"prompt": "build it", "session_id": "sess-1", "transcript_path": str(transcript), "cwd": str(repo)}
+    result = run(
+        home,
+        jev,
+        "hook",
+        "claude",
+        stdin=json.dumps(payload),
+        env={"JEV_ROUTER_CALIBRATION": str(calibration), "PATH": "/usr/bin:/bin:/opt/homebrew/bin"},
+    )
+    assert result.stdout == ""
+    (event,) = log(home)
+    assert (tmp_path / "fc" / "snapshots" / event["snapshot"] / "meta.json").exists()
+
+
+def test_capture_mode_records_a_failed_snapshot_without_blocking_the_message(
+    home: Path, jev: FakeJev, tmp_path: Path
+) -> None:
+    """A snapshot fails outside a git repository; the hook still prints nothing in
+    capture mode, and the event notes the failure instead of a snapshot id."""
+    not_a_repo = tmp_path / "plain"
+    not_a_repo.mkdir()
+    switch_on(home, jev, mode="capture", fork_check_dir=str(tmp_path / "fc"))
+    jev.raw_answers = steps_answers(3.5)
+    transcript = home.parent / "claude-transcript.jsonl"
+    transcript.write_text(json.dumps(assistant("r1", read=800_000, text="Ready.")) + "\n")
+    calibration = home.parent / "calibration.json"
+    calibration.write_text(json.dumps(CALIBRATION))
+    payload = {"prompt": "build it", "session_id": "sess-1", "transcript_path": str(transcript), "cwd": str(not_a_repo)}
+    result = run(
+        home,
+        jev,
+        "hook",
+        "claude",
+        stdin=json.dumps(payload),
+        env={"JEV_ROUTER_CALIBRATION": str(calibration), "PATH": "/usr/bin:/bin:/opt/homebrew/bin"},
+    )
+    assert result.stdout == ""
+    (event,) = log(home)
+    assert event.get("snapshot_error") == "git rev-parse failed" and "snapshot" not in event
 
 
 # --- status ------------------------------------------------------------------------
@@ -464,6 +772,34 @@ def test_status_when_nothing_happened_yet(home: Path, jev: FakeJev) -> None:
     text = run(home, jev, "status").stdout
     assert "Jev router is OFF. Turn it on with: /jev on" in text
     assert "Messages Jev sized: 0" in text
+
+
+def test_status_names_the_claude_code_mode_before_any_decision(home: Path, jev: FakeJev, tmp_path: Path) -> None:
+    assert "Claude Code mode: shadow." in run(home, jev, "status").stdout
+    assert run(home, jev, "mode", "capture").returncode == 0
+    assert f"Claude Code mode: capture. Snapshots go under {home / 'fork-check'}." in run(home, jev, "status").stdout
+    assert run(home, jev, "mode", "capture", "--dir", str(tmp_path / "fc")).returncode == 0
+    text = run(home, jev, "status").stdout
+    assert f"Claude Code mode: capture. Snapshots go under {tmp_path / 'fc'}." in text
+    assert "messages decided" not in text
+
+
+def test_status_counts_claude_code_decisions(home: Path, jev: FakeJev) -> None:
+    switch_on(home, jev, mode="live")
+    jev.raw_answers = steps_answers(3.5)
+    claude_hook(home, jev)
+    jev.raw_answers = steps_answers(0.2)
+    claude_hook(home, jev)
+    # Final Minor 12: a message Jev never decided counts under "no opinion".
+    claude_hook(home, jev, entries=[typed("hello")])
+    jev.raw_answers = steps_answers(5.0)
+    claude_hook(home, jev)
+    text = run(home, jev, "status").stdout
+    assert "Claude Code mode: live." in text
+    assert "2 messages decided, 1 worth a fresh subagent, 0 snapshots. No opinion: 2." in text
+    # Their size answers are not 0.2.0 routing decisions, so the size table leaves them out.
+    assert re.search(r"Messages Jev sized since \S+: 0\n", text)
+    assert "routed" not in text
 
 
 # --- opencode: the hook module, through the repository's opencode entry -------------
@@ -656,6 +992,13 @@ def test_each_claude_tier_has_a_helper_agent_on_its_model() -> None:
         assert meta.get("effort") == tier["effort"], agent
         label = f"{tier['model']} at {tier['effort']} thinking" if tier["effort"] else tier["model"]
         assert agent.read_text().rstrip().endswith(f"Done by {label}"), agent
+
+
+def test_every_claude_tier_model_has_a_price() -> None:
+    """The Claude route prices every helper it can pick without checking first."""
+    prices = json.loads(SCRIPT.with_name("prices.json").read_text())["per_million_tokens"]
+    for tier in json.loads(TIERS_FILE.read_text())["harnesses"]["claude"]:
+        assert tier["model_id"] in prices, tier["size"]
 
 
 def test_every_harness_has_every_size_smallest_first() -> None:

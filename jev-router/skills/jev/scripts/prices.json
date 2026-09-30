@@ -1,0 +1,8 @@
+{
+  "source": "OpenRouter list prices, 2026-09-28; cache writes are derived: 1 hour = 2x input, 5 minutes = 1.25x input",
+  "per_million_tokens": {
+    "claude-opus-5-5": {"in": 4.0, "out": 20.0, "read": 0.2},
+    "claude-sonnet-5": {"in": 2.0, "out": 10.0, "read": 0.2},
+    "claude-haiku-4-5-20251001": {"in": 1.0, "out": 5.0, "read": 0.1}
+  }
+}

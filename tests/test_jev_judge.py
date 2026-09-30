@@ -682,16 +682,86 @@ def test_links_out_outside_the_result_never_stop_the_judge(tmp_path: Path, snap:
         (clone / "python").symlink_to(".venv/bin/python")
         (clone / "node_modules" / ".bin").mkdir()
         (clone / "node_modules" / ".bin" / "tool").symlink_to(tool)
+        (clone / "tool").symlink_to("node_modules/.bin/tool")
+        (clone / "docs" / "loop").symlink_to("loop")  # leads nowhere
     _judge_both(tmp_path, snap, *clones)
     for letter in ("A", "B"):
         copy = tmp_path / "j" / letter
         assert not os.path.lexists(copy / "__pycache__")
         assert os.readlink(copy / "docs" / "app.py") == "../app.py"
         assert os.readlink(copy / "python") == ".venv/bin/python"
+        assert os.readlink(copy / "tool") == "node_modules/.bin/tool"
+        assert os.readlink(copy / "docs" / "loop") == "loop"
         assert os.readlink(copy / ".venv" / "bin" / "python") == str(interpreter)
         assert os.readlink(copy / "node_modules" / ".bin" / "tool") == str(tool)
     assert secret.read_text() == "PRIVATE KEY\n"
     assert all(os.readlink(clone / "__pycache__" / "key") == str(secret) for clone in clones)
+
+
+@pytest.mark.parametrize(
+    "esc",
+    ["up/../../home/.ssh/id_rsa", "../../../.venv/../a/b/c/up/../../home/.ssh/id_rsa"],
+    ids=["chain", "chain-through-a-venv-by-name"],
+)
+def test_result_links_that_look_inside_but_chain_out_are_refused(tmp_path: Path, snap: Path, esc: str) -> None:
+    """N-a: `a/b/c/up -> ../../..` and `a/b/c/esc -> up/../../home/.ssh/id_rsa`
+    both stay inside by their text, but `..` after a link climbs from the
+    link's target, so `esc` reads a private key outside the copy. Naming a
+    venv on the way changes nothing: only a step out taken by a link that sits
+    in a dependency folder or a venv is kept."""
+    secret = _outside_secret(tmp_path)
+    keep, delegate = replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d")
+    _make_venv(delegate, tmp_path / "uv-python" / "bin" / "python3.12")
+    (delegate / "a" / "b" / "c").mkdir(parents=True)
+    (delegate / "a" / "b" / "c" / "up").symlink_to("../../..")
+    (delegate / "a" / "b" / "c" / "esc").symlink_to(esc)
+    assert (delegate / "a" / "b" / "c" / "esc").read_text() == secret.read_text()  # the chain really reaches it
+    calls: list[str] = []
+
+    def codex(prompt: str, work: Path) -> str:
+        calls.append(prompt)
+        return ANSWER
+
+    result = {"sides": {"keep": {"clone": str(keep), "cost": 1.0}, "delegate": {"clone": str(delegate), "cost": 1.0}}}
+    with pytest.raises(RuntimeError, match=r"the result holds a link outside the repository: a/b/c/esc"):
+        judge.judge(snap, result, tmp_path / "j", codex=codex, rng=random.Random(1))
+    assert calls == []
+
+
+def test_a_venv_is_copied_whole_and_its_pycache_removed_from_the_copy_only(
+    tmp_path: Path, snap: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N-b: a venv is copied in one `cp` (leaving its `__pycache__` out while
+    copying cost one `cp` per entry: 11 s against 1.5 s on a 4,400-file venv),
+    then its `__pycache__` folders are removed from the copy, never from the
+    clone, and never through a link."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "keep.pyc").write_text("not the copy's")
+    keep, delegate = replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d")
+    for clone in (keep, delegate):
+        venv = _make_venv(clone, tmp_path / "uv-python" / "bin" / "python3.12")
+        for folder in ("lib/site-packages/__pycache__", "lib/site-packages/pkg/__pycache__"):
+            (venv / folder).mkdir(parents=True)
+            (venv / folder / "m.cpython-312.pyc").write_bytes(b"\0" + str(clone).encode())
+        (venv / "lib" / "__pycache__").symlink_to(elsewhere, target_is_directory=True)
+    copied: list[Path] = []
+    real_copy_tree = replay.copy_tree
+
+    def recording(source: Path, target: Path) -> None:
+        copied.append(source)
+        real_copy_tree(source, target)
+
+    monkeypatch.setattr(replay, "copy_tree", recording)
+    _judge_both(tmp_path, snap, keep, delegate)
+    assert keep / ".venv" in copied and delegate / ".venv" in copied
+    for letter in ("A", "B"):
+        venv = tmp_path / "j" / letter / ".venv"
+        assert not os.path.lexists(venv / "lib" / "site-packages" / "__pycache__")
+        assert not os.path.lexists(venv / "lib" / "site-packages" / "pkg" / "__pycache__")
+        assert os.readlink(venv / "lib" / "__pycache__") == str(elsewhere)
+    assert (elsewhere / "keep.pyc").read_text() == "not the copy's"
+    assert all((clone / ".venv" / "lib" / "site-packages" / "__pycache__").is_dir() for clone in (keep, delegate))
 
 
 def _editable_venv(clone: Path) -> None:
@@ -779,26 +849,52 @@ def test_a_venv_file_still_naming_the_clone_refuses_the_judge(tmp_path: Path, sn
     assert calls == []
 
 
-def test_content_with_no_letter_or_digit_is_never_a_secret(tmp_path: Path, repo: Path) -> None:
-    """F38: a restored `.pytest_cache` file holding `{}` is no secret: restore
-    does not record it, a replay's new `{}` file is not refused, and the `{}`
-    in `node_modules/.package-lock.json` reaches the judge."""
+def test_empty_json_cache_contents_are_never_secrets(tmp_path: Path, repo: Path) -> None:
+    """F38, F40: restored `.pytest_cache` files holding `{}`, `[]` or `null`
+    (ASCII whitespace aside) are no secrets: restore does not record them, a
+    replay's new files holding the same are not refused, and the `{}` in
+    `node_modules/.package-lock.json` reaches the judge."""
     (repo / ".gitignore").write_text((repo / ".gitignore").read_text() + ".pytest_cache/\n")
     assert _git(repo, "add", ".gitignore").returncode == 0
     assert _git(repo, "commit", "-qm", "ignore .pytest_cache").returncode == 0
-    (repo / ".pytest_cache" / "v" / "cache").mkdir(parents=True)
-    (repo / ".pytest_cache" / "v" / "cache" / "lastfailed").write_text("{}")
+    cache = repo / ".pytest_cache" / "v" / "cache"
+    cache.mkdir(parents=True)
+    trivial = {"lastfailed": "{}", "nodeids": "[]\n", "stepwise": " null\n"}
+    for name, text in trivial.items():
+        (cache / name).write_text(text)
     snap = _snapshot_of(tmp_path, repo)
     clones = [replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d")]
     for clone in clones:
-        assert (clone / ".pytest_cache" / "v" / "cache" / "lastfailed").read_text() == "{}"
+        assert (clone / ".pytest_cache" / "v" / "cache" / "nodeids").read_text() == "[]\n"
         assert list(replay.restored_blobs(clone).values()) == [".env"]
-        (clone / "config.json").write_text("{}")
+        for name, text in trivial.items():
+            (clone / f"{name}.json").write_text(text)
     _judge_both(tmp_path, snap, *clones)
     for letter in ("A", "B"):
         copy = tmp_path / "j" / letter
         assert (copy / "node_modules" / ".package-lock.json").read_text() == "{}"
-        assert (copy / "config.json").read_text() == "{}"
+        assert {name: (copy / f"{name}.json").read_text() for name in trivial} == trivial
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [bytes(range(128, 256)), "пароль ключ €\n".encode()],
+    ids=["binary-key", "unicode-passphrase"],
+)
+def test_a_secret_with_no_ascii_letter_or_digit_copied_elsewhere_is_refused(
+    tmp_path: Path, repo: Path, secret: bytes
+) -> None:
+    """F40: only `{}`, `[]`, `null` and the empty file are exempt by their
+    content. A restored raw binary key, or a passphrase written only in
+    non-ASCII characters, copied to a non-ignored file is refused."""
+    (repo / ".env").write_bytes(secret)
+    snap = _snapshot_of(tmp_path, repo)
+    keep, delegate = replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d")
+    assert list(replay.restored_blobs(keep).values()) == [".env"]
+    shutil.copy(delegate / ".env", delegate / "key.bin")
+    _refused_with_no_codex_call(
+        tmp_path, snap, keep, delegate, r"key\.bin in the delegate clone holds the content of .* \.env"
+    )
 
 
 # Final Minor 13: a timed-out judge takes the processes it started down with it.

@@ -158,8 +158,9 @@ def _refuse_links_into_the_runner(copy: Path, fork_root: Path, label: str) -> No
     `sides -> <fork root>/results/<id>/result.json`, and following it would tell
     the judge which side is which. Refuses any symlink in the blind copy that
     resolves inside the fork-check folder but outside the copy itself. By now
-    only a link inside a dependency folder or a virtualenv can point out of
-    the copy (`copy_for_judge` removed the others, Ruling F29); one that points
+    every link that leads out of the copy does so through a link kept in a
+    dependency folder or a virtualenv: `copy_for_judge` refused judging for any
+    other in the replay's result (Rulings F37, F41). A kept link that points
     elsewhere stays, as a uv venv's `python` does. A link loop leads nowhere
     and is left alone."""
     root, own = fork_root.resolve(), copy.resolve()

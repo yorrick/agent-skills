@@ -620,6 +620,23 @@ def test_mode_command_sets_the_mode_and_capture_dir(home: Path, jev: FakeJev, tm
     assert "snapshot" in result.stdout
 
 
+@pytest.mark.parametrize("name", ["fork check", "fork-chéck"], ids=["space", "non-ascii"])
+def test_capture_refuses_a_folder_a_file_url_would_spell_differently(
+    home: Path, jev: FakeJev, tmp_path: Path, name: str
+) -> None:
+    """Ruling F42: a replay's editable install records the clone's path as a
+    percent-encoded `file://` URL, so the fork-check folder's absolute path
+    must read the same once encoded. Such a folder is refused with a one-line
+    reason, and the config is left as it was."""
+    assert run(home, jev, "mode", "shadow").returncode == 0
+    before = (home / "config.json").read_text()
+    result = run(home, jev, "mode", "capture", "--dir", str(tmp_path / name))
+    assert result.returncode == 1
+    assert len(result.stdout.strip().splitlines()) == 1
+    assert str(tmp_path / name) in result.stdout and "file://" in result.stdout
+    assert (home / "config.json").read_text() == before
+
+
 def test_capture_mode_records_when_capture_started(home: Path, jev: FakeJev, tmp_path: Path) -> None:
     """Ruling F8: the fork check's report period starts here. Running `mode
     capture` again while capturing (to move the folder) keeps the first time."""

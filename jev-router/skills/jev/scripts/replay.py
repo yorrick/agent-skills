@@ -17,6 +17,7 @@ import sys
 import tarfile
 import threading
 import time
+import urllib.parse
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -691,10 +692,27 @@ def _drop_links_out(copy: Path) -> None:
         dirnames[:] = walk_on
 
 
+def _url_path(path: str) -> str:
+    """`path` as a `file://` URL holds it: percent-encoded, `/` kept."""
+    return urllib.parse.quote(path, safe="/")
+
+
+def _moves(clone: Path, target: Path) -> dict[bytes, bytes]:
+    """Each spelling of `clone`'s path in files, and the same spelling of
+    `target`'s. The path as given and fully resolved (`/var` is `/private/var`
+    on macOS; uv writes the resolved one), each also percent-encoded, as the
+    `file://` URL in an editable install's `direct_url.json` holds it when the
+    path has a space or a non-ASCII character (Ruling F42)."""
+    raws = (str(clone), str(clone.resolve()))
+    moves = {raw.encode(): str(target).encode() for raw in raws}
+    for raw in raws:
+        moves.setdefault(_url_path(raw).encode(), _url_path(str(target)).encode())
+    return moves
+
+
 def clone_spellings(clone: Path) -> list[bytes]:
-    """The clone's path as written into files: as given, and fully resolved
-    when that differs (`/var` is `/private/var` on macOS). Longest first."""
-    return sorted({str(clone).encode(), str(clone.resolve()).encode()}, key=len, reverse=True)
+    """Every spelling of the clone's path in files (`_moves`), longest first."""
+    return sorted(_moves(clone, clone), key=len, reverse=True)
 
 
 def _relocate_venvs(clone: Path, target: Path, venvs: list[str]) -> None:
@@ -704,10 +722,13 @@ def _relocate_venvs(clone: Path, target: Path, venvs: list[str]) -> None:
     shebang and the `activate*` scripts, so the copy's `python` would import
     the clone's code, which can read the clone's restored `.env`. In text files
     (no NUL byte) of up to 1 MB, each spelling of the clone's path followed by a
-    path boundary becomes the copy's path, byte for byte. Binary files are left
-    alone: `judge` scans the venvs afterwards and refuses on any path left."""
-    pattern = re.compile(b"(?:" + b"|".join(re.escape(s) for s in clone_spellings(clone)) + rb")(?![\w.-])")
-    replacement = str(target).encode()
+    path boundary becomes the same spelling of the copy's path, raw or
+    percent-encoded (`_moves`), byte for byte. Binary files are left alone:
+    `judge` scans the venvs afterwards and refuses on any spelling left."""
+    moves = _moves(clone, target)
+    pattern = re.compile(
+        b"(?:" + b"|".join(re.escape(s) for s in sorted(moves, key=len, reverse=True)) + rb")(?![\w.-])"
+    )
     for venv in venvs:
         for dirpath, _, filenames in os.walk(target / venv):
             for name in filenames:
@@ -720,7 +741,7 @@ def _relocate_venvs(clone: Path, target: Path, venvs: list[str]) -> None:
                     continue
                 mode = os.lstat(path).st_mode
                 path.chmod(mode | stat.S_IWUSR)
-                path.write_bytes(pattern.sub(lambda _m: replacement, data))
+                path.write_bytes(pattern.sub(lambda match: moves[match.group(0)], data))
                 path.chmod(stat.S_IMODE(mode))
 
 

@@ -16,7 +16,7 @@ Show the user the script's output as it is. It already carries the privacy remin
 - `on` needs, once, the shell file that exports `OPENROUTER_API_KEY`: add `--key-file <path>`. The path is remembered for later `on`s. If `on` fails because no key file is known, ask the user for the path. Never search for keys and never print one.
 - `classify "<message>" ...` sizes messages without routing anything and prints a table of what Jev picked and how sure it was. Add `--harness codex` or `--harness opencode` to use those harnesses' sizes.
 - `JEV_ROUTER=off` in a run's environment turns the router off for that run, whatever the switch says; `JEV_ROUTER=on` opts a headless run (`claude -p`, `codex exec`, `opencode run`) in, such as an eval.
-- `mode shadow|capture|live` (runs `jev_router.py mode ...`) sets the Claude Code cache-aware router's mode: `shadow` decides and logs but tells the session nothing, `capture` also saves a snapshot of each job it would delegate, and `live` tells the session to hand the job to a fresh subagent. Add `--dir <path>` with `capture` to change where snapshots are saved.
+- `mode shadow|capture|live` (runs `jev_router.py mode ...`) sets the Claude Code cache-aware router's mode: `shadow` decides and logs but tells the session nothing, `capture` also saves a snapshot of each job it would delegate, and `live` tells the session to hand the job to a fresh subagent. Add `--dir <path>` with `capture` to change where snapshots are saved; a path with a space or a non-ASCII character is refused.
 
 ## Fork check
 

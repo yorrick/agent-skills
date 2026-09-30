@@ -34,6 +34,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -729,6 +730,17 @@ def cmd_off() -> int:
 
 
 def cmd_mode(mode: str, directory: str | None) -> int:
+    folder = str(Path(directory).expanduser().resolve()) if directory else None
+    # Reason (Ruling F42): a replay's editable install records the clone's path,
+    # under this folder, as a percent-encoded file:// URL; the judge's copies
+    # are relocated and scanned for it, which is only certain when the encoded
+    # spelling is the path itself.
+    if folder and urllib.parse.quote(folder, safe="/") != folder:
+        print(
+            f"Mode not changed: {folder} holds a space or another character a file:// URL spells differently; "
+            "pick a folder whose path has none."
+        )
+        return 1
     config = load_config()
     # Reason: the fork check's report counts Jev's cost and wait from here, not
     # from its first scored job. Set when capture starts, and kept (accepted in
@@ -737,8 +749,8 @@ def cmd_mode(mode: str, directory: str | None) -> int:
     if mode == "capture" and (config.get("mode") != "capture" or "capture_started" not in config):
         config["capture_started"] = datetime.now(UTC).isoformat(timespec="seconds")
     config["mode"] = mode
-    if directory:
-        config["fork_check_dir"] = str(Path(directory).expanduser().resolve())
+    if folder:
+        config["fork_check_dir"] = folder
     save_config(config)
     print(
         {

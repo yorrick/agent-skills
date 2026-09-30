@@ -12,6 +12,7 @@ import time
 import types
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -792,7 +793,8 @@ def _plain_env() -> dict[str, str]:
 
 
 def _naming(root: Path, *paths: Path) -> list[str]:
-    needles = [str(p).encode() for p in paths]
+    """The files under `root` naming any of `paths`, raw or percent-encoded."""
+    needles = [spelling.encode() for p in paths for spelling in {str(p), quote(str(p), safe="/")}]
     return [
         str(f.relative_to(root))
         for f in root.rglob("*")
@@ -829,14 +831,19 @@ def test_a_kept_virtualenv_runs_the_copys_own_code_and_names_no_clone(tmp_path: 
         assert _naming(copy, keep, delegate, keep.resolve(), delegate.resolve()) == []
 
 
-def test_a_venv_file_still_naming_the_clone_refuses_the_judge(tmp_path: Path, snap: Path) -> None:
-    """F36: a binary file (one holding a NUL byte) is never rewritten, so one
-    that names the clone is still found by the scan, and judging is refused."""
+@pytest.mark.parametrize("spelling", ["raw", "percent-encoded"])
+def test_a_venv_file_still_naming_the_clone_refuses_the_judge(tmp_path: Path, snap: Path, spelling: str) -> None:
+    """F36, F42: a binary file (one holding a NUL byte) is never rewritten, so
+    one that names the clone is still found by the scan, in either spelling
+    (a `file://` URL holds the percent-encoded one), and judging is refused.
+    The clones sit in a folder with a space, so the two spellings differ."""
     interpreter = tmp_path / "uv-python" / "bin" / "python3.12"
-    keep, delegate = replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d")
+    spaced = tmp_path / "with space"
+    keep, delegate = replay.restore(snap, spaced / "k"), replay.restore(snap, spaced / "d")
     for clone in (keep, delegate):
         _make_venv(clone, interpreter)
-        (clone / ".venv" / "lib" / "native.so").write_bytes(b"\x7fELF\0" + str(clone).encode() + b"\0")
+        name = str(clone) if spelling == "raw" else quote(str(clone), safe="/")
+        (clone / ".venv" / "lib" / "native.so").write_bytes(b"\x7fELF\0" + name.encode() + b"\0")
     calls: list[str] = []
 
     def codex(prompt: str, work: Path) -> str:
@@ -847,6 +854,31 @@ def test_a_venv_file_still_naming_the_clone_refuses_the_judge(tmp_path: Path, sn
     with pytest.raises(RuntimeError, match=r"still names its source clone, in .*native\.so"):
         judge.judge(snap, result, tmp_path / "j", codex=codex, rng=random.Random(1))
     assert calls == []
+
+
+def test_a_percent_encoded_clone_path_is_relocated_to_the_copys(tmp_path: Path, snap: Path) -> None:
+    """F42: with a space in the checkout path, an editable install records the
+    clone as a percent-encoded `file://` URL in `direct_url.json`. It is
+    relocated to the copy's own encoded path, the `.pth` beside it to the raw
+    one, and nothing under A or B names a clone in either spelling. The judge's
+    folder has a space too, so the copy's two spellings differ as well."""
+    spaced = tmp_path / "with space"
+    keep, delegate = replay.restore(snap, spaced / "k"), replay.restore(snap, spaced / "d")
+    for clone in (keep, delegate):
+        site = _make_venv(clone, tmp_path / "uv-python" / "bin" / "python3.12") / "lib" / "site-packages"
+        (site / "probe-0.1.0.dist-info").mkdir()
+        url = {"url": f"file://{quote(str(clone), safe='/')}", "dir_info": {"editable": True}}
+        (site / "probe-0.1.0.dist-info" / "direct_url.json").write_text(json.dumps(url))
+        (site / "_editable_impl_probe.pth").write_text(f"{clone / 'src'}\n")
+    result = {"sides": {"keep": {"clone": str(keep), "cost": 1.0}, "delegate": {"clone": str(delegate), "cost": 1.0}}}
+    judge.judge(snap, result, spaced / "j", codex=lambda prompt, work: ANSWER, rng=random.Random(3))
+    for letter in ("A", "B"):
+        copy = spaced / "j" / letter
+        site = copy / ".venv" / "lib" / "site-packages"
+        recorded = json.loads((site / "probe-0.1.0.dist-info" / "direct_url.json").read_text())["url"]
+        assert recorded == f"file://{quote(str(copy), safe='/')}"
+        assert (site / "_editable_impl_probe.pth").read_text() == f"{copy / 'src'}\n"
+        assert _naming(copy, keep, delegate) == []
 
 
 def test_empty_json_cache_contents_are_never_secrets(tmp_path: Path, repo: Path) -> None:

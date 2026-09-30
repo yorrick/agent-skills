@@ -20,6 +20,7 @@ sys.path.insert(0, str(SCRIPTS))
 import judge  # noqa: E402
 import replay  # noqa: E402
 import report  # noqa: E402
+import snapshot  # noqa: E402
 
 ANSWER = (
     'Both fine.\n{"A": {"tests": "pass", "outcome_met": true}, "B": {"tests": "fail", "outcome_met": false}, '
@@ -100,6 +101,80 @@ def test_blind_copies_leave_out_the_restored_secrets_but_keep_dependencies(tmp_p
         assert (copy / "app.py").read_text() == "print('v2')\n"
         assert (copy / ".git").is_dir()
     assert (keep / ".env").read_text() == "TOKEN=x\n" and (delegate / ".env").read_text() == "TOKEN=x\n"
+
+
+def _judge_both(tmp_path: Path, snap: Path, keep: Path, delegate: Path) -> None:
+    result = {"sides": {"keep": {"clone": str(keep), "cost": 1.0}, "delegate": {"clone": str(delegate), "cost": 1.0}}}
+    judge.judge(snap, result, tmp_path / "j", codex=lambda prompt, work: ANSWER, rng=random.Random(3))
+
+
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+
+
+def test_judge_copies_leave_out_what_the_clone_ignores_and_every_copy_of_a_secret(tmp_path: Path, snap: Path) -> None:
+    """F23a: `.env` moved to `.env.local` (ignored), copied into `.venv/saved.env`
+    (ignored, not a dependency folder), and copied into `node_modules` (a
+    dependency folder, kept, so found by its content) never reach A or B."""
+    clones = [replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d")]
+    for clone in clones:
+        shutil.copy(clone / ".env", clone / "node_modules" / "leak.env")
+        (clone / ".venv").mkdir()
+        shutil.copy(clone / ".env", clone / ".venv" / "saved.env")
+        (clone / ".env").rename(clone / ".env.local")
+        (clone / ".gitignore").write_text((clone / ".gitignore").read_text() + ".env.local\n")
+    _judge_both(tmp_path, snap, *clones)
+    for letter in ("A", "B"):
+        copy = tmp_path / "j" / letter
+        for gone in (".env", ".env.local", ".venv", "node_modules/leak.env"):
+            assert not os.path.lexists(copy / gone), gone
+        assert (copy / "node_modules" / ".package-lock.json").read_text() == "{}"
+        assert (copy / "notes.md").read_text() == "draft\n"
+
+
+def test_a_secret_under_eight_bytes_copied_elsewhere_is_left_out(tmp_path: Path, repo: Path) -> None:
+    """F23a: too small for the content check to refuse, but the judge still
+    never gets it, whatever its path."""
+    from test_jev_snapshot import EVENT, payload, write
+    from test_jev_usage import assistant, typed
+
+    (repo / ".env").write_text("A=1\n")
+    transcript = write(tmp_path / "t.jsonl", [typed("start"), assistant("r1")])
+    sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "build it", "N", EVENT)
+    snap = tmp_path / "fc" / "snapshots" / sid
+    clones = [replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d")]
+    for clone in clones:
+        shutil.copy(clone / ".env", clone / "settings.txt")
+    _judge_both(tmp_path, snap, *clones)
+    for letter in ("A", "B"):
+        assert not os.path.lexists(tmp_path / "j" / letter / "settings.txt")
+        assert not os.path.lexists(tmp_path / "j" / letter / ".env")
+
+
+def test_stashed_staged_or_side_branch_secrets_never_reach_the_judge(tmp_path: Path, repo: Path, snap: Path) -> None:
+    """F24: the copies keep only HEAD's history and refs/jev/start, and `git gc
+    --prune=now` drops the rest: a stash holding `.env`, a blob staged then
+    reset, and a side branch the replay committed `.env` to."""
+    env_blob = _git(repo, "hash-object", ".env").stdout.strip()
+    keep, delegate = replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d")
+    who = ["-c", "user.name=x", "-c", "user.email=x@x"]
+    assert _git(keep, "add", "-f", ".env").returncode == 0
+    assert _git(keep, *who, "stash").returncode == 0
+    assert _git(delegate, "add", "-f", ".env").returncode == 0
+    assert _git(delegate, "reset", "-q").returncode == 0
+    assert _git(delegate, "checkout", "-q", "-b", "side").returncode == 0
+    assert _git(delegate, "add", "-f", ".env").returncode == 0
+    assert _git(delegate, *who, "commit", "-qm", "the replay kept .env on a side branch").returncode == 0
+    assert _git(delegate, "checkout", "-q", "main").returncode == 0
+    for clone in (keep, delegate):
+        assert _git(clone, "cat-file", "-e", env_blob).returncode == 0  # the secret is in both clones' objects
+    _judge_both(tmp_path, snap, keep, delegate)
+    for letter in ("A", "B"):
+        copy = tmp_path / "j" / letter
+        assert _git(copy, "cat-file", "-e", env_blob).returncode != 0
+        assert _git(copy, "rev-parse", "-q", "--verify", "refs/stash").returncode != 0
+        assert _git(copy, "for-each-ref", "--format=%(refname)").stdout.split() == ["refs/heads/main", "refs/jev/start"]
+        assert _git(copy, "rev-parse", "-q", "--verify", "refs/jev/start^").returncode == 0
 
 
 # Ruling T13a: an inconclusive result, or a side missing a priced cost, is
@@ -252,8 +327,10 @@ def test_a_copy_in_history_matching_an_untracked_start_file_is_refused_with_no_c
 def _link_case(tmp_path: Path, snap: Path, target: Path) -> tuple[dict, list[str], Callable[[str, Path], str]]:
     keep = replay.restore(snap, tmp_path / "k")
     delegate = replay.restore(snap, tmp_path / "d")
-    (delegate / ".venv" / "bin").mkdir(parents=True)  # ignored in the fixture repo
-    (delegate / ".venv" / "bin" / "python").symlink_to(target)
+    # Reason: an untracked, not ignored folder, so the link reaches the judge's
+    # copy (an ignored `.venv` no longer does, Ruling F23a).
+    (delegate / "tools").mkdir()
+    (delegate / "tools" / "python").symlink_to(target)
     calls: list[str] = []
 
     def codex(prompt: str, work: Path) -> str:
@@ -273,16 +350,19 @@ def test_a_link_into_the_fork_check_folder_is_refused_with_no_codex_call(tmp_pat
     mapping.parent.mkdir(parents=True)
     mapping.write_text('{"order": ["keep", "delegate"]}\n')
     result, calls, codex = _link_case(tmp_path, snap, mapping)
-    with pytest.raises(RuntimeError, match=r"\.venv/bin/python, a link into the fork-check folder"):
+    with pytest.raises(RuntimeError, match=r"tools/python, a link into the fork-check folder"):
         judge.judge(snap, result, tmp_path / "j", codex=codex, rng=random.Random(1))
     assert calls == []
 
 
 def test_a_link_out_of_the_fork_check_folder_stays(tmp_path: Path, snap: Path) -> None:
-    """A uv venv's `python` is an absolute link to the interpreter, outside the folder."""
-    result, calls, codex = _link_case(tmp_path, snap, tmp_path / "uv-python" / "bin" / "python3.12")
+    """An absolute link to an interpreter outside the folder is normal."""
+    interpreter = tmp_path / "uv-python" / "bin" / "python3.12"
+    result, calls, codex = _link_case(tmp_path, snap, interpreter)
     verdict = judge.judge(snap, result, tmp_path / "j", codex=codex, rng=random.Random(1))
     assert len(calls) == 1 and verdict["prefer"] in ("keep", "delegate")
+    links = [tmp_path / "j" / letter / "tools" / "python" for letter in ("A", "B")]
+    assert [os.readlink(link) for link in links if os.path.lexists(link)] == [str(interpreter)]
 
 
 # Final Minor 13: a timed-out judge takes the processes it started down with it.

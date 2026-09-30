@@ -338,14 +338,18 @@ def restore(snap: Path, dest: Path, *, copy_ignored: bool = True) -> Path:
         # since the replay runs with bypass permissions and can rewrite them.
         # "ignored_blobs" records their content now, before the replay runs, so
         # the content check still knows a `.env` the replay moved away (Ruling F10).
+        # "ignored_blob_sizes" lets the judge's copy look for those contents
+        # anywhere by hashing only the files of a matching size.
         contents = _restored_files(clone, ignored)
+        blobs = dict(zip(_blob_ids(clone, contents), contents, strict=True))
         record = {
             "skipped": sorted(skipped),
             "ignored": sorted(ignored),
             "missing": missing,
             "not_captured": not_captured,
             "changed_since_capture": changed,
-            "ignored_blobs": dict(zip(_blob_ids(clone, contents), contents, strict=True)),
+            "ignored_blobs": blobs,
+            "ignored_blob_sizes": {oid: os.lstat(clone / path).st_size for oid, path in blobs.items()},
         }
         (dest / "restore.json").write_text(json.dumps(record, indent=2) + "\n")
     return clone
@@ -456,15 +460,16 @@ def _touched_since(path: Path, cutoff: float) -> bool:
     return False
 
 
-def _restored_files(clone: Path, ignored: list[str]) -> list[str]:
+def _restored_files(clone: Path, ignored: list[str], *, bounded: bool = True) -> list[str]:
     """The regular files now under the restored ignored entries, relative to the
-    clone, outside dependency folders and between the two content-check sizes.
-    Nothing here follows a symlink."""
+    clone, outside dependency folders and, when `bounded`, between the two
+    content-check sizes. Nothing here follows a symlink."""
     found: list[str] = []
 
     def consider(rel: str) -> None:
         st = os.lstat(clone / rel)
-        if stat.S_ISREG(st.st_mode) and CONTENT_MIN_BYTES <= st.st_size <= CONTENT_MAX_BYTES and "\n" not in rel:
+        sized = not bounded or CONTENT_MIN_BYTES <= st.st_size <= CONTENT_MAX_BYTES
+        if stat.S_ISREG(st.st_mode) and sized and "\n" not in rel:
             found.append(rel)
 
     for rel in ignored:
@@ -482,13 +487,40 @@ def _restored_files(clone: Path, ignored: list[str]) -> list[str]:
     return found
 
 
-def copy_without_secrets(clone: Path, target: Path) -> None:
-    """Copy `clone` to `target`, leaving out the restored ignored files the
-    content check protects (`.env` and the like; dependency folders stay, so
-    tests can run). They are left out while copying, never deleted afterwards,
-    so nothing is ever removed through a symlink."""
-    left_out = {f"{clone.name}/{p}" for p in _restored_files(clone, restored_ignored(clone))}
-    _copy_selective(clone.parent, clone.name, target, left_out)
+def copy_for_judge(clone: Path, target: Path) -> None:
+    """Copy `clone` to `target` with only what the judge needs (Rulings F23a,
+    F24): tracked files, untracked files the clone does not ignore, and
+    dependency folders, so tests can run. Left out:
+
+    - every path the clone itself ignores now, outside dependency folders
+      (`.env`, `.env.local`, a `.venv`, caches), whatever put it there;
+    - every other file whose content is a restored secret, whatever its path or
+      size (`.env` copied under another name, or into `node_modules`): the ids
+      restore recorded, plus the restored files as they are now, of any size.
+      Only files of a secret's size are hashed.
+
+    Paths are left out while copying, never deleted afterwards, and nothing is
+    read through a symlink."""
+    left_out = {p for p in snapshot.ignored_entries(clone) if not _in_dependency_folder(p)}
+    secret_sizes = set(dict(_restore_record(clone, "ignored_blob_sizes")).values())
+    secrets = set(restored_blobs(clone))
+    now = _restored_files(clone, restored_ignored(clone), bounded=False)
+    secrets.update(_blob_ids(clone, now))
+    secret_sizes.update(os.lstat(clone / p).st_size for p in now)
+    candidates: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(clone):
+        base = os.path.relpath(dirpath, clone)
+        prefix = "" if base == "." else f"{base}/"
+        dirnames[:] = [d for d in dirnames if f"{prefix}{d}" not in left_out and f"{prefix}{d}" != ".git"]
+        for name in filenames:
+            rel = f"{prefix}{name}"
+            if rel in left_out or "\n" in rel:
+                continue
+            st = os.lstat(clone / rel)
+            if stat.S_ISREG(st.st_mode) and st.st_size in secret_sizes:
+                candidates.append(rel)
+    left_out.update(rel for rel, oid in zip(candidates, _blob_ids(clone, candidates), strict=True) if oid in secrets)
+    _copy_selective(clone.parent, clone.name, target, {f"{clone.name}/{p}" for p in left_out})
 
 
 def _blob_ids(clone: Path, paths: list[str]) -> list[str]:

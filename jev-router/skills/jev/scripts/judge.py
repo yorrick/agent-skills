@@ -11,7 +11,7 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from replay import copy_without_secrets, refuse_if_ignored_leaked, refuse_if_unusable, restored_ignored, run
+from replay import copy_for_judge, refuse_if_ignored_leaked, refuse_if_unusable, restored_ignored, run
 
 EXAMPLE = json.dumps(
     {
@@ -122,6 +122,32 @@ def parse(text: str) -> dict:
     raise ValueError("the judge gave no verdict line")
 
 
+def _drop_unneeded_objects(copy: Path) -> None:
+    """Keep in the copy's `.git` only what the judge reads: HEAD's history and
+    refs/jev/start (Ruling F24). A stash (`git add -f .env && git stash`), a
+    blob staged and then reset, or a side branch the replay committed `.env`
+    to would otherwise still hold the secret. Every other ref and pseudo-ref
+    (`ORIG_HEAD` and the like) goes, then `git gc --prune=now` drops every
+    object nothing reachable holds; the reflogs are already gone."""
+    git_dir = copy / ".git"
+    for name in os.listdir(git_dir):
+        if name.endswith("_HEAD") or name == "AUTO_MERGE":
+            (git_dir / name).unlink(missing_ok=True)
+    head = subprocess.run(["git", "-C", str(copy), "symbolic-ref", "-q", "HEAD"], capture_output=True, text=True)
+    keep = {"refs/jev/start", head.stdout.strip()}
+    refs = run("git", "-C", str(copy), "for-each-ref", "--format=%(refname)").split()
+    doomed = [ref for ref in refs if ref not in keep]
+    if doomed:
+        subprocess.run(
+            ["git", "-C", str(copy), "update-ref", "--stdin"],
+            input="".join(f"delete {ref}\n" for ref in doomed),
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+    run("git", "-C", str(copy), "gc", "--prune=now", "--quiet")
+
+
 def _refuse_if_source_path_leaked(git_dir: Path, source: Path, label: str) -> None:
     """Defense in depth, after the origin, the reflogs and FETCH_HEAD are all
     stripped: confirm no file left under `git_dir` still spells out `source`'s
@@ -176,9 +202,9 @@ def judge(
     work.mkdir(parents=True, exist_ok=True)
     for letter, side in names.items():
         source = Path(result["sides"][side]["clone"])
-        # Reason: the judge is a model; the restored secrets (.env and the like)
-        # never reach it, while dependency folders stay so tests can run.
-        copy_without_secrets(source, work / letter)
+        # Reason: the judge is a model; no secret ever reaches it (copy_for_judge
+        # says what is left out), while dependency folders stay so tests can run.
+        copy_for_judge(source, work / letter)
         git_dir = work / letter / ".git"
         # Reason: the origin, the reflogs and FETCH_HEAD all record which
         # replay folder this came from, which result.json maps to a side; the
@@ -186,6 +212,7 @@ def judge(
         run("git", "-C", str(work / letter), "remote", "remove", "origin")
         shutil.rmtree(git_dir / "logs", ignore_errors=True)
         (git_dir / "FETCH_HEAD").unlink(missing_ok=True)
+        _drop_unneeded_objects(work / letter)
         _refuse_if_source_path_leaked(git_dir, source, letter)
         # Reason: the snapshot lives at <fork root>/snapshots/<id>.
         _refuse_links_into_the_runner(work / letter, snap.parent.parent, letter)

@@ -443,9 +443,10 @@ def test_a_copy_through_a_folder_linked_out_of_the_clone_is_refused(
     assert list(ext.iterdir()) == []
 
 
-def test_a_secret_under_a_linked_folder_is_never_copied_or_read_through_the_link(tmp_path: Path) -> None:
+def test_a_path_under_a_linked_folder_is_never_left_out_through_the_link(tmp_path: Path) -> None:
     """F18: a replay replaced `logs` with a link to an outside folder. The copy
-    keeps `logs` as the link it is; it never opens it up to leave `a.log` out."""
+    keeps `logs` as the link it is; it never opens it up to leave `a.log` out,
+    so nothing is read or removed through it."""
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "a.log").write_text("SECRET=1234\n")
@@ -453,8 +454,7 @@ def test_a_secret_under_a_linked_folder_is_never_copied_or_read_through_the_link
     clone = tmp_path / "attempt" / "repo"
     clone.mkdir(parents=True)
     (clone / "logs").symlink_to(outside)
-    (tmp_path / "attempt" / "restore.json").write_text(json.dumps({"ignored": ["logs/a.log"], "ignored_blobs": {}}))
-    replay.copy_without_secrets(clone, tmp_path / "copy")
+    replay._copy_selective(tmp_path / "attempt", "repo", tmp_path / "copy", {"repo/logs/a.log"})
     assert os.readlink(tmp_path / "copy" / "logs") == str(outside)
     assert sorted(p.name for p in outside.iterdir()) == ["a.log", "b.log"]
 

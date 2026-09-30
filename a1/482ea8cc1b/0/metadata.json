@@ -1,0 +1,35 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "a1482ea8cc1b",
+  "session_id": "43bce55b-7aa7-4002-97d7-3963c1eebb96",
+  "strategy": "manual-commit",
+  "created_at": "2026-09-30T00:59:50.609832Z",
+  "branch": "jev-cache-aware-spec",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "jev-router/README.md",
+    "jev-router/skills/jev/SKILL.md"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-5-5",
+  "turn_id": "a40996758ad8",
+  "token_usage": {
+    "input_tokens": 2920,
+    "cache_creation_tokens": 3874688,
+    "cache_read_tokens": 393508408,
+    "output_tokens": 1198097,
+    "api_call_count": 1231
+  },
+  "session_metrics": {
+    "turn_count": 338
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-09-30T00:59:47.22337Z",
+    "agent_lines": 0,
+    "human_added": 622,
+    "human_modified": 3,
+    "human_removed": 0,
+    "total_committed": 622,
+    "agent_percentage": 0
+  }
+}

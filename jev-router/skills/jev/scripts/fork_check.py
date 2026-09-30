@@ -400,9 +400,9 @@ def cmd_judge(sid: str) -> int:
         return 1
     finally:
         # Reason: `blind` holds both judge copies (tracked and untracked files,
-        # dependency folders, and a pruned `.git`, with no ignored file or
-        # secret in them); nothing here is worth keeping once the attempt,
-        # successful or not, is over.
+        # dependency folders and virtualenvs, and a `.git` fetched fresh from
+        # the clone, with no ignored file or secret in them); nothing here is
+        # worth keeping once the attempt, successful or not, is over.
         shutil.rmtree(blind, ignore_errors=True)
     set_status(sid, "judged", verdict["prefer"])
     print(json.dumps(verdict, indent=2))

@@ -410,8 +410,9 @@ def test_a_staged_copy_of_a_secret_is_refused_with_no_codex_call(tmp_path: Path,
 
 
 def test_a_blob_only_ever_staged_never_reaches_the_judge(tmp_path: Path, snap: Path) -> None:
-    """F26: the copies' index is rebuilt from HEAD and the files each copy
-    holds, so gc keeps no blob that was staged and then deleted or edited."""
+    """F26, F33: the copies get a fresh index built from HEAD, and a `.git`
+    fetched from the clone rather than copied, so no blob that was staged and
+    then deleted or edited reaches them."""
     keep, delegate = replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d")
     staged = []
     for clone, name in ((keep, "gone.txt"), (delegate, "draft.txt")):
@@ -426,8 +427,116 @@ def test_a_blob_only_ever_staged_never_reaches_the_judge(tmp_path: Path, snap: P
         copy = tmp_path / "j" / letter
         for blob in staged:
             assert _git(copy, "cat-file", "-e", blob).returncode != 0
-        assert _git(copy, "diff", "--quiet").returncode == 0  # the index matches the files the copy holds
+        assert _git(copy, "diff", "--cached", "--quiet", "HEAD").returncode == 0  # the index is HEAD's
     assert {(tmp_path / "j" / letter / "draft.txt").exists() for letter in ("A", "B")} == {True, False}
+
+
+def test_a_secret_written_inside_the_clones_git_never_reaches_the_judge(tmp_path: Path, snap: Path) -> None:
+    """F33: the copies' `.git` is fetched from the clone, never copied, so a
+    file the replay wrote in there (`cp .env .git/notes.txt`) stays behind:
+    nothing under A or B holds the secret's bytes, or its blob."""
+    keep, delegate = replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d")
+    secret = (keep / ".env").read_bytes()
+    env_blob = _git(keep, "hash-object", ".env").stdout.strip()
+    for clone in (keep, delegate):
+        (clone / ".git" / "notes.txt").write_bytes(secret)
+    _judge_both(tmp_path, snap, keep, delegate)
+    for letter in ("A", "B"):
+        copy = tmp_path / "j" / letter
+        assert not os.path.lexists(copy / ".git" / "notes.txt")
+        held = [f for f in copy.rglob("*") if f.is_file() and not f.is_symlink() and secret in f.read_bytes()]
+        assert held == []
+        assert _git(copy, "cat-file", "-e", env_blob).returncode != 0
+
+
+def test_a_nested_git_the_replay_made_never_reaches_the_judge(tmp_path: Path, snap: Path) -> None:
+    """F33: a nested repository's `.git` is left out too, its working files
+    stay. The replay committed a copy of `.env` in `vendor/lib` and removed the
+    file, so only that repository's objects hold it; and `linked/.git` is a
+    gitfile pointing straight at the clone's own `.git`."""
+    keep, delegate = replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d")
+    who = ["-c", "user.name=x", "-c", "user.email=x@x"]
+    for clone in (keep, delegate):
+        nested = clone / "vendor" / "lib"
+        nested.mkdir(parents=True)
+        assert _git(nested, "init", "-q").returncode == 0
+        (nested / "README.md").write_text("a vendored library\n")
+        shutil.copy(clone / ".env", nested / "config.txt")
+        assert _git(nested, "add", ".").returncode == 0
+        assert _git(nested, *who, "commit", "-qm", "vendor it").returncode == 0
+        (nested / "config.txt").unlink()
+        (clone / "linked").mkdir()
+        (clone / "linked" / ".git").write_text(f"gitdir: {clone / '.git'}\n")
+        (clone / "linked" / "notes.md").write_text("linked notes\n")
+    _judge_both(tmp_path, snap, keep, delegate)
+    for letter in ("A", "B"):
+        copy = tmp_path / "j" / letter
+        assert not os.path.lexists(copy / "vendor" / "lib" / ".git")
+        assert not os.path.lexists(copy / "linked" / ".git")
+        assert (copy / "vendor" / "lib" / "README.md").read_text() == "a vendored library\n"
+        assert (copy / "linked" / "notes.md").read_text() == "linked notes\n"
+
+
+def test_a_detached_head_stays_detached_in_the_judge_copy(tmp_path: Path, snap: Path) -> None:
+    """F33: a replay that left HEAD detached gets a detached copy at the same
+    commit, even where a branch points at that commit (clone would otherwise
+    put the copy on that branch), and no branch ref at all."""
+    keep, delegate = replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d")
+    assert _git(keep, "checkout", "-q", "--detach").returncode == 0  # main points here too
+    assert _git(delegate, "checkout", "-q", "--detach").returncode == 0
+    who = ["-c", "user.name=x", "-c", "user.email=x@x"]
+    assert _git(delegate, *who, "commit", "-q", "--allow-empty", "-m", "detached only").returncode == 0
+    _judge_both(tmp_path, snap, keep, delegate)
+    heads = sorted(_git(tmp_path / "j" / letter, "rev-parse", "HEAD").stdout for letter in ("A", "B"))
+    assert heads == sorted(_git(clone, "rev-parse", "HEAD").stdout for clone in (keep, delegate))
+    for letter in ("A", "B"):
+        copy = tmp_path / "j" / letter
+        assert _git(copy, "symbolic-ref", "-q", "HEAD").returncode != 0
+        assert _git(copy, "for-each-ref", "--format=%(refname)").stdout.split() == ["refs/jev/start"]
+
+
+def test_the_judges_diff_command_shows_exactly_the_replays_changes(tmp_path: Path, repo: Path) -> None:
+    """F33: with a fresh `.git` and an index built from HEAD, status shows the
+    replay's modifications, additions and deletions, and the judge's documented
+    command (`git -C A add -A && git -C A diff --cached refs/jev/start`) shows
+    exactly its changes: nothing from `node_modules`, even one ignored only
+    through `.git/info/exclude`."""
+    (repo / "old.txt").write_text("to be deleted\n")
+    (repo / ".gitignore").write_text(".venv/\n.env\n__pycache__/\n")  # node_modules/ moves to info/exclude
+    assert _git(repo, "add", "old.txt", ".gitignore").returncode == 0
+    assert _git(repo, "commit", "-qm", "an old file; node_modules ignored locally").returncode == 0
+    with (repo / ".git" / "info" / "exclude").open("a") as exclude:
+        exclude.write("node_modules/\n")
+    snap = _snapshot_of(tmp_path, repo)
+    clones = [replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d")]
+    who = ["-c", "user.name=x", "-c", "user.email=x@x"]
+    for clone in clones:
+        assert (clone / "node_modules" / ".package-lock.json").exists()
+        (clone / "committed.txt").write_text("committed by the replay\n")
+        assert _git(clone, "add", "committed.txt").returncode == 0
+        assert _git(clone, *who, "commit", "-qm", "the replay's commit").returncode == 0
+        (clone / "app.py").write_text("print('v3')\n")
+        (clone / "old.txt").unlink()
+        (clone / "new.txt").write_text("a new file\n")
+    _judge_both(tmp_path, snap, *clones)
+    heads = {letter: _git(tmp_path / "j" / letter, "rev-parse", "HEAD").stdout for letter in ("A", "B")}
+    assert sorted(heads.values()) == sorted(_git(clone, "rev-parse", "HEAD").stdout for clone in clones)
+    for letter in ("A", "B"):
+        copy = tmp_path / "j" / letter
+        assert (copy / "node_modules" / ".package-lock.json").exists()
+        assert _git(copy, "symbolic-ref", "HEAD").stdout == "refs/heads/main\n"
+        # Against HEAD, so the start's own untracked notes.md shows too.
+        status = _git(copy, "status", "--porcelain").stdout.splitlines()
+        assert sorted(status) == [" D old.txt", " M app.py", "?? new.txt", "?? notes.md"]
+        documented = subprocess.run(
+            f"git -C {letter} add -A && git -C {letter} diff --cached --name-status refs/jev/start",
+            shell=True,
+            cwd=copy.parent,
+            capture_output=True,
+            text=True,
+        )
+        assert documented.returncode == 0, documented.stderr
+        assert documented.stdout.splitlines() == ["M\tapp.py", "A\tcommitted.txt", "A\tnew.txt", "D\told.txt"]
 
 
 # F14: a replay-made link into the fork-check folder would unblind the judge.

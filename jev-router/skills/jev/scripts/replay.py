@@ -555,10 +555,11 @@ def _is_venv(path: Path) -> bool:
         return False
 
 
-def _around_venvs(clone: Path, rel: str) -> set[str]:
-    """The ignored entry `rel` itself, or, when a virtualenv sits inside it
+def _around_venvs(clone: Path, rel: str) -> tuple[set[str], list[str]]:
+    """What to leave out of the ignored entry `rel`, and the virtualenvs inside
+    it to keep: `rel` itself and none, or, when a virtualenv sits inside it
     (`.tox/py312`), every path under `rel` that is neither a virtualenv nor on
-    the way to one. Looks without following links."""
+    the way to one, and those virtualenvs. Looks without following links."""
     path = clone / rel
     venvs: list[str] = []
     if not path.is_symlink() and path.is_dir():
@@ -568,7 +569,7 @@ def _around_venvs(clone: Path, rel: str) -> set[str]:
             venvs += [f"{base}/{d}" for d in found]
             dirnames[:] = [d for d in dirnames if d not in found]
     if not venvs:
-        return {rel}
+        return {rel}, []
     left_out: set[str] = set()
 
     def open_up(folder: str) -> None:
@@ -580,22 +581,28 @@ def _around_venvs(clone: Path, rel: str) -> set[str]:
                 left_out.add(sub)
 
     open_up(rel)
-    return left_out
+    return left_out, venvs
 
 
-def _judge_left_out(clone: Path) -> set[str]:
+def _judge_left_out(clone: Path) -> tuple[set[str], list[str]]:
     """What the clone ignores now, apart from what the judge needs to run the
-    tests: dependency folders, and virtualenvs (a folder holding `pyvenv.cfg`
-    at its root) with everything in them. A virtualenv here is the one the
-    replay built in the clone: restore never copies the user's own (Ruling
-    T9d). The clone's own root never counts as one."""
+    tests, and the ignored paths kept for that: dependency folders, and
+    virtualenvs (a folder holding `pyvenv.cfg` at its root) with everything in
+    them. A virtualenv here is the one the replay built in the clone: restore
+    never copies the user's own (Ruling T9d). The clone's own root never counts
+    as one."""
     left_out: set[str] = set()
+    kept: list[str] = []
     for rel in snapshot.ignored_entries(clone):
         parts = Path(rel).parts
+        # Residual (F28 class, accepted in F33): a replay can plant `node_modules` or `pyvenv.cfg` to keep a folder.
         if _in_dependency_folder(rel) or any(_is_venv(clone.joinpath(*parts[:i])) for i in range(1, len(parts) + 1)):
+            kept.append(rel)
             continue
-        left_out |= _around_venvs(clone, rel)
-    return left_out
+        out, venvs = _around_venvs(clone, rel)
+        left_out |= out
+        kept += venvs
+    return left_out, kept
 
 
 def _drop_links_out(copy: Path) -> None:
@@ -620,11 +627,79 @@ def _drop_links_out(copy: Path) -> None:
         dirnames[:] = walk_on
 
 
+def _fresh_git(clone: Path, target: Path) -> None:
+    """Make `target` a repository holding only HEAD's history and
+    `refs/jev/start`, fetched from `clone` (Ruling F33), never a copy of the
+    clone's `.git`: what a replay left in there (`cp .env .git/notes.txt`, a
+    stash, a staged blob, a side branch, tags, reflogs) stays behind.
+    `--no-local` sends only reachable objects, as a fetch over the network
+    would. HEAD is the clone's own: the same branch, or the same commit when
+    the clone's HEAD is detached. The origin remote, the reflogs and
+    FETCH_HEAD, which all name the clone's folder, are removed."""
+    branch = subprocess.run(
+        ["git", "-C", str(clone), "symbolic-ref", "-q", "HEAD"], capture_output=True, text=True
+    ).stdout.strip()
+    head = run("git", "-C", str(clone), "rev-parse", "HEAD").strip()
+    which = ["--branch", branch.removeprefix("refs/heads/")] if branch else []
+    run(
+        "git",
+        "clone",
+        "-q",
+        "--no-checkout",
+        "--no-local",
+        "--single-branch",
+        "--no-tags",
+        *which,
+        str(clone),
+        str(target),
+    )
+    run("git", "-C", str(target), "fetch", "-q", "--no-tags", str(clone), "refs/jev/start:refs/jev/start")
+    run("git", "-C", str(target), "remote", "remove", "origin")
+    if not branch:
+        # Reason: for a detached HEAD, clone puts the copy on a branch that
+        # points at the same commit when there is one.
+        guessed = subprocess.run(
+            ["git", "-C", str(target), "symbolic-ref", "-q", "HEAD"], capture_output=True, text=True
+        ).stdout.strip()
+        run("git", "-C", str(target), "update-ref", "--no-deref", "HEAD", head)
+        if guessed:
+            run("git", "-C", str(target), "update-ref", "-d", guessed)
+    shutil.rmtree(target / ".git" / "logs", ignore_errors=True)
+    (target / ".git" / "FETCH_HEAD").unlink(missing_ok=True)
+    copied = subprocess.run(
+        ["git", "-C", str(target), "symbolic-ref", "-q", "HEAD"], capture_output=True, text=True
+    ).stdout.strip()
+    if copied != branch or run("git", "-C", str(target), "rev-parse", "HEAD").strip() != head:
+        raise RuntimeError(f"the judge's copy of {clone} did not get the clone's HEAD ({branch or head})")
+
+
+def _ignore_kept(target: Path, kept: list[str]) -> None:
+    """List in the copy's `info/exclude` the ignored folders it keeps
+    (dependency folders, virtualenvs), anchored and with the pattern
+    characters escaped. The clone may ignore them only through its own
+    `info/exclude`, which the fresh `.git` does not have; the judge's `git add
+    -A` would then show `node_modules` as the replay's work. A name holding a
+    newline cannot be written as a pattern and is skipped."""
+    lines = []
+    for rel in sorted(kept):
+        if "\n" not in rel:
+            escaped = re.sub(r"([\\*?\[])", r"\\\1", rel)
+            lines.append("/" + re.sub(r" $", r"\\ ", escaped) + "\n")
+    exclude = target / ".git" / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    exclude.write_text("".join(lines))
+
+
 def copy_for_judge(clone: Path, target: Path) -> None:
     """Copy `clone` to `target` with only what the judge needs (Rulings F23a,
-    F24): tracked files, untracked files the clone does not ignore, dependency
-    folders and virtualenvs, so tests can run. Left out:
+    F24, F33): tracked files, untracked files the clone does not ignore,
+    dependency folders and virtualenvs, so tests can run, and a fresh `.git`
+    (`_fresh_git`) whose index is built from HEAD, so status shows the replay's
+    changes. Left out:
 
+    - the clone's `.git`, and any nested `.git` the replay made (a repository
+      of its own, or a gitfile pointing back at the clone's): only the working
+      files around it are copied;
     - every path the clone itself ignores now, outside dependency folders and
       virtualenvs (`.env`, `.env.local`, caches), whatever put it there;
     - every other file whose content is a secret (`_secrets`), whatever its
@@ -635,21 +710,26 @@ def copy_for_judge(clone: Path, target: Path) -> None:
 
     Files are left out while copying, never deleted afterwards, and nothing is
     read through a symlink; only links out are removed from the finished copy."""
-    left_out = _judge_left_out(clone)
+    left_out, kept = _judge_left_out(clone)
+    left_out.add(".git")
     secrets = _secrets(clone, restored_ignored(clone))
     sizes = {size for _, size in secrets.values()}
     candidates: list[str] = []
-    # Reason: with no secret left, nothing is walked or hashed.
-    for dirpath, dirnames, filenames in os.walk(clone) if sizes else []:
+    for dirpath, dirnames, filenames in os.walk(clone):
         base = os.path.relpath(dirpath, clone)
         prefix = "" if base == "." else f"{base}/"
-        dirnames[:] = [d for d in dirnames if f"{prefix}{d}" not in left_out and f"{prefix}{d}" != ".git"]
+        left_out.update(f"{prefix}{name}" for name in dirnames + filenames if name == ".git")
+        dirnames[:] = [d for d in dirnames if f"{prefix}{d}" not in left_out]
         for name in filenames:
             rel = f"{prefix}{name}"
-            if rel not in left_out and _regular_size(clone / rel) in sizes:
+            if sizes and rel not in left_out and _regular_size(clone / rel) in sizes:
                 candidates.append(rel)
     left_out.update(rel for rel, oid in zip(candidates, _blob_ids(clone, candidates), strict=True) if oid in secrets)
+    _fresh_git(clone, target)
     _copy_selective(clone.parent, clone.name, target, {f"{clone.name}/{p}" for p in left_out})
+    _ignore_kept(target, kept)
+    run("git", "-C", str(target), "read-tree", "HEAD")
+    run("git", "-C", str(target), "update-index", "-q", "--refresh")
     _drop_links_out(target)
 
 

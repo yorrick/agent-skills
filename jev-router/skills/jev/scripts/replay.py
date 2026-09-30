@@ -702,11 +702,15 @@ def _moves(clone: Path, target: Path) -> dict[bytes, bytes]:
     `target`'s. The path as given and fully resolved (`/var` is `/private/var`
     on macOS; uv writes the resolved one), each also percent-encoded, as the
     `file://` URL in an editable install's `direct_url.json` holds it when the
-    path has a space or a non-ASCII character (Ruling F42)."""
+    path has a space or a non-ASCII character (Ruling F42). The target is
+    resolved first (Ruling F43): uv records absolute paths, so a copy given as
+    a relative path would otherwise get `file://j/A` or a `.pth` pointing away
+    from it."""
     raws = (str(clone), str(clone.resolve()))
-    moves = {raw.encode(): str(target).encode() for raw in raws}
+    destination = str(target.resolve())
+    moves = {raw.encode(): destination.encode() for raw in raws}
     for raw in raws:
-        moves.setdefault(_url_path(raw).encode(), _url_path(str(target)).encode())
+        moves.setdefault(_url_path(raw).encode(), _url_path(destination).encode())
     return moves
 
 

@@ -881,6 +881,27 @@ def test_a_percent_encoded_clone_path_is_relocated_to_the_copys(tmp_path: Path, 
         assert _naming(copy, keep, delegate) == []
 
 
+def test_a_copy_given_as_a_relative_path_gets_absolute_venv_paths(
+    tmp_path: Path, snap: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F43: uv records the clone's absolute path, so a copy given as a relative
+    path (a relative fork-check folder) must still get absolute paths in its
+    venv: `file://j/A` or a `.pth` naming `j/A/src` would point away from it."""
+    keep = replay.restore(snap, tmp_path / "k")
+    site = _make_venv(keep, tmp_path / "uv-python" / "bin" / "python3.12") / "lib" / "site-packages"
+    (site / "probe-0.1.0.dist-info").mkdir()
+    url = {"url": f"file://{quote(str(keep), safe='/')}", "dir_info": {"editable": True}}
+    (site / "probe-0.1.0.dist-info" / "direct_url.json").write_text(json.dumps(url))
+    (site / "_editable_impl_probe.pth").write_text(f"{keep / 'src'}\n")
+    monkeypatch.chdir(tmp_path)
+    assert replay.copy_for_judge(keep, Path("j") / "A") == [".venv"]
+    copy = (tmp_path / "j" / "A").resolve()
+    copied = copy / ".venv" / "lib" / "site-packages"
+    assert (copied / "_editable_impl_probe.pth").read_text() == f"{copy / 'src'}\n"
+    recorded = json.loads((copied / "probe-0.1.0.dist-info" / "direct_url.json").read_text())["url"]
+    assert recorded == f"file://{quote(str(copy), safe='/')}"
+
+
 def test_empty_json_cache_contents_are_never_secrets(tmp_path: Path, repo: Path) -> None:
     """F38, F40: restored `.pytest_cache` files holding `{}`, `[]` or `null`
     (ASCII whitespace aside) are no secrets: restore does not record them, a

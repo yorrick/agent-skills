@@ -172,8 +172,11 @@ def save_config(config: dict) -> None:
 
 
 def fork_check_dir(config: dict) -> Path:
-    """Where capture mode saves snapshots (set with `mode capture --dir`)."""
-    return Path(config.get("fork_check_dir") or home() / "fork-check")
+    """Where capture mode saves snapshots (set with `mode capture --dir`),
+    always absolute and resolved (Ruling F43), even for the default under a
+    relative JEV_ROUTER_HOME: a replay's venv records its clone's absolute
+    path, and the judge's copies are relocated from that spelling."""
+    return Path(config.get("fork_check_dir") or home() / "fork-check").expanduser().resolve()
 
 
 def record(event: dict) -> None:

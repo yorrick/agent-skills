@@ -620,6 +620,20 @@ def test_mode_command_sets_the_mode_and_capture_dir(home: Path, jev: FakeJev, tm
     assert "snapshot" in result.stdout
 
 
+def test_the_fork_check_folder_is_absolute_under_a_relative_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling F43: with a relative JEV_ROUTER_HOME and no `--dir`, the default
+    folder is still an absolute, resolved path, so every clone path under it
+    (and every path a replay's venv records) is absolute too. A relative
+    `fork_check_dir` in the config is resolved the same way."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("JEV_ROUTER_HOME", "relative-home")
+    assert jev_router.fork_check_dir({}) == (tmp_path / "relative-home" / "fork-check").resolve()
+    assert jev_router.fork_check_dir({"fork_check_dir": "relative-fork"}) == (tmp_path / "relative-fork").resolve()
+    assert jev_router.fork_check_dir({}).is_absolute()
+
+
 @pytest.mark.parametrize("name", ["fork check", "fork-chéck"], ids=["space", "non-ascii"])
 def test_capture_refuses_a_folder_a_file_url_would_spell_differently(
     home: Path, jev: FakeJev, tmp_path: Path, name: str

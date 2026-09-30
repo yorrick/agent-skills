@@ -132,23 +132,65 @@ def test_judge_copies_leave_out_what_the_clone_ignores_and_every_copy_of_a_secre
         assert (copy / "notes.md").read_text() == "draft\n"
 
 
-def test_a_secret_under_eight_bytes_copied_elsewhere_is_left_out(tmp_path: Path, repo: Path) -> None:
-    """F23a: too small for the content check to refuse, but the judge still
-    never gets it, whatever its path."""
+def _snapshot_of(tmp_path: Path, repo: Path) -> Path:
     from test_jev_snapshot import EVENT, payload, write
     from test_jev_usage import assistant, typed
 
-    (repo / ".env").write_text("A=1\n")
     transcript = write(tmp_path / "t.jsonl", [typed("start"), assistant("r1")])
     sid = snapshot.take_snapshot(tmp_path / "fc", payload(repo, transcript), "build it", "N", EVENT)
-    snap = tmp_path / "fc" / "snapshots" / sid
+    return tmp_path / "fc" / "snapshots" / sid
+
+
+def test_a_four_byte_env_moved_to_another_name_is_refused_with_no_codex_call(tmp_path: Path, repo: Path) -> None:
+    """F32: restore records every restored secret up to 1 MB, however small, so
+    a 4-byte `.env` that is gone by check time is still known."""
+    (repo / ".env").write_text("A=1\n")
+    snap = _snapshot_of(tmp_path, repo)
+    keep, delegate = replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d")
+    (delegate / ".env").rename(delegate / "settings.txt")
+    _refused_with_no_codex_call(
+        tmp_path, snap, keep, delegate, r"settings\.txt in the delegate clone holds the content of .* \.env"
+    )
+
+
+def test_a_tracked_file_equal_to_a_restored_secret_stays_in_the_judge_copy(tmp_path: Path, repo: Path) -> None:
+    """F32: content the user's committed history already holds is never a
+    secret, for the copy as for the refusal: `.env` was made from the tracked
+    `.env.example`, which the judge still gets."""
+    (repo / ".env.example").write_text("TOKEN=x\n")  # the same bytes as the fixture's .env
+    assert _git(repo, "add", ".env.example").returncode == 0
+    assert _git(repo, "commit", "-qm", "an example env").returncode == 0
+    snap = _snapshot_of(tmp_path, repo)
+    _judge_both(tmp_path, snap, replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d"))
+    for letter in ("A", "B"):
+        copy = tmp_path / "j" / letter
+        assert (copy / ".env.example").read_text() == "TOKEN=x\n"
+        assert not os.path.lexists(copy / ".env")
+
+
+def test_empty_files_stay_even_when_a_restored_ignored_file_is_empty(tmp_path: Path, repo: Path) -> None:
+    """F32: the empty file is never a secret. An empty restored `.next/turbopack`
+    neither refuses a new empty `__init__.py` nor keeps an empty file in
+    `node_modules` from the judge."""
+    (repo / ".gitignore").write_text((repo / ".gitignore").read_text() + ".next/\n")
+    assert _git(repo, "add", ".gitignore").returncode == 0
+    assert _git(repo, "commit", "-qm", "ignore .next").returncode == 0
+    (repo / ".next").mkdir()
+    (repo / ".next" / "turbopack").write_bytes(b"")
+    (repo / "node_modules" / "pkg").mkdir()
+    (repo / "node_modules" / "pkg" / "index.d.ts").write_bytes(b"")
+    snap = _snapshot_of(tmp_path, repo)
     clones = [replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d")]
     for clone in clones:
-        shutil.copy(clone / ".env", clone / "settings.txt")
+        assert (clone / ".next" / "turbopack").exists()
+        (clone / "src").mkdir()
+        (clone / "src" / "__init__.py").write_bytes(b"")  # a new, untracked empty file
     _judge_both(tmp_path, snap, *clones)
     for letter in ("A", "B"):
-        assert not os.path.lexists(tmp_path / "j" / letter / "settings.txt")
-        assert not os.path.lexists(tmp_path / "j" / letter / ".env")
+        copy = tmp_path / "j" / letter
+        assert (copy / "node_modules" / "pkg" / "index.d.ts").read_bytes() == b""
+        assert (copy / "src" / "__init__.py").read_bytes() == b""
+        assert not os.path.lexists(copy / ".next")
 
 
 def test_stashed_staged_or_side_branch_secrets_never_reach_the_judge(tmp_path: Path, repo: Path, snap: Path) -> None:

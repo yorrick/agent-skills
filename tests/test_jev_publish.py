@@ -300,11 +300,14 @@ def test_nothing_to_protect_skips_the_hashing_and_the_history_walk(
 
 
 def test_restore_records_the_restored_files_content(tmp_path: Path, repo: Path, snap: Path) -> None:
-    """Same selection as the content check: the 8-byte `.env` is recorded, the
-    `node_modules` lock file (a dependency folder, and 2 bytes) is not."""
+    """Same selection as the content check: `.env` is recorded, with its size,
+    and the `node_modules` lock file (in a dependency folder) is not. The ids
+    match git's own."""
     replay.restore(snap, tmp_path / "k")
-    blobs = json.loads((tmp_path / "k" / "restore.json").read_text())["ignored_blobs"]
-    assert blobs == {git(repo, "hash-object", ".env").strip(): ".env"}
+    record = json.loads((tmp_path / "k" / "restore.json").read_text())
+    env_blob = git(repo, "hash-object", ".env").strip()
+    assert record["ignored_blobs"] == {env_blob: ".env"}
+    assert record["ignored_blob_sizes"] == {env_blob: len("TOKEN=x\n")}
 
 
 def test_a_restore_record_without_its_blob_ids_is_refused(tmp_path: Path) -> None:

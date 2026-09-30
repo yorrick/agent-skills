@@ -338,9 +338,12 @@ def restore(snap: Path, dest: Path, *, copy_ignored: bool = True) -> Path:
         # the clone's own ignore rules later change or are force-added around,
         # since the replay runs with bypass permissions and can rewrite them.
         # "ignored_blobs" records their content now, before the replay runs, so
-        # the content check still knows a `.env` the replay moved away (Ruling F10).
-        # "ignored_blob_sizes" lets the judge's copy look for those contents
-        # anywhere by hashing only the files of a matching size.
+        # the content check still knows a `.env` the replay moved away (Ruling
+        # F10): every restored ignored regular file outside dependency folders,
+        # up to CONTENT_MAX_BYTES, however small (Ruling F32). The exemptions
+        # (`_secrets`) apply where the record is used, not here.
+        # "ignored_blob_sizes" lets the checks look for those contents anywhere
+        # by hashing only the files of a matching size.
         contents = _restored_files(clone, ignored)
         blobs = dict(zip(_blob_ids(clone, contents), contents, strict=True))
         record = {
@@ -427,10 +430,9 @@ def _tree(clone: Path, ref: str) -> list[tuple[str, str, str]]:
     return entries
 
 
-# The content check covers restored ignored files of this size: under 8 bytes is
-# too little to be a secret worth refusing a job for, and over 1 MB is a build
-# output or a cache, not a credential.
-CONTENT_MIN_BYTES = 8
+# Restored ignored files of up to this size are secrets (Ruling F32), however
+# small: a credential is small, while a bigger file is a build output or a cache,
+# and the cap keeps a restored `target/` or `.next/cache` from being read in full.
 CONTENT_MAX_BYTES = 1 << 20
 
 
@@ -461,16 +463,15 @@ def _touched_since(path: Path, cutoff: float) -> bool:
     return False
 
 
-def _restored_files(clone: Path, ignored: list[str], *, bounded: bool = True) -> list[str]:
+def _restored_files(clone: Path, ignored: list[str]) -> list[str]:
     """The regular files now under the restored ignored entries, relative to the
-    clone, outside dependency folders and, when `bounded`, between the two
-    content-check sizes. Nothing here follows a symlink."""
+    clone, outside dependency folders, of at most CONTENT_MAX_BYTES. Nothing
+    here follows a symlink."""
     found: list[str] = []
 
     def consider(rel: str) -> None:
         st = os.lstat(clone / rel)
-        sized = not bounded or CONTENT_MIN_BYTES <= st.st_size <= CONTENT_MAX_BYTES
-        if stat.S_ISREG(st.st_mode) and sized:
+        if stat.S_ISREG(st.st_mode) and st.st_size <= CONTENT_MAX_BYTES:
             found.append(rel)
 
     for rel in ignored:
@@ -488,37 +489,73 @@ def _restored_files(clone: Path, ignored: list[str], *, bounded: bool = True) ->
     return found
 
 
+def _regular_size(path: Path) -> int | None:
+    """The size of `path` if it is a regular file (lstat: a link is not
+    followed), else None, as for a path that no longer exists."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    return st.st_size if stat.S_ISREG(st.st_mode) else None
+
+
+def _secrets(clone: Path, ignored: list[str]) -> dict[str, tuple[str, int]]:
+    """Blob id to (path, size) of every content that must never reach GitHub or
+    the judge under any name, shared by publish, the judge's refusal and its
+    copies (Ruling F32): the ids `restore` recorded before the replay ran (so a
+    moved `.env` still counts, Ruling F10), and the restored files as they are
+    now (so one the replay edited, then copied, counts too).
+
+    Two contents are never secrets. The empty file: an empty restored cache file
+    would otherwise match every empty file in the repository. And any blob
+    reachable from `refs/jev/start^` (Rulings F11, F13): the user's committed
+    history already holds it, and the push carries that history anyway, so a
+    `.env` made from a tracked `.env.example` must not refuse every job. Only
+    the snapshot HEAD's history is exempt, never the start tree's untracked
+    files from the tar.
+
+    With nothing to protect, this returns before any file is hashed (one that
+    cannot be read would fail the check) or any history is walked."""
+    recorded = restored_blobs(clone)
+    now = _restored_files(clone, ignored)
+    if not recorded and not now:
+        return {}
+    sizes = _restore_record(clone, "ignored_blob_sizes")
+    secrets = {oid: (path, int(sizes[oid])) for oid, path in recorded.items()}
+    for oid, path in zip(_blob_ids(clone, now), now, strict=True):
+        secrets.setdefault(oid, (path, os.lstat(clone / path).st_size))
+    secrets = {oid: found for oid, found in secrets.items() if found[1] > 0}
+    if secrets:
+        for oid, _ in _object_ids(clone, "refs/jev/start^"):
+            secrets.pop(oid, None)
+    return secrets
+
+
 def copy_for_judge(clone: Path, target: Path) -> None:
     """Copy `clone` to `target` with only what the judge needs (Rulings F23a,
     F24): tracked files, untracked files the clone does not ignore, and
     dependency folders, so tests can run. Left out:
 
     - every path the clone itself ignores now, outside dependency folders
-      (`.env`, `.env.local`, a `.venv`, caches), whatever put it there;
-    - every other file whose content is a restored secret, whatever its path or
-      size (`.env` copied under another name, or into `node_modules`): the ids
-      restore recorded, plus the restored files as they are now, of any size.
-      Only files of a secret's size are hashed.
+      (`.env`, `.env.local`, caches), whatever put it there;
+    - every other file whose content is a secret (`_secrets`), whatever its
+      path (`.env` copied under another name, or into `node_modules`). Only
+      files of a secret's size are hashed.
 
     Paths are left out while copying, never deleted afterwards, and nothing is
     read through a symlink."""
     left_out = {p for p in snapshot.ignored_entries(clone) if not _in_dependency_folder(p)}
-    secret_sizes = set(dict(_restore_record(clone, "ignored_blob_sizes")).values())
-    secrets = set(restored_blobs(clone))
-    now = _restored_files(clone, restored_ignored(clone), bounded=False)
-    secrets.update(_blob_ids(clone, now))
-    secret_sizes.update(os.lstat(clone / p).st_size for p in now)
+    secrets = _secrets(clone, restored_ignored(clone))
+    sizes = {size for _, size in secrets.values()}
     candidates: list[str] = []
-    for dirpath, dirnames, filenames in os.walk(clone):
+    # Reason: with no secret left, nothing is walked or hashed.
+    for dirpath, dirnames, filenames in os.walk(clone) if sizes else []:
         base = os.path.relpath(dirpath, clone)
         prefix = "" if base == "." else f"{base}/"
         dirnames[:] = [d for d in dirnames if f"{prefix}{d}" not in left_out and f"{prefix}{d}" != ".git"]
         for name in filenames:
             rel = f"{prefix}{name}"
-            if rel in left_out:
-                continue
-            st = os.lstat(clone / rel)
-            if stat.S_ISREG(st.st_mode) and st.st_size in secret_sizes:
+            if rel not in left_out and _regular_size(clone / rel) in sizes:
                 candidates.append(rel)
     left_out.update(rel for rel, oid in zip(candidates, _blob_ids(clone, candidates), strict=True) if oid in secrets)
     _copy_selective(clone.parent, clone.name, target, {f"{clone.name}/{p}" for p in left_out})
@@ -559,47 +596,29 @@ def _object_ids(clone: Path, *revs: str) -> list[tuple[str, str]]:
 def _refuse_if_content_leaked(
     clone: Path, ignored: list[str], tree: list[tuple[str, str, str]], status: list[str], label: str
 ) -> None:
-    """Refuses if a restored ignored file's exact content shows up under another
-    path: in HEAD's tree, in any object the replay's commits introduced, or in a
-    working-tree file `git status` lists. A replay that copies or moves `.env` to
-    `config.txt` would otherwise publish the secret, or show it to the judge,
-    under a name no path check knows.
-
-    The secrets are the union of the ids `restore` recorded before the replay
-    ran (so a moved `.env` still counts, Ruling F10) and the restored files as
-    they are now (so one the replay edited, then copied, counts too). One
-    hash-object call covers those and the working-tree files."""
-    secrets = restored_blobs(clone)
-    now = _restored_files(clone, ignored)
-    # Reason: nothing to protect, so no working-tree file is hashed (one the
-    # check cannot read would fail it) and no history is walked.
-    if not secrets and not now:
-        return
-    worktree = [p for p in status if (clone / p).is_file() and not (clone / p).is_symlink()]
-    hashed = _blob_ids(clone, now + worktree)
-    for oid, path in zip(hashed[: len(now)], now, strict=True):
-        secrets.setdefault(oid, path)
-    # Reason (accepted in Ruling F11, narrowed by F13): content the committed
-    # base already holds is published anyway, since the push carries the
-    # snapshot HEAD's whole history, so matching it leaks nothing new; a `.env`
-    # copied from a tracked `.env.example` must not refuse every job. Only
-    # objects reachable from `refs/jev/start^` (the snapshot HEAD) are exempt,
-    # never the start tree's untracked files from the tar.
-    for oid, _ in _object_ids(clone, "refs/jev/start^"):
-        secrets.pop(oid, None)
+    """Refuses if a secret (`_secrets`: a restored ignored file's exact content)
+    shows up under another path: in HEAD's tree, in any object the replay's
+    commits introduced, or in a working-tree file `git status` lists. A replay
+    that copies or moves `.env` to `config.txt` would otherwise publish the
+    secret, or show it to the judge, under a name no path check knows. Only
+    working-tree files of a secret's size are hashed."""
+    secrets = _secrets(clone, ignored)
     if not secrets:
         return
+    sizes = {size for _, size in secrets.values()}
     candidates = [(oid, path) for kind, oid, path in tree if kind == "blob"]
     # Reason (Ruling F17): from the snapshot HEAD, not from refs/jev/start. The
     # start tree holds the tar's untracked files, so `start..HEAD` would leave
     # out a blob matching one of them that the replay committed under another
     # name and deleted later.
     candidates += _object_ids(clone, "refs/jev/start^..HEAD")
-    candidates += list(zip(hashed[len(now) :], worktree, strict=True))
+    worktree = [p for p in status if _regular_size(clone / p) in sizes]
+    candidates += list(zip(_blob_ids(clone, worktree), worktree, strict=True))
     for oid, path in candidates:
         if oid in secrets:
             raise RuntimeError(
-                f"{path} in the {label} clone holds the content of the restored ignored file {secrets[oid]}; refusing"
+                f"{path} in the {label} clone holds the content of the restored ignored file {secrets[oid][0]}; "
+                "refusing"
             )
 
 

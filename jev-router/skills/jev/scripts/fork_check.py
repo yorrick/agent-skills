@@ -284,13 +284,21 @@ def _replay_locked(sid: str, trial: bool) -> int:
     import replay
 
     snap, out = root() / "snapshots" / sid, root() / "results" / sid
+    # Reason: a runner killed outright never stopped its `claude`; stop it (once
+    # `ps` confirms it is still that very call) before its clones are cleared.
+    try:
+        stopped = replay.stop_leftover_groups(out)
+    except replay.IdentityUnavailable as exc:
+        print(
+            f"{sid}: cannot check whether an earlier run's claude is still running ({exc}), so it is not "
+            "resumed. Stop any such process yourself, then run replay again."
+        )
+        return 1
+    for pgid in stopped:
+        print(f"{sid}: stopped process group {pgid}, left running by an earlier run.")
     # Reason: written before anything runs, so the report knows a trial job even
     # when the replay raises and no result.json is ever written.
     set_status(sid, "replaying", "trial" if trial else "")
-    # Reason: a runner killed outright never stopped its `claude`; stop it before
-    # its clones are cleared.
-    for pgid in replay.stop_leftover_groups(out):
-        print(f"{sid}: stopped process group {pgid}, left running by an earlier run.")
     # Reason: a previous run that ended in replay_failed may have left partial
     # clones here; restore()'s dest.mkdir(parents=True) would fail forever
     # otherwise, permanently jamming this snapshot.

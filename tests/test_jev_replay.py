@@ -1359,29 +1359,105 @@ def test_a_second_runner_of_the_same_job_is_refused(
     assert replayed == ["20261001-090000-a"]
 
 
-def test_a_resume_stops_the_group_an_earlier_run_left_running(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def _leftover_claude(root: Path, sid: str) -> tuple[subprocess.Popen, Path]:
+    """A process group like the one a killed runner leaves: its own session, and a
+    command line with `--fork-session`. Returns it and its attempt folder."""
+    leftover = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)", "--fork-session"], start_new_session=True
+    )
+    attempt = root / "results" / sid / "side-1" / "attempt-1"
+    attempt.mkdir(parents=True)
+    return leftover, attempt
+
+
+@pytest.mark.parametrize("same_identity", [True, False])
+def test_a_resume_stops_a_leftover_group_only_if_it_is_still_that_claude(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], same_identity: bool
 ) -> None:
-    """F20: a runner killed outright leaves its claude call's group id in the
-    attempt folder; the next run of the job kills that group before clearing."""
+    """F20, F23d: a runner killed outright leaves its call's group id and the
+    leader's identity in the attempt folder. The next run of the job kills the
+    group only if `ps` still shows that start time and command line; a reused id
+    (another start time) is left alone and its record dropped."""
     root = tmp_path / "fc"
     monkeypatch.setattr(fork_check, "root", lambda: root)
     _jobs(root, "20261001-090000-a")
     fork_check.set_status("20261001-090000-a", "replaying", "")
-    leftover = subprocess.Popen(["sleep", "60"], start_new_session=True)
-    attempt = root / "results" / "20261001-090000-a" / "side-1" / "attempt-1"
-    attempt.mkdir(parents=True)
-    (attempt / "claude.pgid").write_text(f"{leftover.pid}\n")
+    leftover, attempt = _leftover_claude(root, "20261001-090000-a")
+    record = attempt / "claude.pgid"
+    replay._record_group(record, leftover.pid)
+    if not same_identity:
+        recorded = json.loads(record.read_text())
+        record.write_text(json.dumps({**recorded, "lstart": "Thu Jan  1 00:00:00 1970"}))
     monkeypatch.setattr(replay, "replay_pair", _fake_pair([]))
     try:
         assert fork_check.main(["replay", "20261001-090000-a"]) == 0
-        assert leftover.wait(timeout=5) == -signal.SIGKILL
+        if same_identity:
+            assert leftover.wait(timeout=5) == -signal.SIGKILL
+        else:
+            time.sleep(0.2)
+            assert leftover.poll() is None  # somebody else's process now: never killed
     finally:
         if leftover.poll() is None:
             leftover.kill()
             leftover.wait()
-    assert f"stopped process group {leftover.pid}" in capsys.readouterr().out
+    shown = f"stopped process group {leftover.pid}" in capsys.readouterr().out
+    assert shown is same_identity
     assert not attempt.exists()
+
+
+def test_a_resume_that_cannot_check_a_leftover_group_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F23d: without `ps`, a recorded group cannot be checked, so the job is not
+    resumed and nothing is cleared."""
+    root = tmp_path / "fc"
+    monkeypatch.setattr(fork_check, "root", lambda: root)
+    _jobs(root, "20261001-090000-a")
+    fork_check.set_status("20261001-090000-a", "replaying", "")
+    leftover, attempt = _leftover_claude(root, "20261001-090000-a")
+    try:
+        replay._record_group(attempt / "claude.pgid", leftover.pid)
+
+        def no_ps(pid: int) -> tuple[str, str] | None:
+            raise replay.IdentityUnavailable("ps could not run: [Errno 2] No such file or directory: 'ps'")
+
+        monkeypatch.setattr(replay, "_identity", no_ps)
+        monkeypatch.setattr(replay, "replay_pair", _fake_pair([]))
+        assert fork_check.main(["replay", "20261001-090000-a"]) == 1
+        assert "cannot check whether an earlier run's claude is still running" in capsys.readouterr().out
+        assert (attempt / "claude.pgid").exists()
+        assert leftover.poll() is None
+        assert fork_check.statuses()["20261001-090000-a"]["status"] == "replaying"
+    finally:
+        leftover.kill()
+        leftover.wait()
+
+
+def test_a_failed_group_record_still_kills_the_group(
+    tmp_path: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F23c: the record is written inside the call's cleanup guard, so a write
+    that raises still takes the group down."""
+    monkeypatch.setenv("FAKE_CLAUDE_SLEEP_CHILD", str(tmp_path / "child.pid"))
+    started: list[subprocess.Popen] = []
+
+    class RememberedPopen(subprocess.Popen):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+            started.append(self)
+
+    monkeypatch.setattr(replay, "subprocess", types.SimpleNamespace(**{**vars(subprocess), "Popen": RememberedPopen}))
+    unwritable = tmp_path / "no-such-folder" / "claude.pgid"
+    try:
+        with pytest.raises(OSError):
+            replay.run_claude(tmp_path, "sid", "hello", {}, fake_claude, "claude-opus-5-5", pgid_file=unwritable)
+        (claude_call,) = started
+        assert claude_call.returncode == -signal.SIGKILL
+    finally:
+        for proc in started:
+            if proc.poll() is None:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
 
 
 def _interrupted_during_the_wait(
@@ -1432,19 +1508,22 @@ def test_ctrl_c_during_a_claude_call_kills_its_process_group(
     assert not pgid_file.exists()
 
 
-def test_sigterm_during_a_claude_call_kills_its_process_group(
-    tmp_path: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("stop", [signal.SIGTERM, signal.SIGHUP], ids=["SIGTERM", "SIGHUP"])
+def test_a_stop_signal_during_a_claude_call_kills_its_process_group(
+    tmp_path: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch, stop: signal.Signals
 ) -> None:
-    before = signal.getsignal(signal.SIGTERM)
+    """F20, N2: SIGHUP (the terminal closing) is handled like SIGTERM, and both
+    old handlers are put back afterwards."""
+    before = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
 
-    def sigterm() -> None:
-        os.kill(os.getpid(), signal.SIGTERM)
+    def send() -> None:
+        os.kill(os.getpid(), stop)
 
-    _interrupted_during_the_wait(tmp_path, monkeypatch, sigterm)
+    _interrupted_during_the_wait(tmp_path, monkeypatch, send)
     with pytest.raises(replay.Terminated):
         replay.run_claude(tmp_path, "sid", "hello", {}, fake_claude, "claude-opus-5-5")
     _wait_until_gone(int((tmp_path / "child.pid").read_text()))
-    assert signal.getsignal(signal.SIGTERM) == before
+    assert {sig: signal.getsignal(sig) for sig in before} == before
 
 
 def test_an_unknown_or_escaping_id_is_refused_before_anything_is_touched(

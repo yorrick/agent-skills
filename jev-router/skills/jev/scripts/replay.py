@@ -838,20 +838,30 @@ def _leaked_real_path(new_files: list[Path], prompt: str, leak_forms: list[str])
 
 
 class Terminated(BaseException):
-    """SIGTERM during a `claude` call, raised so the call's process group is
+    """SIGTERM or SIGHUP during a `claude` call (closing the terminal is the
+    common way a long replay dies), raised so the call's process group is
     stopped on the way out, as for Ctrl-C."""
+
+
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
 
 
 def _raise_terminated(signum: int, frame: object) -> None:
     raise Terminated(f"signal {signum}")
 
 
-def _stop_on_sigterm() -> Any:
-    """Turn SIGTERM into Terminated for the length of a call, and return the
-    handler to put back (None off the main thread, where Python cannot set one)."""
+def _stop_on_signals() -> dict:
+    """Turn SIGTERM and SIGHUP into Terminated for the length of a call, and
+    return the handlers to put back (none off the main thread, where Python
+    cannot set one)."""
     if threading.current_thread() is not threading.main_thread():
-        return None
-    return signal.signal(signal.SIGTERM, _raise_terminated) or signal.SIG_DFL
+        return {}
+    return {sig: signal.signal(sig, _raise_terminated) for sig in STOP_SIGNALS}
+
+
+def _put_back(previous: dict) -> None:
+    for sig, handler in previous.items():
+        signal.signal(sig, handler if handler is not None else signal.SIG_DFL)
 
 
 def _kill_group(pgid: int) -> None:
@@ -859,23 +869,63 @@ def _kill_group(pgid: int) -> None:
         os.killpg(pgid, signal.SIGKILL)
 
 
+class IdentityUnavailable(RuntimeError):
+    """`ps` could not run, so a recorded process group cannot be checked."""
+
+
+def _identity(pid: int) -> tuple[str, str] | None:
+    """(start time, command line) of `pid`, as `ps` shows them, or None when no
+    such process runs. Raises IdentityUnavailable when `ps` itself cannot run
+    or answers in a shape this cannot read."""
+    try:
+        shown = subprocess.run(
+            ["ps", "-ww", "-o", "lstart=,command=", "-p", str(pid)], capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise IdentityUnavailable(f"ps could not run: {exc}") from exc
+    line = shown.stdout.strip()
+    if not line:
+        # Reason: for a pid that does not exist, ps prints nothing, not even an
+        # error; anything on stderr means ps itself failed.
+        if shown.stderr.strip():
+            raise IdentityUnavailable(f"ps failed: {shown.stderr.strip()[:200]}")
+        return None
+    parts = line.split(None, 5)
+    if len(parts) < 6:
+        raise IdentityUnavailable(f"ps answered {line!r}")
+    return " ".join(parts[:5]), parts[5]
+
+
+def _record_group(record: Path, pgid: int) -> None:
+    """Next to the group id, its leader's start time and command line, so a later
+    run kills the group only if it is still this very `claude` (Ruling F23d):
+    after a reboot, or on a machine whose pid space wrapped, the id can belong
+    to something else entirely."""
+    identity = _identity(pgid)
+    if identity is not None:
+        record.write_text(json.dumps({"pgid": pgid, "lstart": identity[0], "command": identity[1]}) + "\n")
+
+
 def stop_leftover_groups(results: Path) -> list[int]:
     """Kill the `claude` process groups an earlier run of this job recorded under
-    `results` and never stopped (it was killed outright), if they are still
-    alive. Returns the groups that were."""
+    `results` and never stopped (it was killed outright), but only a group whose
+    leader `ps` still shows with the recorded start time and command line, a
+    `claude --fork-session` call. Any other record is dropped without a kill.
+    Returns the groups killed. Raises IdentityUnavailable when `ps` cannot run:
+    a resume must not go on without knowing."""
     stopped = []
     for record in sorted(results.glob("side-*/attempt-*/claude.pgid")):
         try:
-            pgid = int(record.read_text())
-        except ValueError:
+            recorded = json.loads(record.read_text())
+            pgid, lstart, command = int(recorded["pgid"]), recorded["lstart"], recorded["command"]
+        except (ValueError, KeyError, TypeError):
+            record.unlink()
             continue
-        if pgid <= 1 or pgid == os.getpgrp():
-            continue
-        try:
-            os.killpg(pgid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            continue
-        stopped.append(pgid)
+        current = _identity(pgid) if pgid > 1 and pgid != os.getpgrp() else None
+        if current == (lstart, command) and "--fork-session" in command:
+            _kill_group(pgid)
+            stopped.append(pgid)
+        record.unlink()
     return stopped
 
 
@@ -896,9 +946,10 @@ def run_claude(
     only for a call this killed after TIMEOUT_SECONDS; the exit code next to it
     is whatever the killed process actually reported (often a negative signal
     number), never a stand-in like -1, which is also SIGHUP's own code. On
-    Ctrl-C, SIGTERM or any other exception during the wait, the call's whole
-    process group is killed before the exception goes on. While the call runs,
-    `pgid_file` (if given) holds its process group id."""
+    Ctrl-C, SIGTERM, SIGHUP or any other exception during the wait, the call's
+    whole process group is killed before the exception goes on. While the call
+    runs, `pgid_file` (if given) records its process group and the leader's
+    identity."""
     cmd = [
         os.environ.get("JEV_FORK_CHECK_CLAUDE", "claude"),
         "--resume",
@@ -935,33 +986,35 @@ def run_claude(
     if claude_home != DEFAULT_CLAUDE_HOME:
         env["CLAUDE_CONFIG_DIR"] = str(claude_home)
     started = time.monotonic()
-    # Reason: a new session (not just a new process group) is what lets a timed-out
-    # run be killed as a whole, so an MCP or dev server the agent started as a child
-    # of it does not keep running after `claude` itself is gone. It also keeps the
-    # terminal's Ctrl-C from reaching the child: the runner stops the group itself.
-    proc = subprocess.Popen(
-        cmd, cwd=clone, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True
-    )
-    # Reason: a runner killed outright (SIGKILL, a crash) cannot stop the group; the
-    # next run of the job finds the id here and stops it (`stop_leftover_groups`).
-    if pgid_file is not None:
-        pgid_file.write_text(f"{proc.pid}\n")
-    previous = _stop_on_sigterm()
     timed_out = False
+    previous = _stop_on_signals()
     try:
-        stdout, _ = proc.communicate(timeout=TIMEOUT_SECONDS)
-        code = proc.returncode
-    except subprocess.TimeoutExpired:
-        _kill_group(proc.pid)
-        proc.wait()
-        stdout, code, timed_out = "", proc.returncode, True
-    except BaseException:  # Ctrl-C, SIGTERM (as Terminated) or anything else during the wait
-        _kill_group(proc.pid)
-        proc.wait()
-        raise
+        # Reason: a new session (not just a new process group) is what lets a
+        # timed-out run be killed as a whole, so an MCP or dev server the agent
+        # started as a child of it does not keep running after `claude` itself is
+        # gone. It also keeps the terminal's Ctrl-C from reaching the child: the
+        # runner stops the group itself.
+        proc = subprocess.Popen(
+            cmd, cwd=clone, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True
+        )
+        try:
+            # Reason: a runner killed outright (SIGKILL, a crash) cannot stop the
+            # group; the next run of the job finds it here (`stop_leftover_groups`).
+            # Written inside this guard, so a failed write still kills the group.
+            if pgid_file is not None:
+                _record_group(pgid_file, proc.pid)
+            stdout, _ = proc.communicate(timeout=TIMEOUT_SECONDS)
+            code = proc.returncode
+        except subprocess.TimeoutExpired:
+            _kill_group(proc.pid)
+            proc.wait()
+            stdout, code, timed_out = "", proc.returncode, True
+        except BaseException:  # Ctrl-C, SIGTERM or SIGHUP (as Terminated), a failed write, anything
+            _kill_group(proc.pid)
+            proc.wait()
+            raise
     finally:
-        if previous is not None:
-            signal.signal(signal.SIGTERM, previous)
+        _put_back(previous)
         if pgid_file is not None:
             pgid_file.unlink(missing_ok=True)
     wall = time.monotonic() - started

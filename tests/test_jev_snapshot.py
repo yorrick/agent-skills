@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import tarfile
@@ -50,6 +51,9 @@ def test_snapshot_holds_the_conversation_and_the_working_copy(tmp_path: Path, re
     assert meta["helper"] == "jev-router:large" and meta["context"] == 803_010
     # Ruling F3': the ignored entries a restore may copy, paths only.
     assert meta["ignored_entries"] == [".env", "node_modules"]
+    # Ruling F23b: `created` is kept to the microsecond; the id keeps its format.
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}\+00:00", meta["created"])
+    assert re.fullmatch(r"\d{8}-\d{6}-abcdef12", sid)
     assert (d / "message.txt").read_text() == "build it"
     assert (d / "note.txt").read_text() == "NOTE"
     assert "print('v2')" in (d / "changes.diff").read_text()

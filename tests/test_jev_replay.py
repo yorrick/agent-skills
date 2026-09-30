@@ -141,6 +141,42 @@ def test_an_ignored_entry_touched_after_capture_is_not_copied(tmp_path: Path, re
     assert restored["ignored"] == [".env", "node_modules"]
 
 
+def test_a_change_within_the_capture_second_is_seen(tmp_path: Path, repo: Path) -> None:
+    """F23b: `created` is kept to the microsecond and is the cutoff itself, so a
+    change a fifth of a second after the capture is not copied."""
+    (repo / ".gitignore").write_text((repo / ".gitignore").read_text() + ".cache/\n")
+    (repo / ".cache").mkdir()
+    (repo / ".cache" / "a.txt").write_text("cached before\n")
+    snap = take(tmp_path, repo)
+    soon = datetime.fromisoformat(json.loads((snap / "meta.json").read_text())["created"]).timestamp() + 0.2
+    (repo / ".cache" / "a.txt").write_text("rewritten by the real turn\n")
+    for path in (repo / ".cache" / "a.txt", repo / ".cache"):
+        os.utime(path, (soon, soon))
+    clone = replay.restore(snap, tmp_path / "r")
+    assert not (clone / ".cache").exists()
+    assert json.loads((tmp_path / "r" / "restore.json").read_text())["changed_since_capture"] == [".cache"]
+
+
+def test_an_entry_that_vanishes_while_it_is_looked_at_counts_as_touched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N4: a file removed between the walk and its lstat is being changed right now."""
+    folder = tmp_path / "cache"
+    folder.mkdir()
+    (folder / "gone.txt").write_text("x\n")
+    real_lstat = os.lstat
+
+    def vanishing(path: object) -> os.stat_result:
+        if str(path).endswith("gone.txt"):
+            raise FileNotFoundError(path)
+        return real_lstat(path)  # type: ignore[arg-type]
+
+    far_future = time.time() + 3600
+    assert not replay._touched_since(folder, far_future)  # the file is still there
+    monkeypatch.setattr(replay.os, "lstat", vanishing)
+    assert replay._touched_since(folder, far_future)
+
+
 def test_a_snapshot_without_its_ignored_entries_is_refused(tmp_path: Path, snap: Path) -> None:
     meta = json.loads((snap / "meta.json").read_text())
     del meta["ignored_entries"]

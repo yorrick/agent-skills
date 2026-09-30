@@ -192,7 +192,7 @@ def take_snapshot(
         entries = ignored_entries(top, deadline=deadline)
         meta = {
             "id": sid,
-            "created": now.isoformat(timespec="seconds"),
+            "created": now.isoformat(timespec="microseconds"),
             "session_id": payload["session_id"],
             "transcript_path": str(transcript),
             "cwd": str(cwd),

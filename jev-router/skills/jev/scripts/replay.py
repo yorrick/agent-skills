@@ -302,10 +302,10 @@ def restore(snap: Path, dest: Path, *, copy_ignored: bool = True) -> Path:
         ignored: list[str] = []
         missing: list[str] = []
         changed: list[str] = []
-        # Reason: `created` is kept to the second, so only a change from the next
-        # whole second on is surely after the capture; one inside the capture's
-        # own second is not seen (the real turn starts only after the hook).
-        cutoff = datetime.fromisoformat(meta["created"]).timestamp() + 1
+        # Reason (Ruling F23b): `created` is kept to the microsecond, so it is
+        # the cutoff itself. (An older snapshot's `created`, kept to the second,
+        # would make this cutoff up to a second early, which only leaves more out.)
+        cutoff = datetime.fromisoformat(meta["created"]).timestamp()
         for rel in captured:
             if not os.path.lexists(top / rel):
                 missing.append(rel)
@@ -436,14 +436,22 @@ def _in_dependency_folder(rel: str) -> bool:
 def _touched_since(path: Path, cutoff: float) -> bool:
     """Whether `path`, or anything under it, was modified at or after `cutoff`
     (a timestamp). Looks without following links: lstat, and os.walk without
-    followlinks."""
-    if os.lstat(path).st_mtime >= cutoff:
+    followlinks. An entry that vanishes while it is looked at is being changed
+    right now, so it counts as touched."""
+
+    def touched(entry: str | Path) -> bool:
+        try:
+            return os.lstat(entry).st_mtime >= cutoff
+        except FileNotFoundError:
+            return True
+
+    if touched(path):
         return True
     if path.is_symlink() or not path.is_dir():
         return False
     for dirpath, dirnames, filenames in os.walk(path):
         for name in dirnames + filenames:
-            if os.lstat(os.path.join(dirpath, name)).st_mtime >= cutoff:
+            if touched(os.path.join(dirpath, name)):
                 return True
     return False
 

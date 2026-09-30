@@ -54,6 +54,18 @@ def test_a_repeated_prompt_finds_the_turn_nearest_in_time() -> None:
     assert turn is not None and len(usage.calls(turn)) == 2
 
 
+def test_readers_of_created_take_microseconds() -> None:
+    """F23b: meta.json `created` now carries microseconds."""
+    first = {**typed("continue"), "timestamp": "2026-10-01T09:00:00Z"}
+    second = {**typed("continue"), "timestamp": "2026-10-01T10:00:00Z"}
+    entries = [first, assistant("r1"), second, assistant("r2"), assistant("r3")]
+    turn = report.turn_after(entries, usage.prompt_sha("continue"), near="2026-10-01T10:00:00.123456+00:00")
+    assert turn is not None and len(usage.calls(turn)) == 2
+    point = {"meta": {"created": "2026-10-01T10:00:00.123456+00:00"}}
+    events = [{"version": 3, "ts": "2026-10-01T10:00:30+00:00"}]
+    assert report.period_events(events, [point], "2026-10-01T09:59:59.500000+00:00") == events
+
+
 def test_rows_join_decisions_with_real_calls_and_cost(tmp_path: Path) -> None:
     transcript = tmp_path / "t.jsonl"
     entries = [typed("build"), *[assistant(f"r{i}", read=400_000) for i in range(25)], typed("next")]

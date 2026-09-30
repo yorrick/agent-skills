@@ -96,8 +96,9 @@ commands, in order: `check`, `list`, `mark`, `replay`, `judge`, `publish`, `repo
 `shadow` (shadow-mode decisions against what really happened) at any time. Replay a job
 captured in a worktree before removing that worktree: once its checkout is gone, the job is
 inconclusive. The judge (Codex) reads both results, but its copies leave out every ignored
-file outside dependency folders, any other copy of a restored secret such as `.env`, and any
-git object HEAD's history does not hold. See
+file outside dependency folders and virtualenvs, any other copy of a restored secret such as
+`.env`, any link pointing out of the copy from outside those folders, and every git object
+other than HEAD's history, the replay's starting point and the files the copy holds. See
 [the design spec](../docs/superpowers/specs/2026-09-28-jev-router-cache-aware-design.md)
 for the full design and the validation it must pass.
 

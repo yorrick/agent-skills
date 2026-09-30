@@ -392,6 +392,44 @@ def test_a_secret_moved_to_a_name_holding_a_newline_is_refused_with_no_codex_cal
     )
 
 
+@pytest.mark.parametrize("then", ["deleted", "edited"])
+def test_a_staged_copy_of_a_secret_is_refused_with_no_codex_call(tmp_path: Path, snap: Path, then: str) -> None:
+    """F26: `cp .env config.txt && git add config.txt`, then the working file is
+    deleted or edited. The staged blob is still in `.git/index`, where the
+    judge could read it with `git show :config.txt`."""
+    keep, delegate = replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d")
+    shutil.copy(delegate / ".env", delegate / "config.txt")
+    assert _git(delegate, "add", "config.txt").returncode == 0
+    if then == "deleted":
+        (delegate / "config.txt").unlink()
+    else:
+        (delegate / "config.txt").write_text("nothing secret here\n")
+    _refused_with_no_codex_call(
+        tmp_path, snap, keep, delegate, r"config\.txt in the delegate clone holds the content of .* \.env"
+    )
+
+
+def test_a_blob_only_ever_staged_never_reaches_the_judge(tmp_path: Path, snap: Path) -> None:
+    """F26: the copies' index is rebuilt from HEAD and the files each copy
+    holds, so gc keeps no blob that was staged and then deleted or edited."""
+    keep, delegate = replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d")
+    staged = []
+    for clone, name in ((keep, "gone.txt"), (delegate, "draft.txt")):
+        (clone / name).write_text(f"staged in {name}, then changed\n")
+        assert _git(clone, "add", name).returncode == 0
+        staged.append(_git(clone, "rev-parse", f":{name}").stdout.strip())
+    (keep / "gone.txt").unlink()
+    (delegate / "draft.txt").write_text("final\n")
+    (delegate / ".git" / "index.lock").write_text("")  # a killed replay's stale lock never stops the rebuild
+    _judge_both(tmp_path, snap, keep, delegate)
+    for letter in ("A", "B"):
+        copy = tmp_path / "j" / letter
+        for blob in staged:
+            assert _git(copy, "cat-file", "-e", blob).returncode != 0
+        assert _git(copy, "diff", "--quiet").returncode == 0  # the index matches the files the copy holds
+    assert {(tmp_path / "j" / letter / "draft.txt").exists() for letter in ("A", "B")} == {True, False}
+
+
 # F14: a replay-made link into the fork-check folder would unblind the judge.
 def _link_case(tmp_path: Path, snap: Path, target: Path) -> tuple[dict, list[str], Callable[[str, Path], str]]:
     keep = replay.restore(snap, tmp_path / "k")

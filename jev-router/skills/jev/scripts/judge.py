@@ -123,16 +123,26 @@ def parse(text: str) -> dict:
 
 
 def _drop_unneeded_objects(copy: Path) -> None:
-    """Keep in the copy's `.git` only what the judge reads: HEAD's history and
-    refs/jev/start (Ruling F24). A stash (`git add -f .env && git stash`), a
-    blob staged and then reset, or a side branch the replay committed `.env`
-    to would otherwise still hold the secret. Every other ref and pseudo-ref
-    (`ORIG_HEAD` and the like) goes, then `git gc --prune=now` drops every
-    object nothing reachable holds; the reflogs are already gone."""
+    """Keep in the copy's `.git` only what the judge reads: HEAD's history,
+    refs/jev/start, and an index of the files the copy holds (Rulings F24,
+    F26). A stash (`git add -f .env && git stash`), a blob staged and then
+    reset, deleted or edited, or a side branch the replay committed `.env` to
+    would otherwise still hold the secret. Every other ref and pseudo-ref
+    (`ORIG_HEAD` and the like) goes, the index is rebuilt from HEAD and the
+    copy's own files, then `git gc --prune=now` drops every object nothing
+    reachable holds; the reflogs are already gone."""
     git_dir = copy / ".git"
     for name in os.listdir(git_dir):
         if name.endswith("_HEAD") or name == "AUTO_MERGE":
             (git_dir / name).unlink(missing_ok=True)
+    # Reason: gc keeps every blob the index names, extensions such as
+    # resolve-undo included, so the old index is removed rather than updated.
+    # A lock a killed replay left behind would stop the rebuild, and there is
+    # no other writer in a copy.
+    for name in ("index", "index.lock"):
+        (git_dir / name).unlink(missing_ok=True)
+    run("git", "-C", str(copy), "read-tree", "HEAD")
+    run("git", "-C", str(copy), "add", "-A")
     head = subprocess.run(["git", "-C", str(copy), "symbolic-ref", "-q", "HEAD"], capture_output=True, text=True)
     keep = {"refs/jev/start", head.stdout.strip()}
     refs = run("git", "-C", str(copy), "for-each-ref", "--format=%(refname)").split()

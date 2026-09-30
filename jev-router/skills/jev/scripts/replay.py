@@ -582,6 +582,18 @@ def _blob_ids(clone: Path, paths: list[str]) -> list[str]:
     return ids
 
 
+def _index(clone: Path) -> list[tuple[str, str]]:
+    """(object id, path) of every entry in the clone's index, every stage
+    included, read with `-z`."""
+    out = run("git", "-C", str(clone), "ls-files", "-s", "-z")
+    entries = []
+    for line in out.split("\0"):
+        if line:
+            info, path = line.split("\t", 1)
+            entries.append((info.split()[1], path))
+    return entries
+
+
 def _object_ids(clone: Path, *revs: str) -> list[tuple[str, str]]:
     """(object id, path or "(no path)") of every object `git rev-list --objects`
     lists for `revs`."""
@@ -598,10 +610,10 @@ def _refuse_if_content_leaked(
 ) -> None:
     """Refuses if a secret (`_secrets`: a restored ignored file's exact content)
     shows up under another path: in HEAD's tree, in any object the replay's
-    commits introduced, or in a working-tree file `git status` lists. A replay
-    that copies or moves `.env` to `config.txt` would otherwise publish the
-    secret, or show it to the judge, under a name no path check knows. Only
-    working-tree files of a secret's size are hashed."""
+    commits introduced, in the index, or in a working-tree file `git status`
+    lists. A replay that copies or moves `.env` to `config.txt` would otherwise
+    publish the secret, or show it to the judge, under a name no path check
+    knows. Only working-tree files of a secret's size are hashed."""
     secrets = _secrets(clone, ignored)
     if not secrets:
         return
@@ -612,6 +624,10 @@ def _refuse_if_content_leaked(
     # out a blob matching one of them that the replay committed under another
     # name and deleted later.
     candidates += _object_ids(clone, "refs/jev/start^..HEAD")
+    # Reason (Ruling F26): a copy staged and then deleted or edited in the
+    # working tree is still in the index (`git show :config.txt`). The ids come
+    # straight from the index, whatever the working file holds now.
+    candidates += _index(clone)
     worktree = [p for p in status if _regular_size(clone / p) in sizes]
     candidates += list(zip(_blob_ids(clone, worktree), worktree, strict=True))
     for oid, path in candidates:
@@ -630,9 +646,9 @@ def refuse_if_ignored_leaked(clone: Path, ignored: list[str], label: str) -> Non
     ignore rules cannot be trusted; only what `restore` actually copied in can.
     The working-tree check is what catches this before anything is ever
     committed, which matters to the judge: it never commits, so an un-ignored
-    `.env` would otherwise show nowhere else. Then the same places are checked
-    for a restored ignored file's content under another name
-    (`_refuse_if_content_leaked`).
+    `.env` would otherwise show nowhere else. Then the same places, and the
+    index, are checked for a restored ignored file's content under another
+    name (`_refuse_if_content_leaked`).
 
     All three listings are read with `-z`: without it, git quotes a path that
     holds a non-ASCII byte, a `"`, a backslash or a control character, so the

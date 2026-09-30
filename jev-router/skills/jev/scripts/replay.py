@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import random
@@ -469,7 +470,7 @@ def _restored_files(clone: Path, ignored: list[str], *, bounded: bool = True) ->
     def consider(rel: str) -> None:
         st = os.lstat(clone / rel)
         sized = not bounded or CONTENT_MIN_BYTES <= st.st_size <= CONTENT_MAX_BYTES
-        if stat.S_ISREG(st.st_mode) and sized and "\n" not in rel:
+        if stat.S_ISREG(st.st_mode) and sized:
             found.append(rel)
 
     for rel in ignored:
@@ -514,7 +515,7 @@ def copy_for_judge(clone: Path, target: Path) -> None:
         dirnames[:] = [d for d in dirnames if f"{prefix}{d}" not in left_out and f"{prefix}{d}" != ".git"]
         for name in filenames:
             rel = f"{prefix}{name}"
-            if rel in left_out or "\n" in rel:
+            if rel in left_out:
                 continue
             st = os.lstat(clone / rel)
             if stat.S_ISREG(st.st_mode) and st.st_size in secret_sizes:
@@ -524,18 +525,24 @@ def copy_for_judge(clone: Path, target: Path) -> None:
 
 
 def _blob_ids(clone: Path, paths: list[str]) -> list[str]:
-    """The git blob id of each of `paths` (relative to the clone), in one call."""
+    """The git blob id of each of `paths` (relative to the clone), computed here
+    from the bytes on disk (Ruling F27): `git hash-object --stdin-paths` reads one
+    path per line, so a name holding a newline would slip past it. The hash is
+    the clone's own object format (sha1, or sha256 in a repository made with
+    it), and each file is opened without following a symlink."""
     if not paths:
         return []
-    result = subprocess.run(
-        ["git", "-C", str(clone), "hash-object", "--stdin-paths"],
-        input="".join(f"{p}\n" for p in paths),
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"git hash-object failed: {result.stderr.strip()[:300]}")
-    return result.stdout.split()
+    algorithm = run("git", "-C", str(clone), "rev-parse", "--show-object-format").strip()
+    ids = []
+    for rel in paths:
+        try:
+            fd = os.open(clone / rel, os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError as exc:
+            raise RuntimeError(f"cannot read {rel} to compare it with the restored secrets: {exc}") from exc
+        with os.fdopen(fd, "rb") as handle:
+            data = handle.read()
+        ids.append(hashlib.new(algorithm, b"blob %d\0" % len(data) + data).hexdigest())
+    return ids
 
 
 def _object_ids(clone: Path, *revs: str) -> list[tuple[str, str]]:
@@ -568,7 +575,7 @@ def _refuse_if_content_leaked(
     # check cannot read would fail it) and no history is walked.
     if not secrets and not now:
         return
-    worktree = [p for p in status if (clone / p).is_file() and not (clone / p).is_symlink() and "\n" not in p]
+    worktree = [p for p in status if (clone / p).is_file() and not (clone / p).is_symlink()]
     hashed = _blob_ids(clone, now + worktree)
     for oid, path in zip(hashed[: len(now)], now, strict=True):
         secrets.setdefault(oid, path)

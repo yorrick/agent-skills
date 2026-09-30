@@ -323,6 +323,33 @@ def test_a_copy_in_history_matching_an_untracked_start_file_is_refused_with_no_c
     assert calls == []
 
 
+def _refused_with_no_codex_call(tmp_path: Path, snap: Path, keep: Path, delegate: Path, match: str) -> None:
+    calls: list[str] = []
+
+    def codex(prompt: str, work: Path) -> str:
+        calls.append(prompt)
+        return ANSWER
+
+    result = {
+        "id": "x",
+        "sides": {"keep": {"clone": str(keep), "cost": 1.0}, "delegate": {"clone": str(delegate), "cost": 1.0}},
+    }
+    with pytest.raises(RuntimeError, match=match):
+        judge.judge(snap, result, tmp_path / "j", codex=codex, rng=random.Random(1))
+    assert calls == []
+    assert not (tmp_path / "j").exists()
+
+
+def test_a_secret_moved_to_a_name_holding_a_newline_is_refused_with_no_codex_call(tmp_path: Path, snap: Path) -> None:
+    """F27: blob ids are computed in Python, so a newline in a name can no
+    longer slip past `git hash-object --stdin-paths`, which reads one path per line."""
+    keep, delegate = replay.restore(snap, tmp_path / "k"), replay.restore(snap, tmp_path / "d")
+    (delegate / ".env").rename(delegate / "con\nfig.txt")
+    _refused_with_no_codex_call(
+        tmp_path, snap, keep, delegate, r"(?s)con\nfig\.txt in the delegate clone holds the content of .* \.env"
+    )
+
+
 # F14: a replay-made link into the fork-check folder would unblind the judge.
 def _link_case(tmp_path: Path, snap: Path, target: Path) -> tuple[dict, list[str], Callable[[str, Path], str]]:
     keep = replay.restore(snap, tmp_path / "k")

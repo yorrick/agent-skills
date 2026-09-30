@@ -278,18 +278,25 @@ def test_nothing_to_protect_skips_the_hashing_and_the_history_walk(
     locked.write_text("no one may read this\n")
     locked.chmod(0o000)
     commands: list[tuple[str, ...]] = []
-    real_run = replay.run
+    real_run, real_blob_ids = replay.run, replay._blob_ids
+    hashed: list[list[str]] = []
 
     def recording(*args: str, **kwargs: object) -> str:
         commands.append(args)
         return real_run(*args, **kwargs)  # type: ignore[arg-type]
 
+    def hashing(clone: Path, paths: list[str]) -> list[str]:
+        hashed.append(paths)
+        return real_blob_ids(clone, paths)
+
     monkeypatch.setattr(replay, "run", recording)
+    monkeypatch.setattr(replay, "_blob_ids", hashing)
     try:
         replay.refuse_if_ignored_leaked(clone, replay.restored_ignored(clone), "keep")
     finally:
         locked.chmod(0o644)
-    assert not [c for c in commands if "rev-list" in c or "hash-object" in c]
+    assert not [c for c in commands if "rev-list" in c]
+    assert not [paths for paths in hashed if paths]
 
 
 def test_restore_records_the_restored_files_content(tmp_path: Path, repo: Path, snap: Path) -> None:

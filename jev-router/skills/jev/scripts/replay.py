@@ -8,6 +8,7 @@ import json
 import os
 import random
 import re
+import shlex
 import shutil
 import signal
 import stat
@@ -972,10 +973,13 @@ def _raise_terminated(signum: int, frame: object) -> None:
 def _stop_on_signals() -> dict:
     """Turn SIGTERM and SIGHUP into Terminated for the length of a call, and
     return the handlers to put back (none off the main thread, where Python
-    cannot set one)."""
+    cannot set one). A signal the runner ignores stays ignored: under `nohup`,
+    SIGHUP is SIG_IGN, so closing the terminal must not stop the replay."""
     if threading.current_thread() is not threading.main_thread():
         return {}
-    return {sig: signal.signal(sig, _raise_terminated) for sig in STOP_SIGNALS}
+    return {
+        sig: signal.signal(sig, _raise_terminated) for sig in STOP_SIGNALS if signal.getsignal(sig) != signal.SIG_IGN
+    }
 
 
 def _put_back(previous: dict) -> None:
@@ -1015,35 +1019,79 @@ def _identity(pid: int) -> tuple[str, str] | None:
     return " ".join(parts[:5]), parts[5]
 
 
+class UnverifiableGroup(RuntimeError):
+    """A group record that cannot be settled either way: unreadable, or naming a
+    group that still runs without its leader. A person has to look."""
+
+
 def _record_group(record: Path, pgid: int) -> None:
     """Next to the group id, its leader's start time and command line, so a later
     run kills the group only if it is still this very `claude` (Ruling F23d):
     after a reboot, or on a machine whose pid space wrapped, the id can belong
-    to something else entirely."""
+    to something else entirely. Written to a temp file in the same folder and
+    then renamed (Ruling F30), so a hard kill never leaves half a record."""
     identity = _identity(pgid)
     if identity is not None:
-        record.write_text(json.dumps({"pgid": pgid, "lstart": identity[0], "command": identity[1]}) + "\n")
+        temp = record.with_name(f"{record.name}.tmp")
+        temp.write_text(json.dumps({"pgid": pgid, "lstart": identity[0], "command": identity[1]}) + "\n")
+        os.replace(temp, record)
+
+
+def _group_exists(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def stop_leftover_groups(results: Path) -> list[int]:
     """Kill the `claude` process groups an earlier run of this job recorded under
     `results` and never stopped (it was killed outright), but only a group whose
     leader `ps` still shows with the recorded start time and command line, a
-    `claude --fork-session` call. Any other record is dropped without a kill.
-    Returns the groups killed. Raises IdentityUnavailable when `ps` cannot run:
-    a resume must not go on without knowing."""
+    `claude --fork-session` call. Returns the groups killed.
+
+    A record whose leader is gone, or shows as another process, is dropped
+    without a kill (with an old bare-number record, Ruling F25), unless the
+    group still runs without its leader, such as a dev server the `claude`
+    started (Ruling F30): that group cannot be checked, so this raises
+    UnverifiableGroup, as it does for an unreadable record. It raises
+    IdentityUnavailable when `ps` cannot run. A resume must not go on without
+    knowing."""
     stopped = []
     for record in sorted(results.glob("side-*/attempt-*/claude.pgid")):
+        unreadable = UnverifiableGroup(
+            f"the group record {record} cannot be read. Stop any claude an earlier run left yourself, delete the "
+            f"record, and run replay again. Inspect the record with: cat {shlex.quote(str(record))}"
+        )
         try:
             recorded = json.loads(record.read_text())
-            pgid, lstart, command = int(recorded["pgid"]), recorded["lstart"], recorded["command"]
-        except (ValueError, KeyError, TypeError):
+        except (OSError, ValueError) as exc:
+            raise unreadable from exc
+        if type(recorded) is int:
             record.unlink()
             continue
-        current = _identity(pgid) if pgid > 1 and pgid != os.getpgrp() else None
-        if current == (lstart, command) and "--fork-session" in command:
-            _kill_group(pgid)
-            stopped.append(pgid)
+        try:
+            pgid, lstart, command = int(recorded["pgid"]), str(recorded["lstart"]), str(recorded["command"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise unreadable from exc
+        if pgid <= 1:
+            raise unreadable
+        # Reason: no other group can hold the id of the runner's own group, so a
+        # record naming it is stale.
+        if pgid != os.getpgrp():
+            current = _identity(pgid)
+            if current == (lstart, command) and "--fork-session" in command:
+                _kill_group(pgid)
+                stopped.append(pgid)
+            elif current is None and _group_exists(pgid):
+                raise UnverifiableGroup(
+                    f"process group {pgid}, recorded in {record}, still runs without its leader, so it cannot be "
+                    "checked. Stop it yourself if an earlier run left it, delete the record, and run replay again. "
+                    f"Inspect the group with: ps -o pid,pgid,lstart,command -g {pgid}"
+                )
         record.unlink()
     return stopped
 

@@ -294,6 +294,9 @@ def _replay_locked(sid: str, trial: bool) -> int:
             "resumed. Stop any such process yourself, then run replay again."
         )
         return 1
+    except replay.UnverifiableGroup as exc:
+        print(f"{sid} is not resumed: {exc}")
+        return 1
     for pgid in stopped:
         print(f"{sid}: stopped process group {pgid}, left running by an earlier run.")
     # Reason: written before anything runs, so the report knows a trial job even

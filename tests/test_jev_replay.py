@@ -1433,6 +1433,83 @@ def test_a_resume_that_cannot_check_a_leftover_group_is_refused(
         leftover.wait()
 
 
+def _refused_resume(root: Path, sid: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> str:
+    """Runs `replay sid` over a job left `replaying`, expects the refusal, and
+    returns what it printed. Nothing ran, and the status is unchanged."""
+    replayed: list[str] = []
+    monkeypatch.setattr(replay, "replay_pair", _fake_pair(replayed))
+    assert fork_check.main(["replay", sid]) == 1
+    assert replayed == []
+    assert fork_check.statuses()[sid]["status"] == "replaying"
+    return capsys.readouterr().out
+
+
+def test_a_resume_with_an_unreadable_group_record_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F30: a record cut short (by a hard kill before the atomic write existed,
+    or by anything else) names no group anyone can check, so the resume stops
+    and says where the record is and how to look at it."""
+    root = tmp_path / "fc"
+    monkeypatch.setattr(fork_check, "root", lambda: root)
+    _jobs(root, "20261001-090000-a")
+    fork_check.set_status("20261001-090000-a", "replaying", "")
+    record = root / "results" / "20261001-090000-a" / "side-1" / "attempt-1" / "claude.pgid"
+    record.parent.mkdir(parents=True)
+    record.write_text('{"pgid": 12')
+    out = _refused_resume(root, "20261001-090000-a", monkeypatch, capsys)
+    assert f"{record} cannot be read" in out and f"cat {record}" in out
+    assert record.exists()
+
+
+def test_a_resume_is_refused_while_a_recorded_group_runs_without_its_leader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F30: the `claude` leader exited, but a child it started (a dev server)
+    still runs in its group. The leader's identity is gone, so the group cannot
+    be checked: the resume stops, naming the record and how to look at the group."""
+    root = tmp_path / "fc"
+    monkeypatch.setattr(fork_check, "root", lambda: root)
+    _jobs(root, "20261001-090000-a")
+    fork_check.set_status("20261001-090000-a", "replaying", "")
+    group = subprocess.Popen(
+        ["sh", "-c", "sleep 60 & echo $!"], start_new_session=True, stdout=subprocess.PIPE, text=True
+    )
+    assert group.stdout is not None
+    child = int(group.stdout.readline())
+    group.wait()  # the leader is gone; its child keeps the group alive
+    try:
+        record = root / "results" / "20261001-090000-a" / "side-1" / "attempt-1" / "claude.pgid"
+        record.parent.mkdir(parents=True)
+        leader = {"pgid": group.pid, "lstart": "Tue Sep 29 10:00:00 2026", "command": "claude --fork-session -p"}
+        record.write_text(json.dumps(leader) + "\n")
+        out = _refused_resume(root, "20261001-090000-a", monkeypatch, capsys)
+        assert str(record) in out and f"ps -o pid,pgid,lstart,command -g {group.pid}" in out
+        assert record.exists()
+        os.kill(child, 0)  # never killed
+    finally:
+        os.killpg(group.pid, signal.SIGKILL)
+        group.stdout.close()
+
+
+def test_a_group_record_is_written_whole_or_not_at_all(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """F30: the record is written to a temp file in the same folder, then put in
+    place with os.replace, so no half-written record is ever read."""
+    record = tmp_path / "claude.pgid"
+
+    def killed_here(*args: object) -> None:
+        raise OSError("the runner died here")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(os, "replace", killed_here)
+        with pytest.raises(OSError, match="died here"):
+            replay._record_group(record, os.getpid())
+    assert not record.exists()
+    replay._record_group(record, os.getpid())
+    assert json.loads(record.read_text())["pgid"] == os.getpid()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["claude.pgid"]
+
+
 def test_a_failed_group_record_still_kills_the_group(
     tmp_path: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1513,17 +1590,50 @@ def test_a_stop_signal_during_a_claude_call_kills_its_process_group(
     tmp_path: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch, stop: signal.Signals
 ) -> None:
     """F20, N2: SIGHUP (the terminal closing) is handled like SIGTERM, and both
-    old handlers are put back afterwards."""
-    before = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
+    old handlers are put back afterwards. The old handlers here are no-ops, so
+    the test holds even under `nohup`, and a missed signal cannot kill pytest."""
 
-    def send() -> None:
-        os.kill(os.getpid(), stop)
+    def nothing(signum: int, frame: object) -> None:
+        pass
 
-    _interrupted_during_the_wait(tmp_path, monkeypatch, send)
-    with pytest.raises(replay.Terminated):
-        replay.run_claude(tmp_path, "sid", "hello", {}, fake_claude, "claude-opus-5-5")
-    _wait_until_gone(int((tmp_path / "child.pid").read_text()))
-    assert {sig: signal.getsignal(sig) for sig in before} == before
+    previous = {sig: signal.signal(sig, nothing) for sig in (signal.SIGTERM, signal.SIGHUP)}
+    try:
+
+        def send() -> None:
+            os.kill(os.getpid(), stop)
+
+        _interrupted_during_the_wait(tmp_path, monkeypatch, send)
+        with pytest.raises(replay.Terminated):
+            replay.run_claude(tmp_path, "sid", "hello", {}, fake_claude, "claude-opus-5-5")
+        _wait_until_gone(int((tmp_path / "child.pid").read_text()))
+        assert {sig: signal.getsignal(sig) for sig in previous} == dict.fromkeys(previous, nothing)
+    finally:
+        replay._put_back(previous)
+
+
+def test_a_stop_signal_the_runner_ignores_stays_ignored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Under `nohup`, SIGHUP is SIG_IGN, and the runner leaves it so: a SIGHUP
+    during a claude call changes nothing, while SIGTERM is still handled."""
+    exe = tmp_path / "claude-hup"
+    exe.write_text('#!/bin/sh\nkill -HUP "$PPID"\nsleep 0.3\necho "{}"\n')
+    exe.chmod(0o755)
+    monkeypatch.setenv("JEV_FORK_CHECK_CLAUDE", str(exe))
+    during: dict[int, object] = {}
+
+    class SeesTheHandlers(subprocess.Popen):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            during.update({sig: signal.getsignal(sig) for sig in (signal.SIGHUP, signal.SIGTERM)})
+            super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(replay, "subprocess", types.SimpleNamespace(**{**vars(subprocess), "Popen": SeesTheHandlers}))
+    previous = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    try:
+        data, _, code, timed_out = replay.run_claude(tmp_path, "sid", "hello", {}, tmp_path / "home", "m")
+        assert (data, code, timed_out) == ({}, 0, False)
+        assert during == {signal.SIGHUP: signal.SIG_IGN, signal.SIGTERM: replay._raise_terminated}
+        assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
+    finally:
+        signal.signal(signal.SIGHUP, previous)
 
 
 def test_an_unknown_or_escaping_id_is_refused_before_anything_is_touched(

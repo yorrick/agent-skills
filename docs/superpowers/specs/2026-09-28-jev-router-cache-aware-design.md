@@ -236,10 +236,11 @@ the jobs the router selects, on the user's own work.
    rerun. A hook passed to both calls acts only in the warm-up, where it denies the
    first tool call and stops the run, so the warm-up writes the cache and changes
    nothing. The hook blocks the tool if it fails, it is tried with and without the
-   warm-up's marker before anything runs, and a warm-up whose transcript shows a tool
-   that ran ends the job at once. Every run is scored on what it really cost and took,
-   including a parent that kept a job it was told to delegate; the report counts these
-   overrides. The shadow log's Jev cost and latency over every
+   warm-up's marker before anything runs, a warm-up whose transcript shows a tool that
+   ran (or cannot show that none did) ends the job at once, and an attempt whose job
+   had a tool blocked by the failing hook is retried. Every run is scored on what it
+   really cost and took, including a parent that kept a job it was told to delegate;
+   the report counts these overrides. The shadow log's Jev cost and latency over every
    message in the check period are added to the delegate side.
 5. **Judge** quality by criteria fixed in advance: the project's tests pass where they
    exist, the job's stated outcome is met, and a blind review compares the two results

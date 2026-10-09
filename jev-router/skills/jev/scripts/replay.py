@@ -1230,21 +1230,27 @@ def _verify_reported_session(reported: object, new_files: list[Path]) -> None:
         raise RuntimeError(f"claude reported session {reported}, which is not among the session files it just wrote")
 
 
+def _subagent_entries(session_file: Path) -> list[dict]:
+    """Every entry of the session's subagent transcripts (all new: a subagent
+    never inherits the history)."""
+    subs_dir = session_file.with_suffix("") / "subagents"
+    return [e for sub in sorted(subs_dir.glob("*.jsonl")) for e in usage.read_entries(sub)] if subs_dir.exists() else []
+
+
 def _new_entries(session_file: Path, prompt: str) -> list[dict]:
     """A call's own entries: its session file's new turn (from `prompt`'s entry
     on, the slice `measure` scores) plus its subagents' transcripts, never the
     inherited history."""
-    subs_dir = session_file.with_suffix("") / "subagents"
-    subs = [e for sub in sorted(subs_dir.glob("*.jsonl")) for e in usage.read_entries(sub)] if subs_dir.exists() else []
-    return _turn(usage.read_entries(session_file), prompt) + subs
+    return _turn(usage.read_entries(session_file), prompt) + _subagent_entries(session_file)
 
 
 def _hook_rejected(entry: dict, block: dict) -> bool:
     """Whether a tool_result records a call a hook rejected, so its tool never
-    ran. Claude Code (2.1.295, seen in the trial clone's transcripts) records the
-    warm-up guard's denial as an is_error tool_result whose entry carries
-    `permissionDecision` {"decision": "reject", "source": "hook"}; a tool that
-    ran carries {"decision": "accept", ...} instead."""
+    ran. Claude Code 2.1.295 records it as an is_error tool_result whose entry
+    carries `permissionDecision` {"decision": "reject", "source": "hook"}, the
+    same shape whether the hook denied the tool or failed under
+    `"onFailure": "block"` (both seen in real transcripts); a tool that ran
+    carries {"decision": "accept", ...} instead."""
     decision = entry.get("permissionDecision")
     return (
         block.get("is_error") is True
@@ -1254,20 +1260,60 @@ def _hook_rejected(entry: dict, block: dict) -> bool:
     )
 
 
+def _tool_results(entries: list[dict]) -> list[tuple[dict, dict]]:
+    """Every tool_result block in `entries`, with the entry that holds it."""
+    found = []
+    for entry in entries:
+        content = (entry.get("message") or {}).get("content")
+        if isinstance(content, list):
+            found += [(entry, b) for b in content if isinstance(b, dict) and b.get("type") == "tool_result"]
+    return found
+
+
 def _ran_a_tool(new_files: list[Path], prompt: str) -> bool:
     """Whether a tool actually ran in any of `new_files`' own entries
     (`_new_entries`): any tool_result that is not a hook's rejection. A result
-    that does not look exactly like one counts as a tool that ran, so a
+    that does not look exactly like one counts as a tool that ran, and so does
+    a non-empty file with no entry carrying `prompt` (Ruling R4: its new turn
+    cannot be told from the history, so nothing shows that no tool ran), so a
     transcript this does not understand fails closed."""
     for f in new_files:
-        for entry in _new_entries(f, prompt):
-            content = (entry.get("message") or {}).get("content")
-            if not isinstance(content, list):
-                continue
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "tool_result" and not _hook_rejected(entry, block):
-                    return True
+        entries = usage.read_entries(f)
+        turn = _turn(entries, prompt)
+        if f.stat().st_size and not turn:
+            return True
+        if any(not _hook_rejected(entry, block) for entry, block in _tool_results(turn + _subagent_entries(f))):
+            return True
     return False
+
+
+def _hook_commands() -> list[str]:
+    """Every hook command SETTINGS gives Claude Code, read back from the very
+    string every call passes."""
+    groups = json.loads(SETTINGS)["hooks"]["PreToolUse"]
+    return [hook["command"] for group in groups for hook in group["hooks"]]
+
+
+def _result_text(block: dict) -> str:
+    content = block.get("content")
+    if isinstance(content, list):
+        return "\n".join(str(b.get("text", "")) for b in content if isinstance(b, dict))
+    return str(content or "")
+
+
+def _guard_blocked_a_tool(new_files: list[Path], prompt: str) -> bool:
+    """Whether the warm-up guard blocked a tool in a job (Ruling R5). The guard
+    prints nothing in a job, so a hook rejection there that names one of its
+    commands (Claude Code words a hook failure under `"onFailure": "block"` as
+    `[<command>]: failed; blocking because onFailure is "block"`) can only be the
+    guard failing. Rejections by any other hook (the user's own may deny tools
+    in a real job) are left alone."""
+    names = [f"[{command}]" for command in _hook_commands()]
+    return any(
+        _hook_rejected(entry, block) and any(name in _result_text(block) for name in names)
+        for f in new_files
+        for entry, block in _tool_results(_new_entries(f, prompt))
+    )
 
 
 def _leaked_real_path(new_files: list[Path], prompt: str, leak_forms: list[str]) -> bool:
@@ -1590,8 +1636,7 @@ def warmup_guard_passes_preflight() -> bool:
     exit 0 and print the stop-and-deny decision (`warmup_hook.STOP`); without
     it, each must exit 0 and print nothing. So the guard can neither let a
     warm-up's tool run nor stop a job."""
-    groups = json.loads(SETTINGS)["hooks"]["PreToolUse"]
-    commands = [hook["command"] for group in groups for hook in group["hooks"]]
+    commands = _hook_commands()
     job_env = {k: v for k, v in os.environ.items() if k != WARMUP_VAR}
     warmup_env = {**job_env, WARMUP_VAR: "1"}
     for command in commands:
@@ -1699,6 +1744,12 @@ def _replay_side(
         _verify_reported_session(data.get("session_id"), job_new_files)
         if job_timed_out:
             return side, "timed out"
+        # Reason (Ruling R5): if the guard failed during the job, its
+        # `"onFailure": "block"` rejected the job's own tools, so the job did
+        # not run as it really would; retried like a cold attempt.
+        if _guard_blocked_a_tool(job_new_files, job_prompt):
+            reason = "warm-up guard blocked a job tool"
+            continue
         if code != 0 or data.get("is_error"):
             reason = "crashed"
             continue

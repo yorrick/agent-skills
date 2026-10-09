@@ -20,7 +20,13 @@ Env vars the tests use to steer it:
                             that name the warm-up or the job key off this alone).
   JEV_ROUTER_NOTE_FILE      the call's tool is `Agent`, handing the job to the named helper.
   FAKE_CLAUDE_HOOK_FAILS=<warmup|job>  in that call, every hook command fails to start (as if
-                            its interpreter had gone: exit 127) instead of running.
+                            its interpreter had gone: exit 127) instead of running. A hook with
+                            `"onFailure": "block"` then blocks the tool with the real CLI's
+                            message: `[<command>]: failed; blocking because onFailure is "block"`.
+  FAKE_CLAUDE_OTHER_HOOK_DENIES=<warmup|job>  in that call, a PreToolUse hook of the user's own
+                            (not one `--settings` names) denies the tool, as a real job's hooks may.
+  FAKE_CLAUDE_PROMPT_RECORDED_AS=<text>  the warm-up records its user entry with this text instead
+                            of its prompt, so nothing in its transcript matches the prompt.
   FAKE_CLAUDE_COLD_WARMUP   every warm-up call is cold: no priced call at all.
   FAKE_CLAUDE_COLD_WARMUP_ONCE=<path>  only the first warm-up call ever seen (tracked in the
                             named counter file) is cold; later ones are warm.
@@ -60,6 +66,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -130,21 +137,27 @@ def run_hooks() -> tuple[bool, bool, str]:
         return False, False, ""
     settings = json.loads(args[args.index("--settings") + 1])
     hook_input = json.dumps({"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": {}})
-    fails = os.environ.get("FAKE_CLAUDE_HOOK_FAILS") == ("warmup" if warm else "job")
+    call = "warmup" if warm else "job"
+    fails = os.environ.get("FAKE_CLAUDE_HOOK_FAILS") == call
     blocked, stopped, reason = False, False, ""
+    if os.environ.get("FAKE_CLAUDE_OTHER_HOOK_DENIES") == call:
+        blocked, reason = True, "the user's own policy hook denies this tool"
     for group in (settings.get("hooks") or {}).get("PreToolUse") or []:
         for hook in group.get("hooks") or []:
+            command = hook["command"]
             if fails:
-                code, out, err = 127, "", f"/bin/sh: {hook['command']}: command not found"
+                code, out, err = 127, "", f"/bin/sh: {shlex.split(command)[0]}: No such file or directory"
             else:
-                done = subprocess.run(hook["command"], shell=True, input=hook_input, capture_output=True, text=True)
+                done = subprocess.run(command, shell=True, input=hook_input, capture_output=True, text=True)
                 code, out, err = done.returncode, done.stdout, done.stderr
             if code == 2:
                 blocked, reason = True, err.strip()
             elif code != 0:
-                # Reason: a failed hook does not block the tool unless it says so.
+                # Reason: a failed hook does not block the tool unless it says so; when
+                # it does, the result reads as Claude Code 2.1.295 words it.
                 if hook.get("onFailure") == "block":
-                    blocked, reason = True, f"hook failed with exit code {code}: {err.strip()}"
+                    detail = err.strip() or "No stderr output"
+                    blocked, reason = True, f'[{command}]: failed; blocking because onFailure is "block"\n{detail}'
             elif out.strip():
                 try:
                     decision = json.loads(out)
@@ -163,7 +176,8 @@ entries = [json.loads(line) for line in (pdir / f"{sid}.jsonl").read_text().spli
 new = str(uuid.uuid4())
 # Reason: a real headless prompt carries no `origin`; only an interactive session's
 # typed message does.
-entries.append({"type": "user", "sessionId": new, "message": {"content": prompt}})
+recorded = (os.environ.get("FAKE_CLAUDE_PROMPT_RECORDED_AS") if warm else None) or prompt
+entries.append({"type": "user", "sessionId": new, "message": {"content": recorded}})
 
 cold_warmup = warm and os.environ.get("FAKE_CLAUDE_COLD_WARMUP") == "1"
 if warm and (once := os.environ.get("FAKE_CLAUDE_COLD_WARMUP_ONCE")):

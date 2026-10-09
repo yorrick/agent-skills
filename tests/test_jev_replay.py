@@ -1437,15 +1437,105 @@ def test_ran_a_tool_reads_the_new_turn_and_its_subagents(
     subagents' transcripts, that is not a rejection by a hook counts as a tool
     that ran; anything that does not look exactly like one fails closed. The
     inherited history, where the real session's tools ran, never counts."""
-    tool_use = {
-        "type": "assistant",
-        "message": {"content": [{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {}}]},
-    }
-    session = write(tmp_path / "s.jsonl", [*history, typed("do it"), tool_use, *turn])
+    session = write(tmp_path / "s.jsonl", [*history, typed("do it"), TOOL_USE, *turn])
     if subagent:
         (tmp_path / "s" / "subagents").mkdir(parents=True)
         write(tmp_path / "s" / "subagents" / "agent-1.jsonl", subagent)
     assert replay._ran_a_tool([session], "do it") is ran
+
+
+TOOL_USE = {
+    "type": "assistant",
+    "message": {"content": [{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {}}]},
+}
+
+
+def test_ran_a_tool_fails_closed_when_the_turn_cannot_be_found(tmp_path: Path) -> None:
+    """Ruling R4: a session file with entries but none carrying the prompt cannot
+    show that no tool ran, so it counts as one that did. An empty file, where
+    nothing was recorded at all, does not."""
+    session = write(tmp_path / "s.jsonl", [typed("recorded some other way"), TOOL_USE, DENIED_BY_THE_GUARD])
+    assert replay._ran_a_tool([session], "do it") is True
+    assert replay._ran_a_tool([write(tmp_path / "empty.jsonl", [])], "do it") is False
+
+
+def test_a_warmup_whose_turn_cannot_be_found_ends_the_pair(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling R4, end to end: a warm-up transcript with a tool_result but no entry
+    matching the prompt ends the pair at once as "warm-up ran a tool", instead
+    of being retried as never warm."""
+    monkeypatch.setenv("FAKE_CLAUDE_PROMPT_RECORDED_AS", "the message, recorded some other way")
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert result["inconclusive"] and result["reason"] == "warm-up ran a tool"
+    assert [c["warmup"] for c in calls_log(tmp_path)] == [True]
+
+
+def guard_failure(command: str) -> str:
+    """A blocked tool_result's text as Claude Code 2.1.295 words a hook failure
+    under `"onFailure": "block"`."""
+    return f'PreToolUse:Bash hook error: [{command}]: failed; blocking because onFailure is "block"\nNo stderr output'
+
+
+def rejected(text: str) -> dict:
+    return {
+        **DENIED_BY_THE_GUARD,
+        "message": {"role": "user", "content": [{**DENIED_BY_THE_GUARD["message"]["content"][0], "content": text}]},
+    }
+
+
+@pytest.mark.parametrize(
+    ("turn", "subagent", "blocked"),
+    [
+        ([rejected(guard_failure(HOOK_COMMAND))], [], True),
+        ([], [rejected(guard_failure(HOOK_COMMAND))], True),
+        ([rejected(guard_failure("sh -c 'exit 1'"))], [], False),
+        ([rejected("PreToolUse:Bash hook error: the user's own policy hook denies this tool")], [], False),
+        ([{**rejected(guard_failure(HOOK_COMMAND)), "permissionDecision": RAN["permissionDecision"]}], [], False),
+        ([RAN], [], False),
+    ],
+    ids=["ours", "ours-in-a-subagent", "another-hook-failed", "another-hook-denied", "not-a-rejection", "ran"],
+)
+def test_guard_blocked_a_tool_names_only_our_own_guard(
+    tmp_path: Path, turn: list[dict], subagent: list[dict], blocked: bool
+) -> None:
+    """Ruling R5: in a job, a hook rejection whose text names `[<command>]` for a
+    hook command in SETTINGS can only be our guard failing (it never denies in a
+    job). Another hook's rejection, the user's own, is a real job's business."""
+    session = write(tmp_path / "s.jsonl", [typed("do it"), TOOL_USE, *turn])
+    if subagent:
+        (tmp_path / "s" / "subagents").mkdir(parents=True)
+        write(tmp_path / "s" / "subagents" / "agent-1.jsonl", subagent)
+    assert replay._guard_blocked_a_tool([session], "do it") is blocked
+
+
+def test_a_job_tool_blocked_by_a_failing_guard_is_retried_then_inconclusive(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling R5: if the guard fails during the job, `"onFailure": "block"` rejects
+    the job's own tools, and the job must not be scored as if it were real. The
+    attempt is retried like a cold one, in a fresh clone; when every attempt
+    shows it, the side (and the pair) ends inconclusive with that reason."""
+    monkeypatch.setenv("FAKE_CLAUDE_HOOK_FAILS", "job")
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert result["inconclusive"] and result["reason"] == "warm-up guard blocked a job tool"
+    first = result["order"][0]
+    assert list(result["sides"]) == [first]
+    assert result["sides"][first]["attempt"] == replay.ATTEMPTS
+    calls = calls_log(tmp_path)
+    assert [(c["warmup"], c["tool_ran"]) for c in calls] == [(True, False), (False, False)] * replay.ATTEMPTS
+
+
+def test_a_job_tool_denied_by_another_hook_is_scored_normally(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling R5: the user's own hooks legitimately deny tools in real jobs; such a
+    rejection is part of the job and never makes it inconclusive."""
+    monkeypatch.setenv("FAKE_CLAUDE_OTHER_HOOK_DENIES", "job")
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert not result["inconclusive"], result["reason"]
+    assert all(side["warm"] and side["attempt"] == 1 for side in result["sides"].values())
+    assert [c["tool_ran"] for c in calls_log(tmp_path) if not c["warmup"]] == [False, False]
 
 
 def test_install_session_rewrites_the_main_worktree_and_home_forms_but_not_a_similar_path(

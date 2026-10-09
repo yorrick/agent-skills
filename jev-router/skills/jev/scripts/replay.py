@@ -256,7 +256,12 @@ def restore(snap: Path, dest: Path, *, copy_ignored: bool = True) -> Path:
             raise Inconclusive("dependencies or .env files changed since the snapshot")
     dest.mkdir(parents=True)
     bare, clone = dest / "origin.git", dest / "repo"
-    run_on_source("git", "clone", "-q", "--bare", str(top), str(bare))
+    # Reason: a clone from a local path hard-links the object files, so a chmod
+    # or an in-place write inside the copy would reach the real `.git/objects`;
+    # `--no-hardlinks` copies them. The fetch below goes through the pack
+    # protocol and never links, and the clone of the bare copy only links
+    # scratch files to scratch files.
+    run_on_source("git", "clone", "-q", "--bare", "--no-hardlinks", str(top), str(bare))
     # Reason: the bare copy has already fetched everything it needs; dropping
     # "origin" leaves it with no configured path back to the source.
     run("git", "-C", str(bare), "remote", "remove", "origin")
@@ -1014,7 +1019,29 @@ def refuse_if_ignored_leaked(clone: Path, ignored: list[str], label: str) -> Non
 
 
 DEFAULT_CLAUDE_HOME = Path.home() / ".claude"
-WARMUP = "Reply with the single word ok and do nothing else."
+# Reason: a prompt-cache entry ends with the exact request that wrote it, so a
+# warm-up warms the job's first call only if it sends that very request: the
+# job's own message and environment, with the same flags. These settings go to
+# every call, warm-up and job alike, and their one hook (warmup_hook.py) acts
+# only when WARMUP_VAR is "1": it denies the warm-up's first tool and stops it.
+# The hook runs by absolute path with this interpreter, never through the user's
+# shell or PATH. Built once, so the two argv are byte-identical.
+WARMUP_VAR = "JEV_FORK_CHECK_WARMUP"
+WARMUP_HOOK = Path(__file__).resolve().with_name("warmup_hook.py")
+SETTINGS = json.dumps(
+    {
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "*",
+                    "hooks": [
+                        {"type": "command", "command": f"{shlex.quote(sys.executable)} {shlex.quote(str(WARMUP_HOOK))}"}
+                    ],
+                }
+            ]
+        }
+    }
+)
 ATTEMPTS = 3
 TIMEOUT_SECONDS = 4 * 3600
 LARGE_CONTEXT = 200_000
@@ -1369,7 +1396,9 @@ def run_claude(
 ) -> tuple[dict, float, int, bool]:
     """One headless fork of the session, with the same access as the user's own
     session. The prompt is the last argument, after `--`, so a message that
-    starts with `-` is never parsed as an option. A key in `env_extra` mapped
+    starts with `-` is never parsed as an option. Every call gets the same
+    `--settings` (SETTINGS), so a warm-up and its job differ only in their
+    environment, never in their argv. A key in `env_extra` mapped
     to None is removed from the environment instead of set, so a call can
     strip a variable it must never inherit. The fourth return value is True
     only for a call this killed after TIMEOUT_SECONDS; the exit code next to it
@@ -1387,6 +1416,8 @@ def run_claude(
         "-p",
         "--output-format",
         "json",
+        "--settings",
+        SETTINGS,
         "--permission-mode",
         "bypassPermissions",
         "--model",
@@ -1500,11 +1531,15 @@ def _replay_side(
     leak, a timeout or an unpriced call ends the side (and, via the caller,
     the whole pair) at once, without retrying: none of the three would be
     fixed by a fresh clone."""
-    job_env = {"JEV_ROUTER_NOTE_FILE": str(snap / "note.txt")} if name == "delegate" else {"JEV_ROUTER_NOTE_FILE": None}
-    # Reason: the warm-up is never the job; it must never be handed the note,
-    # on either side, or a hook that returns the note for any prompt would
-    # tell the "reply ok" warm-up itself to delegate.
-    warmup_env = {"JEV_ROUTER_NOTE_FILE": None}
+    note = {"JEV_ROUTER_NOTE_FILE": str(snap / "note.txt") if name == "delegate" else None}
+    # Reason: the warm-up's first request must equal the job's (a cache entry
+    # ends with the request that wrote it), so it gets exactly the job's
+    # environment, the note included, and differs only by WARMUP_VAR, which
+    # makes warmup_hook.py stop it before any tool runs. The job removes the
+    # variable, so a value inherited from the runner never turns it into a
+    # warm-up.
+    job_env = {**note, WARMUP_VAR: None}
+    warmup_env = {**note, WARMUP_VAR: "1"}
     side: dict = {}
     reason = ""
     for attempt in range(1, ATTEMPTS + 1):
@@ -1526,18 +1561,19 @@ def _replay_side(
         side = {"attempt": attempt, "clone": str(clone), "warm": False, "skipped": skipped}
         before_status = run("git", "-C", str(clone), "status", "--porcelain", "-uall")
         before_head = run("git", "-C", str(clone), "rev-parse", "HEAD").strip()
-        # Reason: the warm-up forks the same conversation with the same tools
-        # and system prompt, so the side's first call can read it from cache.
+        # Reason: the warm-up sends the job's own first request (same session,
+        # message, settings and model), so the job's first call can read all of
+        # it from cache; the hook stops the warm-up before its first tool.
         before_files = _session_file_names(pdir)
         warm_data, _, warm_code, warm_timed_out = run_claude(
-            cwd, sid, WARMUP, warmup_env, claude_home, model, pgid_file=dest / "claude.pgid"
+            cwd, sid, job_prompt, warmup_env, claude_home, model, pgid_file=dest / "claude.pgid"
         )
         warm_new_files = _new_session_files(pdir, before_files)
         # Reason: every attempt is scanned, whether it succeeded, crashed or
         # timed out, since a leak can happen before a call ever fails. The scan
         # comes before the session-id check, so a call whose reported id does
         # not match is still scanned rather than lost to that error.
-        if _leaked_real_path(warm_new_files, WARMUP, leak_forms):
+        if _leaked_real_path(warm_new_files, job_prompt, leak_forms):
             return side, "a replay used a path into the real repository"
         _verify_reported_session(warm_data.get("session_id"), warm_new_files)
         if warm_timed_out:
@@ -1551,7 +1587,7 @@ def _replay_side(
             reason = "warm-up changed the clone"
             continue
         warm_sid = str(warm_data.get("session_id") or "")
-        warm = measure(claude_home, cwd, warm_sid, WARMUP, "")
+        warm = measure(claude_home, cwd, warm_sid, job_prompt, "")
         if warm["calls"] == 0:
             reason = "never warm"
             continue

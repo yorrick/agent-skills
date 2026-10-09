@@ -1,10 +1,20 @@
 #!/usr/bin/env python3
-"""A stand-in for `claude --resume ID --fork-session -p --output-format json
+"""A stand-in for `claude --resume ID --fork-session -p --output-format json --settings JSON
 --permission-mode bypassPermissions --model M -- PROMPT`: forks the session file, appends the
 prompt and one model call, and prints the JSON result.
 
+A call is a warm-up when JEV_FORK_CHECK_WARMUP is "1", exactly as the runner marks one; the
+argv never tells the two apart, since a warm-up sends the job's own request. Like the real
+CLI before a tool call, every call runs the PreToolUse hook commands its `--settings` name
+(here through /bin/sh), and its one "tool" (writing RESULT.txt, plus handing
+the job to the helper when a note is set) runs only if no hook stopped it. A warm-up whose
+hook fails to stop it therefore changes the clone, just as a real one would.
+
 Env vars the tests use to steer it:
-  JEV_ROUTER_NOTE_FILE      hands the job to the named helper and writes a subagent transcript.
+  JEV_FORK_CHECK_WARMUP     "1" marks the call as a warm-up (the FAKE_CLAUDE_* switches below
+                            that name the warm-up or the job key off this alone).
+  JEV_ROUTER_NOTE_FILE      unless a hook stops the call, hands the job to the named helper and
+                            writes a subagent transcript.
   FAKE_CLAUDE_COLD_WARMUP   every warm-up call is cold: no priced call at all.
   FAKE_CLAUDE_COLD_WARMUP_ONCE=<path>  only the first warm-up call ever seen (tracked in the
                             named counter file) is cold; later ones are warm.
@@ -31,10 +41,15 @@ Env vars the tests use to steer it:
   FAKE_CLAUDE_HANG_AFTER_WRITE  the job call writes its session file (and any injected leak) and
                             RESULT.txt as usual, logs the call, then hangs before printing its
                             JSON result: a timeout whose transcript is still there to scan.
-  FAKE_CLAUDE_LOG           appends each call's details to a file, including the names of the
-                            CLAUDE* variables it inherited, and its HOME and PATH.
+  FAKE_CLAUDE_LOG           appends each call's details to a file: its full argv, whether it was
+                            a warm-up (and the raw JEV_FORK_CHECK_WARMUP value), its
+                            JEV_ROUTER_NOTE_FILE, whether a hook stopped it, the names of the
+                            CLAUDE* variables it inherited, its HOME and PATH, and a digest of
+                            its whole environment except JEV_FORK_CHECK_WARMUP (a digest, so no
+                            value of the test runner's own environment is written out).
 """
 
+import hashlib
 import json
 import os
 import re
@@ -49,15 +64,22 @@ sid = args[args.index("--resume") + 1]
 prompt = args[args.index("--") + 1]
 home = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
 pdir = home / "projects" / re.sub(r"[^A-Za-z0-9-]", "-", os.getcwd())
-warm = prompt.startswith("Reply with the single word")
+warm = os.environ.get("JEV_FORK_CHECK_WARMUP") == "1"
 note = os.environ.get("JEV_ROUTER_NOTE_FILE")
+env_digest = hashlib.sha256(
+    json.dumps(sorted((k, v) for k, v in os.environ.items() if k != "JEV_FORK_CHECK_WARMUP")).encode()
+).hexdigest()
 
 
 def log(**extra: object) -> None:
     if path := os.environ.get("FAKE_CLAUDE_LOG"):
         with open(path, "a") as handle:
             entry = {
+                "argv": sys.argv,
                 "args": args,
+                "warmup": warm,
+                "warmup_var": os.environ.get("JEV_FORK_CHECK_WARMUP"),
+                "env_digest": env_digest,
                 "cwd": os.getcwd(),
                 "note": note,
                 "router": os.environ.get("JEV_ROUTER"),
@@ -74,7 +96,10 @@ if not sleep_pidfile and not warm:
     sleep_pidfile = os.environ.get("FAKE_CLAUDE_SLEEP_CHILD_JOB")
 if sleep_pidfile:
     child = subprocess.Popen(["sleep", "60"])
-    Path(sleep_pidfile).write_text(str(child.pid))
+    # Reason: written whole, then renamed into place, so a test that interrupts
+    # the call as soon as the pid file exists never reads it empty.
+    Path(f"{sleep_pidfile}.tmp").write_text(str(child.pid))
+    os.replace(f"{sleep_pidfile}.tmp", sleep_pidfile)
     # Reason: logged only once the pid file exists, so a test can wait for this
     # line before starting a timeout clock that would otherwise race the write.
     log(hung=True)
@@ -84,6 +109,27 @@ if sleep_pidfile:
 if not warm and os.environ.get("FAKE_CLAUDE_CRASH") == "1":
     log(crashed=True)
     sys.exit(1)
+
+
+def hook_stops() -> bool:
+    """Run every PreToolUse hook command `--settings` names, through /bin/sh, and
+    report whether one answered `"continue": false`, which stops the call before
+    its tool runs."""
+    if "--settings" not in args:
+        return False
+    settings = json.loads(args[args.index("--settings") + 1])
+    hook_input = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}})
+    for group in (settings.get("hooks") or {}).get("PreToolUse") or []:
+        for hook in group.get("hooks") or []:
+            done = subprocess.run(hook["command"], shell=True, input=hook_input, capture_output=True, text=True)
+            if done.returncode != 0:
+                sys.exit(f"fake claude: hook {hook['command']!r} exited {done.returncode}: {done.stderr}")
+            if done.stdout.strip() and json.loads(done.stdout).get("continue") is False:
+                return True
+    return False
+
+
+stopped = hook_stops()
 
 entries = [json.loads(line) for line in (pdir / f"{sid}.jsonl").read_text().splitlines()]
 new = str(uuid.uuid4())
@@ -102,7 +148,7 @@ if warm and os.environ.get("FAKE_CLAUDE_DIRTY_WARMUP") == "1":
     Path("dirty.txt").write_text("a warm-up should never leave this behind\n")
 
 content: list[dict] = [{"type": "text", "text": "ok"}]
-if note and not warm:
+if note and not stopped:
     helper = re.search(r"`(jev-router:[a-z]+)`", Path(note).read_text())
     content = [
         {
@@ -163,9 +209,9 @@ if not cold_warmup:
         }
     )
 (pdir / f"{new}.jsonl").write_text("".join(json.dumps(e) + "\n" for e in entries))
-if not warm:
+if not stopped:
     Path("RESULT.txt").write_text(f"done by {'delegate' if note else 'keep'}\n")
-log()
+log(hook_stopped=stopped)
 if not warm and os.environ.get("FAKE_CLAUDE_HANG_AFTER_WRITE") == "1":
     # Reason: the session file (and any leak in it) is already on disk; this
     # simulates a run the caller's timeout has to kill, not a clean exit.

@@ -1,7 +1,7 @@
 {
   "name": "jev-router",
   "description": "Asks Jev (via OpenRouter) how long each job will run and, in Claude Code, whether a fresh subagent would do it cheaper. Starts in shadow mode. Off until you turn it on with /jev on.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "author": {
     "name": "Yorrick Jansen"
   },

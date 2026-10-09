@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import shlex
 import shutil
 import signal
 import stat
@@ -49,6 +50,22 @@ def test_restore_rebuilds_the_working_copy_with_a_local_origin(tmp_path: Path, r
     assert git(clone, "rev-parse", "refs/jev/start^").strip() == head
     # Ruling T9e: the bare copy has no configured path back to the source.
     assert git(tmp_path / "r" / "origin.git", "remote").strip() == ""
+
+
+def _file_inodes(root: Path) -> set[tuple[int, int]]:
+    return {(st.st_dev, st.st_ino) for p in root.rglob("*") if p.is_file() and not p.is_symlink() for st in [p.lstat()]}
+
+
+def test_restore_shares_no_object_file_with_the_source(tmp_path: Path, repo: Path, snap: Path) -> None:
+    """A local `git clone` hard-links the object files it copies, so a chmod or an
+    in-place write inside a clone would reach the user's real `.git/objects`.
+    Nothing restore makes (the bare copy, or the clone of it) may share an inode
+    with the source repository's objects."""
+    source = _file_inodes(repo / ".git" / "objects")
+    assert source
+    replay.restore(snap, tmp_path / "r")
+    assert _file_inodes(tmp_path / "r" / "origin.git" / "objects")
+    assert not source & _file_inodes(tmp_path / "r")
 
 
 def test_changed_dependencies_make_the_job_inconclusive(tmp_path: Path, repo: Path, snap: Path) -> None:
@@ -586,7 +603,9 @@ def job_times_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     class JobTimeoutPopen(subprocess.Popen):
         def __init__(self, cmd: list[str], **kwargs) -> None:
-            self.warmup = cmd[-1] == replay.WARMUP
+            # Reason: a warm-up sends the job's own argv; only its environment says
+            # which call it is.
+            self.warmup = (kwargs.get("env") or {}).get("JEV_FORK_CHECK_WARMUP") == "1"
             self.logged_before = logged()
             super().__init__(cmd, **kwargs)
 
@@ -623,11 +642,9 @@ def test_pair_runs_both_sides_and_only_delegate_gets_the_note(tmp_path: Path, sn
     assert not any("keep" in p or "delegate" in p for p in under_work)
     calls = calls_log(tmp_path)
     assert all(c["router"] == "off" for c in calls)
-    assert [c["note"] is not None for c in calls if not prompt_of(c).startswith("Reply")] == [
-        name == "delegate" for name in result["order"]
-    ]
-    # Ruling T11f New 2: the warm-up never gets the note, on either side.
-    assert all(c["note"] is None for c in calls if prompt_of(c).startswith("Reply"))
+    assert [c["note"] is not None for c in calls if not c["warmup"]] == [name == "delegate" for name in result["order"]]
+    # 0.3.1 reverses Ruling T11f New 2: the warm-up gets exactly the job's note
+    # (test_both_calls_of_a_side_get_the_same_note_file).
     # Ruling T11e-i: the subagent's call is counted in the delegate side's cost, not
     # just its call count.
     p = usage.load_prices()["claude-opus-5-5"]
@@ -695,7 +712,7 @@ def test_cold_warmup_never_runs_the_job(
     assert list(result["sides"]) == [first]
     assert result["sides"][first]["attempt"] == replay.ATTEMPTS
     calls = calls_log(tmp_path)
-    assert calls and all(prompt_of(c).startswith("Reply") for c in calls)
+    assert calls and all(c["warmup"] for c in calls)
 
 
 def test_cold_attempt_is_retried_then_the_next_attempt_is_scored(
@@ -808,7 +825,7 @@ def test_job_timeout_gives_the_reason_timed_out(
     # Ruling T11h Minor 3: the warm-up finished and the job was the call that hung,
     # so the reason comes from the job's own timeout branch, not the warm-up's.
     calls = calls_log(tmp_path)
-    assert [(prompt_of(c) == replay.WARMUP, c.get("hung", False)) for c in calls] == [(True, False), (False, True)]
+    assert [(c["warmup"], c.get("hung", False)) for c in calls] == [(True, False), (False, True)]
 
 
 def test_timeout_after_a_leak_reports_the_leak_not_timed_out(
@@ -835,7 +852,7 @@ def test_timeout_after_a_leak_reports_the_leak_not_timed_out(
     assert status["status"] == "inconclusive"
     assert status["reason"] == "a replay used a path into the real repository"
     # Ruling T11h Minor 3: the warm-up finished, then the job ran (and hung).
-    assert [prompt_of(c) == replay.WARMUP for c in calls_log(tmp_path)] == [True, False]
+    assert [c["warmup"] for c in calls_log(tmp_path)] == [True, False]
     # Ruling T11h: cmd_replay found its Claude Code home through CLAUDE_CONFIG_DIR,
     # which conftest points into tmp_path, never the user's real ~/.claude.
     assert list((tmp_path / "claude-config" / "projects").glob("*/*.jsonl"))
@@ -1039,9 +1056,9 @@ def test_job_prompt_is_rewritten_before_it_reaches_claude(tmp_path: Path, repo: 
     result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
     assert not result["inconclusive"]
     calls = calls_log(tmp_path)
-    job_calls = [c for c in calls if not prompt_of(c).startswith("Reply")]
-    assert job_calls
-    for c in job_calls:
+    # Reason: since 0.3.1 the warm-up sends the job's own (rewritten) message too.
+    assert [c["warmup"] for c in calls] == [True, False, True, False]
+    for c in calls:
         assert str(repo) not in prompt_of(c)
         assert prompt_of(c).endswith("/x.py, please")
 
@@ -1121,6 +1138,119 @@ def test_history_naming_a_sibling_checkout_is_not_flagged(tmp_path: Path, repo: 
     snap = tmp_path / "fc" / "snapshots" / sid
     result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
     assert not result["inconclusive"]
+
+
+# --- 0.3.1: the warm-up sends the job's own request -------------------------------------
+
+WARMUP_HOOK = SCRIPTS / "warmup_hook.py"
+# The hook's exact output in a warm-up, kept verbatim so a reworded one is caught too.
+STOP_TEXT = (
+    '{"continue": false, "stopReason": "fork-check warm-up", "hookSpecificOutput": '
+    '{"hookEventName": "PreToolUse", "permissionDecision": "deny", '
+    '"permissionDecisionReason": "fork-check warm-up: no tools"}}'
+)
+
+
+def warmups_and_jobs(calls: list[dict]) -> list[tuple[dict, dict]]:
+    """The calls log as (warm-up, job) pairs, in the order they ran."""
+    assert [c["warmup"] for c in calls] == [True, False] * (len(calls) // 2)
+    return list(zip(calls[::2], calls[1::2], strict=True))
+
+
+def test_warmup_and_job_send_byte_identical_requests(tmp_path: Path, snap: Path, fake_claude: Path) -> None:
+    """A prompt-cache entry ends with the exact request that wrote it, so the
+    job's first request reads the warm-up's entry only if it is the very same
+    request: the same message, `--settings`, model and flags, from the same
+    folder. Only JEV_FORK_CHECK_WARMUP tells the two apart, and the hook it
+    switches on is what stops the warm-up before any tool runs."""
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert not result["inconclusive"], result["reason"]
+    pairs = warmups_and_jobs(calls_log(tmp_path))
+    assert len(pairs) == 2
+    for warm, job in pairs:
+        assert warm["argv"] == job["argv"]
+        assert warm["cwd"] == job["cwd"]
+        assert "--settings" in job["args"]
+        assert warm["env_digest"] == job["env_digest"]
+        assert (warm["warmup_var"], job["warmup_var"]) == ("1", None)
+        assert (warm["hook_stopped"], job["hook_stopped"]) == (True, False)
+    # Reason: the two sides resume different session copies, but every call
+    # carries the very same settings string.
+    settings = {c["args"][c["args"].index("--settings") + 1] for pair in pairs for c in pair}
+    assert len(settings) == 1
+
+
+def test_both_calls_of_a_side_get_the_same_note_file(tmp_path: Path, snap: Path, fake_claude: Path) -> None:
+    """The jev-router hook adds the note to the first request, so the warm-up must
+    get exactly the job's note (this reverses Ruling T11f New 2): on the
+    delegate side both calls get the snapshot's note file, on the keep side
+    neither has one. The hook still stops the delegate warm-up before it can
+    hand anything to the helper."""
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert not result["inconclusive"], result["reason"]
+    pairs = warmups_and_jobs(calls_log(tmp_path))
+    note = {"delegate": str(snap / "note.txt"), "keep": None}
+    assert [(warm["note"], job["note"]) for warm, job in pairs] == [(note[n], note[n]) for n in result["order"]]
+    assert result["sides"]["delegate"]["delegated"] is True
+    assert Path(result["sides"]["delegate"]["clone"], "RESULT.txt").read_text() == "done by delegate\n"
+
+
+def test_an_inherited_warmup_variable_never_reaches_the_job(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A JEV_FORK_CHECK_WARMUP=1 left in the runner's own environment must never
+    turn a job into a warm-up: the job's environment removes the variable."""
+    monkeypatch.setenv("JEV_FORK_CHECK_WARMUP", "1")
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert not result["inconclusive"], result["reason"]
+    pairs = warmups_and_jobs(calls_log(tmp_path))
+    assert [(warm["warmup_var"], job["warmup_var"]) for warm, job in pairs] == [("1", None), ("1", None)]
+    for name in ("keep", "delegate"):
+        assert Path(result["sides"][name]["clone"], "RESULT.txt").read_text() == f"done by {name}\n"
+
+
+def run_warmup_hook(value: str | None) -> subprocess.CompletedProcess[str]:
+    env = {k: v for k, v in os.environ.items() if k != "JEV_FORK_CHECK_WARMUP"}
+    if value is not None:
+        env["JEV_FORK_CHECK_WARMUP"] = value
+    hook_input = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}})
+    return subprocess.run([sys.executable, str(WARMUP_HOOK)], input=hook_input, env=env, capture_output=True, text=True)
+
+
+def test_warmup_hook_stops_and_denies_during_a_warmup() -> None:
+    done = run_warmup_hook("1")
+    assert done.returncode == 0
+    assert json.loads(done.stdout) == json.loads(STOP_TEXT)
+    assert done.stdout.strip() == STOP_TEXT
+
+
+@pytest.mark.parametrize("value", [None, "", "0", "true"])
+def test_warmup_hook_prints_nothing_outside_a_warmup(value: str | None) -> None:
+    done = run_warmup_hook(value)
+    assert (done.returncode, done.stdout) == (0, "")
+
+
+def test_settings_run_the_warmup_hook_by_absolute_path_with_this_interpreter(
+    tmp_path: Path, snap: Path, fake_claude: Path
+) -> None:
+    """The `--settings` every call gets parses as JSON and holds one PreToolUse
+    hook for every tool, whose command runs warmup_hook.py by absolute path with
+    the runner's own interpreter, so it never depends on the user's login shell
+    (theirs is fish) or PATH. Run through /bin/sh, it stops a warm-up."""
+    replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    args = calls_log(tmp_path)[0]["args"]
+    settings = json.loads(args[args.index("--settings") + 1])
+    assert list(settings) == ["hooks"] and list(settings["hooks"]) == ["PreToolUse"]
+    (group,) = settings["hooks"]["PreToolUse"]
+    assert group["matcher"] == "*"
+    (hook,) = group["hooks"]
+    assert hook["type"] == "command"
+    command = shlex.split(hook["command"])
+    assert command == [sys.executable, str(WARMUP_HOOK)]
+    assert Path(command[1]).is_absolute() and Path(command[1]).name == "warmup_hook.py"
+    env = {**os.environ, "JEV_FORK_CHECK_WARMUP": "1"}
+    done = subprocess.run(["/bin/sh", "-c", hook["command"]], env=env, capture_output=True, text=True)
+    assert json.loads(done.stdout) == json.loads(STOP_TEXT)
 
 
 def test_install_session_rewrites_the_main_worktree_and_home_forms_but_not_a_similar_path(

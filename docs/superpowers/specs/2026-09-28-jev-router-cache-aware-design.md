@@ -225,10 +225,14 @@ the jobs the router selects, on the user's own work.
    copy; it never force-pushes and refuses if the result branches already exist.
 4. **Measure** API-equivalent cost, wall time and calls from the transcripts, subagents
    included, pricing every call by its recorded categories (cache reads, cache writes,
-   uncached input, output). Right before each side runs, a one-line throwaway fork of the
-   same transcript, with the same tools and settings and a prompt that asks only for a one-word reply, warms the cache (a fork without tools would cache a different prefix), and a pair is scored only when both
-   sides' first calls read the prefix from cache; otherwise it is rerun. Every run is scored on what
-   it really cost and took, including a parent that kept a job it was told to delegate;
+   uncached input, output). Right before each side runs, a throwaway fork warms the cache
+   by sending exactly the side's own first request: the same transcript, message,
+   environment (the delegate side's note included), settings and flags. It has to be
+   the same request, because a prompt-cache entry ends with the request that wrote it.
+   A hook passed to both calls acts only in the warm-up, where it denies the first tool
+   call and stops the run, so the warm-up writes the cache and changes nothing. A pair
+   is scored only when both sides' first calls read the prefix from cache; otherwise it
+   is rerun. Every run is scored on what it really cost and took, including a parent that kept a job it was told to delegate;
    the report counts these overrides. The shadow log's Jev cost and latency over every
    message in the check period are added to the delegate side.
 5. **Judge** quality by criteria fixed in advance: the project's tests pass where they

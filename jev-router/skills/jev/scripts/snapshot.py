@@ -70,10 +70,14 @@ def git(cwd: Path, *args: str, deadline: float | None = None) -> str:
     return _git_bytes(cwd, *args, deadline=deadline).decode()
 
 
-def _git_bytes(cwd: Path, *args: str, deadline: float | None = None) -> bytes:
+def _git_bytes(cwd: Path, *args: str, deadline: float | None = None, env: dict[str, str] | None = None) -> bytes:
+    """A git call with `env`, by default `git_env()`: the hook's own view."""
     try:
         result = subprocess.run(
-            ["git", "-C", str(cwd), *args], capture_output=True, timeout=_time_left(deadline), env=git_env()
+            ["git", "-C", str(cwd), *args],
+            capture_output=True,
+            timeout=_time_left(deadline),
+            env=git_env() if env is None else env,
         )
     except subprocess.TimeoutExpired:
         raise SnapshotError("snapshot ran out of time") from None
@@ -103,12 +107,13 @@ def trim_before_prompt(data: bytes, prompt: str) -> bytes:
     return data
 
 
-def ignored_entries(top: Path, *, deadline: float | None = None) -> list[str]:
+def ignored_entries(top: Path, *, deadline: float | None = None, env: dict[str, str] | None = None) -> list[str]:
     """Every path `git status` reports as ignored (files and directories both),
     relative to `top`. Shared by the snapshot's fingerprint and a replay's copy of
-    ignored setup files, so the two never disagree on what "ignored" means."""
+    ignored setup files, so the two never disagree on what "ignored" means. A
+    replay passes its own `env` (without git's repository-local variables)."""
     listing = _git_bytes(
-        top, "status", "--ignored", "--porcelain=v1", "-z", "--untracked-files=normal", deadline=deadline
+        top, "status", "--ignored", "--porcelain=v1", "-z", "--untracked-files=normal", deadline=deadline, env=env
     )
     return sorted(e[3:].decode().rstrip("/") for e in listing.split(b"\0") if e.startswith(b"!! "))
 

@@ -11,7 +11,14 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from replay import clone_spellings, copy_for_judge, refuse_if_ignored_leaked, refuse_if_unusable, restored_ignored
+from replay import (
+    clone_spellings,
+    copy_for_judge,
+    refuse_if_ignored_leaked,
+    refuse_if_unusable,
+    restored_ignored,
+    without_local_git_vars,
+)
 
 EXAMPLE = json.dumps(
     {
@@ -73,7 +80,9 @@ def run_codex(prompt: str, work: Path) -> str:
         "-",
     ]
     # Reason: a new session, so a timeout kills codex together with the test
-    # runs and servers it started, the way a timed-out replay is killed.
+    # runs and servers it started, the way a timed-out replay is killed. Without
+    # git's repository-local variables (Ruling R6), so a GIT_DIR inherited from
+    # the runner never points codex's own git commands at another repository.
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE,
@@ -81,6 +90,7 @@ def run_codex(prompt: str, work: Path) -> str:
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
+        env=without_local_git_vars(os.environ),
     )
     try:
         _, stderr = proc.communicate(prompt, timeout=TIMEOUT_SECONDS)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import shlex
 import shutil
 import signal
 import stat
@@ -49,6 +50,49 @@ def test_restore_rebuilds_the_working_copy_with_a_local_origin(tmp_path: Path, r
     assert git(clone, "rev-parse", "refs/jev/start^").strip() == head
     # Ruling T9e: the bare copy has no configured path back to the source.
     assert git(tmp_path / "r" / "origin.git", "remote").strip() == ""
+
+
+def _file_inodes(root: Path) -> set[tuple[int, int]]:
+    return {(st.st_dev, st.st_ino) for p in root.rglob("*") if p.is_file() and not p.is_symlink() for st in [p.lstat()]}
+
+
+def test_restore_shares_no_object_file_with_the_source(tmp_path: Path, repo: Path, snap: Path) -> None:
+    """A local `git clone` hard-links the object files it copies, so a chmod or an
+    in-place write inside a clone would reach the user's real `.git/objects`.
+    Nothing restore makes (the bare copy, or the clone of it) may share an inode
+    with the source repository's objects."""
+    source = _file_inodes(repo / ".git" / "objects")
+    assert source
+    replay.restore(snap, tmp_path / "r")
+    assert _file_inodes(tmp_path / "r" / "origin.git" / "objects")
+    assert not source & _file_inodes(tmp_path / "r")
+
+
+def test_restore_from_a_source_that_borrows_objects_borrows_nothing(tmp_path: Path, repo: Path) -> None:
+    """A source made with `git clone --shared` (or `--reference`) borrows objects
+    through `objects/info/alternates`, and a plain local clone of it, even with
+    `--no-hardlinks`, would keep borrowing from the same store. The bare copy
+    and the clone of it must hold every object themselves: no alternates file,
+    a clean fsck even once the lender's objects are gone, and no inode shared
+    with either repository."""
+    borrower = tmp_path / "work" / "borrower"
+    subprocess.run(["git", "clone", "-q", "--shared", str(repo), str(borrower)], check=True)
+    assert (borrower / ".git" / "objects" / "info" / "alternates").exists()
+    (borrower / "app.py").write_text("print('v3')\n")
+    git(borrower, "-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-qam", "borrower's own commit")
+    snap = take(tmp_path, borrower)
+    replay.restore(snap, tmp_path / "r")
+    bare, clone = tmp_path / "r" / "origin.git", tmp_path / "r" / "repo"
+    assert not (bare / "objects" / "info" / "alternates").exists()
+    assert not (clone / ".git" / "objects" / "info" / "alternates").exists()
+    restored = _file_inodes(tmp_path / "r")
+    assert not restored & (_file_inodes(repo / ".git" / "objects") | _file_inodes(borrower / ".git" / "objects"))
+    # Reason: with the lender's store gone, only objects the copies hold themselves remain.
+    (repo / ".git" / "objects").rename(tmp_path / "lender-objects")
+    for copy in (bare, clone):
+        git(copy, "fsck", "--full")
+        git(copy, "cat-file", "-e", "HEAD^{tree}")
+    assert git(clone, "show", "HEAD:app.py") == "print('v3')\n"
 
 
 def test_changed_dependencies_make_the_job_inconclusive(tmp_path: Path, repo: Path, snap: Path) -> None:
@@ -586,7 +630,9 @@ def job_times_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     class JobTimeoutPopen(subprocess.Popen):
         def __init__(self, cmd: list[str], **kwargs) -> None:
-            self.warmup = cmd[-1] == replay.WARMUP
+            # Reason: a warm-up sends the job's own argv; only its environment says
+            # which call it is.
+            self.warmup = (kwargs.get("env") or {}).get("JEV_FORK_CHECK_WARMUP") == "1"
             self.logged_before = logged()
             super().__init__(cmd, **kwargs)
 
@@ -623,11 +669,9 @@ def test_pair_runs_both_sides_and_only_delegate_gets_the_note(tmp_path: Path, sn
     assert not any("keep" in p or "delegate" in p for p in under_work)
     calls = calls_log(tmp_path)
     assert all(c["router"] == "off" for c in calls)
-    assert [c["note"] is not None for c in calls if not prompt_of(c).startswith("Reply")] == [
-        name == "delegate" for name in result["order"]
-    ]
-    # Ruling T11f New 2: the warm-up never gets the note, on either side.
-    assert all(c["note"] is None for c in calls if prompt_of(c).startswith("Reply"))
+    assert [c["note"] is not None for c in calls if not c["warmup"]] == [name == "delegate" for name in result["order"]]
+    # 0.3.1 reverses Ruling T11f New 2: the warm-up gets exactly the job's note
+    # (test_both_calls_of_a_side_get_the_same_note_file).
     # Ruling T11e-i: the subagent's call is counted in the delegate side's cost, not
     # just its call count.
     p = usage.load_prices()["claude-opus-5-5"]
@@ -695,7 +739,7 @@ def test_cold_warmup_never_runs_the_job(
     assert list(result["sides"]) == [first]
     assert result["sides"][first]["attempt"] == replay.ATTEMPTS
     calls = calls_log(tmp_path)
-    assert calls and all(prompt_of(c).startswith("Reply") for c in calls)
+    assert calls and all(c["warmup"] for c in calls)
 
 
 def test_cold_attempt_is_retried_then_the_next_attempt_is_scored(
@@ -808,7 +852,7 @@ def test_job_timeout_gives_the_reason_timed_out(
     # Ruling T11h Minor 3: the warm-up finished and the job was the call that hung,
     # so the reason comes from the job's own timeout branch, not the warm-up's.
     calls = calls_log(tmp_path)
-    assert [(prompt_of(c) == replay.WARMUP, c.get("hung", False)) for c in calls] == [(True, False), (False, True)]
+    assert [(c["warmup"], c.get("hung", False)) for c in calls] == [(True, False), (False, True)]
 
 
 def test_timeout_after_a_leak_reports_the_leak_not_timed_out(
@@ -835,7 +879,7 @@ def test_timeout_after_a_leak_reports_the_leak_not_timed_out(
     assert status["status"] == "inconclusive"
     assert status["reason"] == "a replay used a path into the real repository"
     # Ruling T11h Minor 3: the warm-up finished, then the job ran (and hung).
-    assert [prompt_of(c) == replay.WARMUP for c in calls_log(tmp_path)] == [True, False]
+    assert [c["warmup"] for c in calls_log(tmp_path)] == [True, False]
     # Ruling T11h: cmd_replay found its Claude Code home through CLAUDE_CONFIG_DIR,
     # which conftest points into tmp_path, never the user's real ~/.claude.
     assert list((tmp_path / "claude-config" / "projects").glob("*/*.jsonl"))
@@ -1039,9 +1083,9 @@ def test_job_prompt_is_rewritten_before_it_reaches_claude(tmp_path: Path, repo: 
     result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
     assert not result["inconclusive"]
     calls = calls_log(tmp_path)
-    job_calls = [c for c in calls if not prompt_of(c).startswith("Reply")]
-    assert job_calls
-    for c in job_calls:
+    # Reason: since 0.3.1 the warm-up sends the job's own (rewritten) message too.
+    assert [c["warmup"] for c in calls] == [True, False, True, False]
+    for c in calls:
         assert str(repo) not in prompt_of(c)
         assert prompt_of(c).endswith("/x.py, please")
 
@@ -1121,6 +1165,501 @@ def test_history_naming_a_sibling_checkout_is_not_flagged(tmp_path: Path, repo: 
     snap = tmp_path / "fc" / "snapshots" / sid
     result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
     assert not result["inconclusive"]
+
+
+# --- 0.3.1: the warm-up is launched exactly like its job, and a guard stops it -------------
+
+WARMUP_HOOK = SCRIPTS / "warmup_hook.py"
+# The hook's exact output in a warm-up, kept verbatim so a reworded one is caught too.
+STOP_TEXT = (
+    '{"continue": false, "stopReason": "fork-check warm-up", "hookSpecificOutput": '
+    '{"hookEventName": "PreToolUse", "permissionDecision": "deny", '
+    '"permissionDecisionReason": "fork-check warm-up: no tools"}}'
+)
+
+
+def warmups_and_jobs(calls: list[dict]) -> list[tuple[dict, dict]]:
+    """The calls log as (warm-up, job) pairs, in the order they ran."""
+    assert [c["warmup"] for c in calls] == [True, False] * (len(calls) // 2)
+    return list(zip(calls[::2], calls[1::2], strict=True))
+
+
+def test_warmup_and_job_are_launched_identically(tmp_path: Path, snap: Path, fake_claude: Path) -> None:
+    """A prompt-cache entry ends with the exact request that wrote it, so the
+    runner launches the warm-up exactly like the job: the same message,
+    `--settings`, model and flags, from the same folder, with the same
+    environment but for JEV_FORK_CHECK_WARMUP, whose hook stops the warm-up
+    before its tool runs. That makes the invocations identical, not the API
+    requests (runtime state can still differ); warmth is checked per attempt."""
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert not result["inconclusive"], result["reason"]
+    pairs = warmups_and_jobs(calls_log(tmp_path))
+    assert len(pairs) == 2
+    for warm, job in pairs:
+        assert warm["argv"] == job["argv"]
+        assert warm["cwd"] == job["cwd"]
+        assert "--settings" in job["args"]
+        assert warm["env_digest"] == job["env_digest"]
+        assert (warm["warmup_var"], job["warmup_var"]) == ("1", None)
+        assert (warm["hook_stopped"], job["hook_stopped"]) == (True, False)
+        assert (warm["tool_ran"], job["tool_ran"]) == (False, True)
+    # Reason: the two sides resume different session copies, but every call
+    # carries the very same settings string.
+    settings = {c["args"][c["args"].index("--settings") + 1] for pair in pairs for c in pair}
+    assert len(settings) == 1
+
+
+def test_both_calls_of_a_side_get_the_same_note_file(tmp_path: Path, snap: Path, fake_claude: Path) -> None:
+    """The jev-router hook adds the note to the first request, so the warm-up must
+    get exactly the job's note (this reverses Ruling T11f New 2): on the
+    delegate side both calls get the snapshot's note file, on the keep side
+    neither has one. The hook still stops the delegate warm-up before it can
+    hand anything to the helper."""
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert not result["inconclusive"], result["reason"]
+    pairs = warmups_and_jobs(calls_log(tmp_path))
+    note = {"delegate": str(snap / "note.txt"), "keep": None}
+    assert [(warm["note"], job["note"]) for warm, job in pairs] == [(note[n], note[n]) for n in result["order"]]
+    assert result["sides"]["delegate"]["delegated"] is True
+    assert Path(result["sides"]["delegate"]["clone"], "RESULT.txt").read_text() == "done by delegate\n"
+
+
+def test_an_inherited_warmup_variable_never_reaches_the_job(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A JEV_FORK_CHECK_WARMUP=1 left in the runner's own environment must never
+    turn a job into a warm-up: the job's environment removes the variable."""
+    monkeypatch.setenv("JEV_FORK_CHECK_WARMUP", "1")
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert not result["inconclusive"], result["reason"]
+    pairs = warmups_and_jobs(calls_log(tmp_path))
+    assert [(warm["warmup_var"], job["warmup_var"]) for warm, job in pairs] == [("1", None), ("1", None)]
+    for name in ("keep", "delegate"):
+        assert Path(result["sides"][name]["clone"], "RESULT.txt").read_text() == f"done by {name}\n"
+
+
+def run_warmup_hook(value: str | None) -> subprocess.CompletedProcess[str]:
+    env = {k: v for k, v in os.environ.items() if k != "JEV_FORK_CHECK_WARMUP"}
+    if value is not None:
+        env["JEV_FORK_CHECK_WARMUP"] = value
+    hook_input = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}})
+    return subprocess.run([sys.executable, str(WARMUP_HOOK)], input=hook_input, env=env, capture_output=True, text=True)
+
+
+def test_warmup_hook_stops_and_denies_during_a_warmup() -> None:
+    done = run_warmup_hook("1")
+    assert done.returncode == 0
+    assert json.loads(done.stdout) == json.loads(STOP_TEXT)
+    assert done.stdout.strip() == STOP_TEXT
+
+
+@pytest.mark.parametrize("value", [None, "", "0", "true"])
+def test_warmup_hook_prints_nothing_outside_a_warmup(value: str | None) -> None:
+    done = run_warmup_hook(value)
+    assert (done.returncode, done.stdout) == (0, "")
+
+
+def test_settings_run_the_warmup_hook_by_absolute_path_with_this_interpreter(
+    tmp_path: Path, snap: Path, fake_claude: Path
+) -> None:
+    """The `--settings` every call gets parses as JSON and holds one PreToolUse
+    hook for every tool, whose command runs warmup_hook.py by absolute path with
+    the runner's own interpreter, so it never depends on the user's login shell
+    (theirs is fish) or PATH. Ruling R1: `"onFailure": "block"`, since Claude
+    Code otherwise lets the tool run when a hook fails. Run through /bin/sh, it
+    stops a warm-up."""
+    replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    args = calls_log(tmp_path)[0]["args"]
+    settings = json.loads(args[args.index("--settings") + 1])
+    assert list(settings) == ["hooks"] and list(settings["hooks"]) == ["PreToolUse"]
+    (group,) = settings["hooks"]["PreToolUse"]
+    assert group["matcher"] == "*"
+    (hook,) = group["hooks"]
+    assert hook["type"] == "command"
+    assert hook["onFailure"] == "block"
+    command = shlex.split(hook["command"])
+    assert command == [sys.executable, str(WARMUP_HOOK)]
+    assert Path(command[1]).is_absolute() and Path(command[1]).name == "warmup_hook.py"
+    env = {**os.environ, "JEV_FORK_CHECK_WARMUP": "1"}
+    done = subprocess.run(["/bin/sh", "-c", hook["command"]], env=env, capture_output=True, text=True)
+    assert json.loads(done.stdout) == json.loads(STOP_TEXT)
+
+
+HOOK_COMMAND = f"{shlex.quote(sys.executable)} {shlex.quote(str(WARMUP_HOOK))}"
+
+
+def settings_running(command: str, *, on_failure: str | None = "block") -> str:
+    """A `--settings` string shaped like replay.SETTINGS, running `command`."""
+    hook: dict = {"type": "command", "command": command}
+    if on_failure is not None:
+        hook["onFailure"] = on_failure
+    return json.dumps({"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [hook]}]}})
+
+
+def test_the_real_warmup_guard_passes_its_preflight() -> None:
+    assert replay.warmup_guard_passes_preflight()
+
+
+def test_the_preflight_runs_the_hook_without_repository_local_git_variables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 5 (Ruling R6 extended): the preflight runs a shell command, which
+    could run git, so it gets the environment Claude Code will hand the hook:
+    without git's repository-local variables, other GIT_ settings kept."""
+    names = tmp_path / "git-env.txt"
+    command = f"env | cut -d= -f1 | grep '^GIT_' >> {shlex.quote(str(names))}; {HOOK_COMMAND}"
+    monkeypatch.setattr(replay, "SETTINGS", settings_running(command))
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        monkeypatch.setenv(name, str(tmp_path / "elsewhere"))
+    monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
+    assert replay.warmup_guard_passes_preflight()
+    seen = set(names.read_text().split())
+    assert "GIT_TERMINAL_PROMPT" in seen
+    assert not seen & replay._local_git_vars()
+
+
+@pytest.mark.parametrize("broken", ["missing", "always-stops", "never-stops", "stops-without-denying"])
+def test_a_warmup_guard_that_fails_its_preflight_runs_nothing(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch, broken: str
+) -> None:
+    """Ruling R1: before any `claude` runs, the pair runs the exact hook command
+    from SETTINGS with JEV_FORK_CHECK_WARMUP=1 (it must print the stop-and-deny
+    decision) and without it (it must print nothing and exit 0). A guard that
+    cannot start, would stop the job too, or would let a warm-up's tool run
+    makes the pair inconclusive, and nothing else runs: no clone, no call."""
+    command = {
+        "missing": f"{shlex.quote(sys.executable)} {shlex.quote(str(tmp_path / 'gone.py'))}",
+        "always-stops": f"printf '%s' {shlex.quote(STOP_TEXT)}",
+        "never-stops": "true",
+        "stops-without-denying": """if [ "$JEV_FORK_CHECK_WARMUP" = 1 ]; then printf '%s' '{"continue": false}'; fi""",
+    }[broken]
+    monkeypatch.setattr(replay, "SETTINGS", settings_running(command))
+    assert not replay.warmup_guard_passes_preflight()
+    # Reason: not `work`, which the repo fixture's own checkout lives under.
+    result = replay.replay_pair(snap, tmp_path / "replays", fake_claude, random.Random(1))
+    assert result["inconclusive"] and result["reason"] == "warm-up guard failed its preflight"
+    assert result["sides"] == {}
+    assert not (tmp_path / "replays").exists()
+    assert not (tmp_path / "calls.jsonl").exists()
+
+
+def test_a_warmup_that_ran_a_tool_ends_the_pair_at_once(
+    tmp_path: Path,
+    snap: Path,
+    fake_claude: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ruling R1: when the guard fails at run time (here it cannot start once the
+    preflight has passed) and nothing makes the failure block, the warm-up runs
+    the job's own tool under bypass permissions, and its transcript shows it. The
+    side and the pair end at once, with no retry (an effect may already have
+    happened, and a fresh clone does not mend the guard), and the runner warns."""
+    monkeypatch.setattr(replay, "SETTINGS", settings_running(HOOK_COMMAND, on_failure=None))
+    monkeypatch.setenv("FAKE_CLAUDE_HOOK_FAILS", "warmup")
+    monkeypatch.setattr(fork_check, "root", lambda: tmp_path / "fc")
+    assert fork_check.main(["mark", snap.name, "safe"]) == 0
+    assert fork_check.main(["replay", snap.name]) == 0
+    status = fork_check.statuses()[snap.name]
+    assert (status["status"], status["reason"]) == ("inconclusive", "warm-up ran a tool")
+    out = capsys.readouterr().out
+    assert "WARNING" in out and "warm-up ran a tool" in out
+    # Reason: one warm-up, whose tool ran; no job, no retry, no second side.
+    assert [(c["warmup"], c["tool_ran"]) for c in calls_log(tmp_path)] == [(True, True)]
+
+
+def test_a_guard_that_fails_at_run_time_still_blocks_the_warmups_tool(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the real SETTINGS (`"onFailure": "block"`), a hook that cannot start
+    blocks the tool instead of letting it run: the warm-up changes nothing, and
+    its blocked call is a hook's rejection, not a tool that ran."""
+    monkeypatch.setenv("FAKE_CLAUDE_HOOK_FAILS", "warmup")
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert not result["inconclusive"], result["reason"]
+    pairs = warmups_and_jobs(calls_log(tmp_path))
+    assert [(warm["tool_ran"], job["tool_ran"]) for warm, job in pairs] == [(False, True), (False, True)]
+
+
+# Reason: these two mirror what Claude Code 2.1.295 really recorded in the trial clone:
+# the guard's denial (warmup_design2_experiment.py's warm-up) and a Bash call that ran
+# (its job), cut down to the fields that matter.
+DENIED_BY_THE_GUARD = {
+    "type": "user",
+    "message": {
+        "role": "user",
+        "content": [
+            {
+                "type": "tool_result",
+                "content": "PreToolUse:Bash hook error: fork-check warm-up: no tools",
+                "is_error": True,
+                "tool_use_id": "toolu_1",
+            }
+        ],
+    },
+    "toolUseResult": "Error: PreToolUse:Bash hook error: fork-check warm-up: no tools",
+    "toolDenialKind": "permission-rule",
+    "permissionDecision": {"decision": "reject", "source": "hook", "reasonType": "hook"},
+}
+RAN = {
+    "type": "user",
+    "message": {
+        "role": "user",
+        "content": [
+            {
+                "tool_use_id": "toolu_1",
+                "type": "tool_result",
+                "content": "(Bash completed with no output)",
+                "is_error": False,
+            }
+        ],
+    },
+    "toolUseResult": {"stdout": "", "stderr": "", "interrupted": False, "isImage": False},
+    "permissionDecision": {"decision": "accept", "source": "config", "reasonType": "mode"},
+}
+NOT_AN_ERROR = {
+    **DENIED_BY_THE_GUARD,
+    "message": {"role": "user", "content": [{**DENIED_BY_THE_GUARD["message"]["content"][0], "is_error": False}]},
+}
+NO_DECISION = {k: v for k, v in DENIED_BY_THE_GUARD.items() if k != "permissionDecision"}
+REJECTED_ELSEWHERE = {**DENIED_BY_THE_GUARD, "permissionDecision": {"decision": "reject", "source": "config"}}
+# Reason: a second call, as the real side-2 warm-up of the 0.3.1 trial made in parallel
+# with its first (both were denied, each with its own result).
+SECOND_TOOL_USE = {
+    "type": "assistant",
+    "message": {"content": [{"type": "tool_use", "id": "toolu_2", "name": "Bash", "input": {}}]},
+}
+SECOND_DENIED = {
+    **DENIED_BY_THE_GUARD,
+    "message": {
+        "role": "user",
+        "content": [{**DENIED_BY_THE_GUARD["message"]["content"][0], "tool_use_id": "toolu_2"}],
+    },
+}
+
+
+@pytest.mark.parametrize(
+    ("history", "turn", "subagent", "ran"),
+    [
+        ([], [DENIED_BY_THE_GUARD], [], False),
+        ([], [RAN], [], True),
+        ([], [DENIED_BY_THE_GUARD, RAN], [], True),
+        ([], [NOT_AN_ERROR], [], True),
+        ([], [NO_DECISION], [], True),
+        ([], [REJECTED_ELSEWHERE], [], True),
+        ([RAN], [DENIED_BY_THE_GUARD], [], False),
+        ([], [DENIED_BY_THE_GUARD], [RAN], True),
+        ([], [], [], True),
+        ([], [SECOND_TOOL_USE, DENIED_BY_THE_GUARD, SECOND_DENIED], [], False),
+        ([], [SECOND_TOOL_USE, DENIED_BY_THE_GUARD], [], True),
+        ([], [SECOND_DENIED], [], True),
+        ([], [DENIED_BY_THE_GUARD], [SECOND_TOOL_USE], True),
+    ],
+    ids=[
+        "denied",
+        "ran",
+        "denied-then-ran",
+        "not-an-error",
+        "no-decision",
+        "rejected-elsewhere",
+        "ran-only-in-history",
+        "ran-in-a-subagent",
+        "call-without-result",
+        "parallel-calls-all-denied",
+        "second-call-without-result",
+        "result-for-another-call",
+        "subagent-call-without-result",
+    ],
+)
+def test_ran_a_tool_reads_the_new_turn_and_its_subagents(
+    tmp_path: Path, history: list[dict], turn: list[dict], subagent: list[dict], ran: bool
+) -> None:
+    """Ruling R1: any tool_result in the warm-up's own new turn, or in its
+    subagents' transcripts, that is not a rejection by a hook counts as a tool
+    that ran; anything that does not look exactly like one fails closed. Ruling
+    R7: so does any tool call there without a hook-rejected result of its own
+    (Claude Code may have crashed after the tool ran, before recording it). The
+    inherited history, where the real session's tools ran, never counts."""
+    session = write(tmp_path / "s.jsonl", [*history, typed("do it"), TOOL_USE, *turn])
+    if subagent:
+        (tmp_path / "s" / "subagents").mkdir(parents=True)
+        write(tmp_path / "s" / "subagents" / "agent-1.jsonl", subagent)
+    assert replay._ran_a_tool([session], "do it") is ran
+
+
+TOOL_USE = {
+    "type": "assistant",
+    "message": {"content": [{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {}}]},
+}
+
+
+def test_ran_a_tool_fails_closed_when_the_turn_cannot_be_found(tmp_path: Path) -> None:
+    """Ruling R4: a session file with entries but none carrying the prompt cannot
+    show that no tool ran, so it counts as one that did. An empty file, where
+    nothing was recorded at all, does not."""
+    session = write(tmp_path / "s.jsonl", [typed("recorded some other way"), TOOL_USE, DENIED_BY_THE_GUARD])
+    assert replay._ran_a_tool([session], "do it") is True
+    assert replay._ran_a_tool([write(tmp_path / "empty.jsonl", [])], "do it") is False
+
+
+def test_a_warmup_whose_turn_cannot_be_found_ends_the_pair(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling R4, end to end: a warm-up transcript with a tool_result but no entry
+    matching the prompt ends the pair at once as "warm-up ran a tool", instead
+    of being retried as never warm."""
+    monkeypatch.setenv("FAKE_CLAUDE_PROMPT_RECORDED_AS", "the message, recorded some other way")
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert result["inconclusive"] and result["reason"] == "warm-up ran a tool"
+    assert [c["warmup"] for c in calls_log(tmp_path)] == [True]
+
+
+def guard_failure(command: str) -> str:
+    """A blocked tool_result's text as Claude Code 2.1.295 words a hook failure
+    under `"onFailure": "block"`."""
+    return f'PreToolUse:Bash hook error: [{command}]: failed; blocking because onFailure is "block"\nNo stderr output'
+
+
+def rejected(text: str) -> dict:
+    return {
+        **DENIED_BY_THE_GUARD,
+        "message": {"role": "user", "content": [{**DENIED_BY_THE_GUARD["message"]["content"][0], "content": text}]},
+    }
+
+
+@pytest.mark.parametrize(
+    ("turn", "subagent", "blocked"),
+    [
+        ([rejected(guard_failure(HOOK_COMMAND))], [], True),
+        ([], [rejected(guard_failure(HOOK_COMMAND))], True),
+        ([rejected(guard_failure("sh -c 'exit 1'"))], [], False),
+        ([rejected("PreToolUse:Bash hook error: the user's own policy hook denies this tool")], [], False),
+        ([{**rejected(guard_failure(HOOK_COMMAND)), "permissionDecision": RAN["permissionDecision"]}], [], False),
+        ([RAN], [], False),
+    ],
+    ids=["ours", "ours-in-a-subagent", "another-hook-failed", "another-hook-denied", "not-a-rejection", "ran"],
+)
+def test_guard_blocked_a_tool_names_only_our_own_guard(
+    tmp_path: Path, turn: list[dict], subagent: list[dict], blocked: bool
+) -> None:
+    """Ruling R5: in a job, a hook rejection whose text names `[<command>]` for a
+    hook command in SETTINGS can only be our guard failing (it never denies in a
+    job). Another hook's rejection, the user's own, is a real job's business."""
+    session = write(tmp_path / "s.jsonl", [typed("do it"), TOOL_USE, *turn])
+    if subagent:
+        (tmp_path / "s" / "subagents").mkdir(parents=True)
+        write(tmp_path / "s" / "subagents" / "agent-1.jsonl", subagent)
+    assert replay._guard_blocked_a_tool([session], "do it") is blocked
+
+
+def test_a_job_tool_blocked_by_a_failing_guard_is_retried_then_inconclusive(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling R5: if the guard fails during the job, `"onFailure": "block"` rejects
+    the job's own tools, and the job must not be scored as if it were real. The
+    attempt is retried like a cold one, in a fresh clone; when every attempt
+    shows it, the side (and the pair) ends inconclusive with that reason."""
+    monkeypatch.setenv("FAKE_CLAUDE_HOOK_FAILS", "job")
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert result["inconclusive"] and result["reason"] == "warm-up guard blocked a job tool"
+    first = result["order"][0]
+    assert list(result["sides"]) == [first]
+    assert result["sides"][first]["attempt"] == replay.ATTEMPTS
+    calls = calls_log(tmp_path)
+    assert [(c["warmup"], c["tool_ran"]) for c in calls] == [(True, False), (False, False)] * replay.ATTEMPTS
+
+
+def test_a_job_tool_denied_by_another_hook_is_scored_normally(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling R5: the user's own hooks legitimately deny tools in real jobs; such a
+    rejection is part of the job and never makes it inconclusive."""
+    monkeypatch.setenv("FAKE_CLAUDE_OTHER_HOOK_DENIES", "job")
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert not result["inconclusive"], result["reason"]
+    assert all(side["warm"] and side["attempt"] == 1 for side in result["sides"].values())
+    assert [c["tool_ran"] for c in calls_log(tmp_path) if not c["warmup"]] == [False, False]
+
+
+def test_a_warmup_tool_call_with_no_recorded_result_ends_the_pair(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling R7, end to end: with the guard skipped, Claude Code crashes after the
+    warm-up's tool ran but before it recorded the result. The bare tool call
+    counts as a tool that ran, so the pair ends at once instead of the crash
+    being retried (which would run the tool again)."""
+    monkeypatch.setattr(replay, "SETTINGS", settings_running(HOOK_COMMAND, on_failure=None))
+    monkeypatch.setenv("FAKE_CLAUDE_HOOK_FAILS", "warmup")
+    monkeypatch.setenv("FAKE_CLAUDE_CRASH_BEFORE_RESULT", "warmup")
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert result["inconclusive"] and result["reason"] == "warm-up ran a tool"
+    assert [(c["warmup"], c["tool_ran"]) for c in calls_log(tmp_path)] == [(True, True)]
+
+
+@pytest.mark.parametrize(("extra", "scored"), [(20_000, False), (1_000, True)])
+def test_a_job_must_read_its_own_first_request_from_cache(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch, extra: int, scored: bool
+) -> None:
+    """Ruling R8: reading the warm-up's whole context is not enough when the job's
+    own first request is longer (an attachment regenerated with more content):
+    the uncached rest is paid for, and it can differ between the sides. The
+    job's first read must also cover its own first context (within the same
+    bound), or the attempt is never warm; a job that matches is scored."""
+    monkeypatch.setenv("FAKE_CLAUDE_JOB_EXTRA_UNCACHED", str(extra))
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    if scored:
+        assert not result["inconclusive"], result["reason"]
+        assert all(side["attempt"] == 1 for side in result["sides"].values())
+    else:
+        assert result["inconclusive"] and result["reason"] == "never warm"
+        first = result["order"][0]
+        assert list(result["sides"]) == [first]
+        assert result["sides"][first]["attempt"] == replay.ATTEMPTS
+
+
+def _repo_state(repo: Path) -> tuple[str, str, str, bytes]:
+    """A repository's remotes, refs, status and index bytes, read as itself."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+    def show(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(repo), *args], env=env, check=True, capture_output=True, text=True
+        ).stdout
+
+    return show("remote", "-v"), show("for-each-ref"), show("status", "--porcelain"), (repo / ".git/index").read_bytes()
+
+
+def test_inherited_repository_variables_never_reach_another_repository(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling R6: git obeys GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE and the other
+    repository-local variables over `-C`, so a runner started with them set
+    would act on the repository they name (`remote remove origin` would drop its
+    remote), and so would the replayed claude's own git commands. Every git call
+    of a replay, and claude's environment, go without them."""
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    git(real, "init", "-q", "-b", "main")
+    (real / "f.txt").write_text("x\n")
+    git(real, "add", ".")
+    git(real, "-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-qm", "init")
+    git(real, "remote", "add", "origin", "https://example.com/elsewhere.git")
+    before = _repo_state(real)
+    outcome: dict | Exception
+    with monkeypatch.context() as m:
+        m.setenv("GIT_DIR", str(real / ".git"))
+        m.setenv("GIT_WORK_TREE", str(real))
+        m.setenv("GIT_INDEX_FILE", str(real / ".git" / "index"))
+        try:
+            outcome = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+        except Exception as exc:  # Reason: the repository is checked whatever happened.
+            outcome = exc
+    assert _repo_state(real) == before
+    assert isinstance(outcome, dict) and not outcome["inconclusive"], outcome
+    local = replay._local_git_vars()
+    assert {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"} <= local
+    calls = calls_log(tmp_path)
+    assert calls and all(not set(c["git_env"]) & local for c in calls)
 
 
 def test_install_session_rewrites_the_main_worktree_and_home_forms_but_not_a_similar_path(

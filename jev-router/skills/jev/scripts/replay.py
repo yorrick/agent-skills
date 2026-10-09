@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import json
 import os
@@ -19,19 +20,47 @@ import threading
 import time
 import urllib.parse
 import uuid
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import snapshot
 import usage
+import warmup_hook
 
 IDENTITY = ["-c", "user.name=jev fork check", "-c", "user.email=jev-fork-check@localhost"]
 
-# `restore` reads the same "what counts as ignored" list the hook used to
-# fingerprint dependencies; this alias lets a caller reach it through `replay`
-# without importing `snapshot` directly.
-ignored_entries = snapshot.ignored_entries
+
+@functools.cache
+def _local_git_vars() -> frozenset[str]:
+    """The repository-local variables git itself names (`git rev-parse
+    --local-env-vars`, the list it clears for a submodule): GIT_DIR,
+    GIT_WORK_TREE, GIT_INDEX_FILE, GIT_COMMON_DIR and the like. Asked once, with
+    every GIT_ variable removed and outside any repository, so nothing inherited
+    can change the answer."""
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    found = subprocess.run(["git", "rev-parse", "--local-env-vars"], cwd="/", env=clean, capture_output=True, text=True)
+    names = frozenset(found.stdout.split())
+    if found.returncode != 0 or "GIT_DIR" not in names:
+        raise RuntimeError(f"git rev-parse --local-env-vars failed: {found.stderr.strip()[:300]}")
+    return names
+
+
+def without_local_git_vars(env: Mapping[str, str]) -> dict[str, str]:
+    """`env` without git's repository-local variables (Ruling R6). git obeys
+    GIT_DIR and its kin over `-C`, so with one inherited from the runner's own
+    environment, a git call on a scratch copy, or the replayed claude's own,
+    would act on whatever repository it names, the real one included."""
+    local = _local_git_vars()
+    return {k: v for k, v in env.items() if k not in local}
+
+
+def ignored_entries(top: Path) -> list[str]:
+    """What `top` ignores, read exactly as the hook read it when it fingerprinted
+    dependencies (`snapshot.ignored_entries`), but without git's
+    repository-local variables."""
+    return snapshot.ignored_entries(top, env=without_local_git_vars(snapshot.git_env()))
 
 
 class Inconclusive(RuntimeError):
@@ -50,8 +79,15 @@ def _command_name(args: tuple[str, ...]) -> str:
     return f"git {rest[0]}" if rest else "git"
 
 
-def run(*args: str, cwd: Path | None = None, env: dict | None = None) -> str:
-    result = subprocess.run(list(args), cwd=cwd, env=env, capture_output=True, text=True)
+def run(
+    *args: str, cwd: Path | None = None, env: Mapping[str, str] | None = None, local: dict[str, str] | None = None
+) -> str:
+    """Run a command (git, or `cp`) with `env`, by default this process's own
+    environment, always minus git's repository-local variables
+    (`without_local_git_vars`). `local` sets back the only ones a call means to
+    use, such as the start commit's own GIT_INDEX_FILE."""
+    full = {**without_local_git_vars(os.environ if env is None else env), **(local or {})}
+    result = subprocess.run(list(args), cwd=cwd, env=full, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"{_command_name(args)} failed: {result.stderr.strip()[:300]}")
     return result.stdout
@@ -60,7 +96,8 @@ def run(*args: str, cwd: Path | None = None, env: dict | None = None) -> str:
 def run_on_source(*args: str) -> str:
     """A git call that reads the user's real checkout. It runs with
     GIT_OPTIONAL_LOCKS=0 (`snapshot.git_env`), so it never takes
-    `.git/index.lock` away from a `git add` the user's own session is running."""
+    `.git/index.lock` away from a `git add` the user's own session is running,
+    and (through `run`) without git's repository-local variables."""
     return run(*args, env=snapshot.git_env())
 
 
@@ -104,15 +141,15 @@ def _resolves_inside(top: Path, link: Path) -> bool:
     return _inside(top, link.parent / raw)
 
 
-def _refuse_escaping_links(clone: Path, env: dict) -> None:
+def _refuse_escaping_links(clone: Path, start_index: dict[str, str]) -> None:
     """Every symlink in the start state (checked out, applied from the diff or
-    extracted from the tar: the start index `env` names lists them all) must
+    extracted from the tar: the start index `start_index` names lists them all) must
     point inside the clone. A committed `data -> /Users/me/work/app/data`
     would otherwise let a replay write straight through it into the real
     checkout, and the leak scan would never see the real path spelled out.
     Each target is read from its blob, as git recorded it, and checked both as
     text and as resolved on disk."""
-    listing = run("git", "-C", str(clone), "ls-files", "-s", "-z", env=env)
+    listing = run("git", "-C", str(clone), "ls-files", "-s", "-z", local=start_index)
     links = [(e.split("\t", 1)[1], e.split()[1]) for e in listing.split("\0") if e.startswith("120000 ")]
     if not links:
         return
@@ -120,6 +157,7 @@ def _refuse_escaping_links(clone: Path, env: dict) -> None:
         ["git", "-C", str(clone), "cat-file", "--batch"],
         input="".join(f"{oid}\n" for _, oid in links).encode(),
         capture_output=True,
+        env=without_local_git_vars(os.environ),
     )
     if blobs.returncode != 0:
         raise RuntimeError(f"git cat-file failed: {blobs.stderr.decode(errors='replace').strip()[:300]}")
@@ -256,12 +294,24 @@ def restore(snap: Path, dest: Path, *, copy_ignored: bool = True) -> Path:
             raise Inconclusive("dependencies or .env files changed since the snapshot")
     dest.mkdir(parents=True)
     bare, clone = dest / "origin.git", dest / "repo"
-    run_on_source("git", "clone", "-q", "--bare", str(top), str(bare))
+    # Reason: a clone from a local path hard-links the object files, so a chmod
+    # or an in-place write inside the copy would reach the real `.git/objects`;
+    # `--no-hardlinks` copies them. A source that borrows objects (made with
+    # `--shared` or `--reference`) would also pass its `objects/info/alternates`
+    # on, so the copy kept reading the lender's store; `--dissociate` copies the
+    # borrowed objects in and drops that file (git accepts it without
+    # `--reference` for exactly this case). The fetch below goes through the pack
+    # protocol and never links, and the clone of the bare copy only links
+    # scratch files to scratch files.
+    run_on_source("git", "clone", "-q", "--bare", "--no-hardlinks", "--dissociate", str(top), str(bare))
     # Reason: the bare copy has already fetched everything it needs; dropping
     # "origin" leaves it with no configured path back to the source.
     run("git", "-C", str(bare), "remote", "remove", "origin")
     branch = meta["branch"] if meta["branch"] != "HEAD" else "jev-snapshot"
-    if subprocess.run(["git", "-C", str(bare), "cat-file", "-e", head], capture_output=True).returncode != 0:
+    present = subprocess.run(
+        ["git", "-C", str(bare), "cat-file", "-e", head], capture_output=True, env=without_local_git_vars(os.environ)
+    )
+    if present.returncode != 0:
         run_on_source("git", "-C", str(bare), "fetch", "-q", str(top), head)
     # Reason: the branch may have moved on since the snapshot; point it back so the
     # clone checks out exactly the snapshot's commit.
@@ -284,13 +334,13 @@ def restore(snap: Path, dest: Path, *, copy_ignored: bool = True) -> Path:
     # excluded, untracked path and silently drop it from the tree.
     index_copy = dest / "start.index"
     shutil.copy2(clone / ".git" / "index", index_copy)
-    env = {**os.environ, "GIT_INDEX_FILE": str(index_copy)}
-    run("git", "-C", str(clone), "add", "-A", env=env)
-    tree = run("git", "-C", str(clone), "write-tree", env=env).strip()
+    start_index = {"GIT_INDEX_FILE": str(index_copy)}
+    run("git", "-C", str(clone), "add", "-A", local=start_index)
+    tree = run("git", "-C", str(clone), "write-tree", local=start_index).strip()
     start = run(
         "git", "-C", str(clone), *IDENTITY, "commit-tree", tree, "-p", head, "-m", "jev fork check: start"
     ).strip()
-    _refuse_escaping_links(clone, env)
+    _refuse_escaping_links(clone, start_index)
     run("git", "-C", str(clone), "update-ref", "refs/jev/start", start)
     if copy_ignored:
         # Reason: without drift an ignored path can never already exist in the
@@ -330,7 +380,7 @@ def restore(snap: Path, dest: Path, *, copy_ignored: bool = True) -> Path:
             _copy_selective(top, rel, clone / rel, excluded)
             skipped.extend(excluded)
             ignored.append(rel)
-        not_captured = sorted(set(snapshot.ignored_entries(top)) - set(captured))
+        not_captured = sorted(set(ignored_entries(top)) - set(captured))
         after = run("git", "-C", str(clone), "status", "--porcelain", "--untracked-files=all")
         if after != before:
             raise Inconclusive("ignored files changed since the snapshot")
@@ -601,7 +651,7 @@ def _judge_left_out(clone: Path) -> tuple[set[str], list[str]]:
     as one."""
     left_out: set[str] = set()
     kept: list[str] = []
-    for rel in snapshot.ignored_entries(clone):
+    for rel in ignored_entries(clone):
         parts = Path(rel).parts
         # Residual (F28 class, accepted in F33): a replay can plant `node_modules` or `pyvenv.cfg` to keep a folder.
         if _in_dependency_folder(rel) or any(_is_venv(clone.joinpath(*parts[:i])) for i in range(1, len(parts) + 1)):
@@ -749,6 +799,17 @@ def _relocate_venvs(clone: Path, target: Path, venvs: list[str]) -> None:
                 path.chmod(stat.S_IMODE(mode))
 
 
+def _symbolic_head(repo: Path) -> str:
+    """The branch `repo`'s HEAD names (`refs/heads/...`), or "" when detached."""
+    shown = subprocess.run(
+        ["git", "-C", str(repo), "symbolic-ref", "-q", "HEAD"],
+        capture_output=True,
+        text=True,
+        env=without_local_git_vars(os.environ),
+    )
+    return shown.stdout.strip()
+
+
 def _fresh_git(clone: Path, target: Path) -> None:
     """Make `target` a repository holding only HEAD's history and
     `refs/jev/start`, fetched from `clone` (Ruling F33), never a copy of the
@@ -758,9 +819,7 @@ def _fresh_git(clone: Path, target: Path) -> None:
     would. HEAD is the clone's own: the same branch, or the same commit when
     the clone's HEAD is detached. The origin remote, the reflogs and
     FETCH_HEAD, which all name the clone's folder, are removed."""
-    branch = subprocess.run(
-        ["git", "-C", str(clone), "symbolic-ref", "-q", "HEAD"], capture_output=True, text=True
-    ).stdout.strip()
+    branch = _symbolic_head(clone)
     head = run("git", "-C", str(clone), "rev-parse", "HEAD").strip()
     which = ["--branch", branch.removeprefix("refs/heads/")] if branch else []
     run(
@@ -780,17 +839,13 @@ def _fresh_git(clone: Path, target: Path) -> None:
     if not branch:
         # Reason: for a detached HEAD, clone puts the copy on a branch that
         # points at the same commit when there is one.
-        guessed = subprocess.run(
-            ["git", "-C", str(target), "symbolic-ref", "-q", "HEAD"], capture_output=True, text=True
-        ).stdout.strip()
+        guessed = _symbolic_head(target)
         run("git", "-C", str(target), "update-ref", "--no-deref", "HEAD", head)
         if guessed:
             run("git", "-C", str(target), "update-ref", "-d", guessed)
     shutil.rmtree(target / ".git" / "logs", ignore_errors=True)
     (target / ".git" / "FETCH_HEAD").unlink(missing_ok=True)
-    copied = subprocess.run(
-        ["git", "-C", str(target), "symbolic-ref", "-q", "HEAD"], capture_output=True, text=True
-    ).stdout.strip()
+    copied = _symbolic_head(target)
     if copied != branch or run("git", "-C", str(target), "rev-parse", "HEAD").strip() != head:
         raise RuntimeError(f"the judge's copy of {clone} did not get the clone's HEAD ({branch or head})")
 
@@ -1014,7 +1069,48 @@ def refuse_if_ignored_leaked(clone: Path, ignored: list[str], label: str) -> Non
 
 
 DEFAULT_CLAUDE_HOME = Path.home() / ".claude"
-WARMUP = "Reply with the single word ok and do nothing else."
+# Reason: a prompt-cache entry ends with the exact request that wrote it, so the
+# runner launches the warm-up exactly like the job: the job's own message and
+# environment, with the same flags. That makes the two invocations identical,
+# not the two API requests (startup-hook output, regenerated attachments or
+# other runtime state can still differ); such a difference can only leave an
+# attempt cold, which the per-attempt warmth check turns into an inconclusive
+# result, never a wrong measurement. These settings go to every call, warm-up
+# and job alike, and their one hook (warmup_hook.py) acts only when WARMUP_VAR
+# is "1": it denies the warm-up's first tool and stops it. The hook runs by
+# absolute path with this interpreter, never through the user's shell or PATH.
+# Claude Code lets a tool run when its hook fails (cannot start, crashes, times
+# out, exits non-zero other than 2) unless the hook says `"onFailure": "block"`;
+# in the job the hook exits 0, so that never blocks there (and an attempt where
+# it did is retried, `_guard_blocked_a_tool`). Settings that stop Claude Code
+# from running hooks at all (`disableAllHooks`, a managed `allowManagedHooksOnly`)
+# would silence the guard where the preflight cannot see it; that is accepted,
+# since the warm-up would then only run the job once in its scratch clone, as a
+# job attempt does anyway (a snapshot is replayed only once the user marked it
+# safe, and a pair already runs the job up to six times), and the warm-up scan
+# then ends the pair with a warning. Built once, so the two argv are
+# byte-identical.
+WARMUP_VAR = "JEV_FORK_CHECK_WARMUP"
+WARMUP_HOOK = Path(__file__).resolve().with_name("warmup_hook.py")
+SETTINGS = json.dumps(
+    {
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "*",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f"{shlex.quote(sys.executable)} {shlex.quote(str(WARMUP_HOOK))}",
+                            "onFailure": "block",
+                        }
+                    ],
+                }
+            ]
+        }
+    }
+)
+PREFLIGHT_TIMEOUT = 60
 ATTEMPTS = 3
 TIMEOUT_SECONDS = 4 * 3600
 LARGE_CONTEXT = 200_000
@@ -1186,6 +1282,110 @@ def _verify_reported_session(reported: object, new_files: list[Path]) -> None:
         raise RuntimeError(f"claude reported session {reported}, which is not among the session files it just wrote")
 
 
+def _subagent_entries(session_file: Path) -> list[dict]:
+    """Every entry of the session's subagent transcripts (all new: a subagent
+    never inherits the history)."""
+    subs_dir = session_file.with_suffix("") / "subagents"
+    return [e for sub in sorted(subs_dir.glob("*.jsonl")) for e in usage.read_entries(sub)] if subs_dir.exists() else []
+
+
+def _new_entries(session_file: Path, prompt: str) -> list[dict]:
+    """A call's own entries: its session file's new turn (from `prompt`'s entry
+    on, the slice `measure` scores) plus its subagents' transcripts, never the
+    inherited history."""
+    return _turn(usage.read_entries(session_file), prompt) + _subagent_entries(session_file)
+
+
+def _hook_rejected(entry: dict, block: dict) -> bool:
+    """Whether a tool_result records a call a hook rejected, so its tool never
+    ran. Claude Code 2.1.295 records it as an is_error tool_result whose entry
+    carries `permissionDecision` {"decision": "reject", "source": "hook"}, the
+    same shape whether the hook denied the tool or failed under
+    `"onFailure": "block"` (both seen in real transcripts); a tool that ran
+    carries {"decision": "accept", ...} instead."""
+    decision = entry.get("permissionDecision")
+    return (
+        block.get("is_error") is True
+        and isinstance(decision, dict)
+        and decision.get("decision") == "reject"
+        and decision.get("source") == "hook"
+    )
+
+
+def _tool_results(entries: list[dict]) -> list[tuple[dict, dict]]:
+    """Every tool_result block in `entries`, with the entry that holds it."""
+    found = []
+    for entry in entries:
+        content = (entry.get("message") or {}).get("content")
+        if isinstance(content, list):
+            found += [(entry, b) for b in content if isinstance(b, dict) and b.get("type") == "tool_result"]
+    return found
+
+
+def _tool_use_ids(entries: list[dict]) -> list[object]:
+    """The id of every tool_use block in `entries` (None where one has none)."""
+    return [
+        b.get("id")
+        for entry in entries
+        if entry.get("type") == "assistant"
+        for b in (entry.get("message") or {}).get("content") or []
+        if isinstance(b, dict) and b.get("type") == "tool_use"
+    ]
+
+
+def _ran_a_tool(new_files: list[Path], prompt: str) -> bool:
+    """Whether a tool may have run in any of `new_files`' own entries
+    (`_new_entries`). It did unless every tool call there has a result of its
+    own that is a hook's rejection: a result that is not one counts as a tool
+    that ran, and so does a call with no result (Ruling R7: Claude Code may
+    have crashed after the tool ran, before recording it), and a non-empty file
+    with no entry carrying `prompt` (Ruling R4: its new turn cannot be told from
+    the history, so nothing shows that no tool ran). A transcript this does not
+    understand fails closed."""
+    for f in new_files:
+        entries = usage.read_entries(f)
+        turn = _turn(entries, prompt)
+        if f.stat().st_size and not turn:
+            return True
+        own = turn + _subagent_entries(f)
+        results = _tool_results(own)
+        if any(not _hook_rejected(entry, block) for entry, block in results):
+            return True
+        rejected = {block.get("tool_use_id") for _, block in results} - {None}
+        if any(call not in rejected for call in _tool_use_ids(own)):
+            return True
+    return False
+
+
+def _hook_commands() -> list[str]:
+    """Every hook command SETTINGS gives Claude Code, read back from the very
+    string every call passes."""
+    groups = json.loads(SETTINGS)["hooks"]["PreToolUse"]
+    return [hook["command"] for group in groups for hook in group["hooks"]]
+
+
+def _result_text(block: dict) -> str:
+    content = block.get("content")
+    if isinstance(content, list):
+        return "\n".join(str(b.get("text", "")) for b in content if isinstance(b, dict))
+    return str(content or "")
+
+
+def _guard_blocked_a_tool(new_files: list[Path], prompt: str) -> bool:
+    """Whether the warm-up guard blocked a tool in a job (Ruling R5). The guard
+    prints nothing in a job, so a hook rejection there that names one of its
+    commands (Claude Code words a hook failure under `"onFailure": "block"` as
+    `[<command>]: failed; blocking because onFailure is "block"`) can only be the
+    guard failing. Rejections by any other hook (the user's own may deny tools
+    in a real job) are left alone."""
+    names = [f"[{command}]" for command in _hook_commands()]
+    return any(
+        _hook_rejected(entry, block) and any(name in _result_text(block) for name in names)
+        for f in new_files
+        for entry, block in _tool_results(_new_entries(f, prompt))
+    )
+
+
 def _leaked_real_path(new_files: list[Path], prompt: str, leak_forms: list[str]) -> bool:
     """Whether a tool call in any of `new_files`' own new turn, or in their
     subagent transcripts, still names the real checkout. `new_files` (Open 1b)
@@ -1199,14 +1399,7 @@ def _leaked_real_path(new_files: list[Path], prompt: str, leak_forms: list[str])
         return False
     pattern = re.compile(_alternation(leak_forms) + _PATH_BOUNDARY)
     for f in new_files:
-        turn = _turn(usage.read_entries(f), prompt)
-        subs_dir = f.with_suffix("") / "subagents"
-        subs = (
-            [e for sub in sorted(subs_dir.glob("*.jsonl")) for e in usage.read_entries(sub)]
-            if subs_dir.exists()
-            else []
-        )
-        for entry in turn + subs:
+        for entry in _new_entries(f, prompt):
             if entry.get("type") != "assistant":
                 continue
             for block in (entry.get("message") or {}).get("content") or []:
@@ -1369,7 +1562,9 @@ def run_claude(
 ) -> tuple[dict, float, int, bool]:
     """One headless fork of the session, with the same access as the user's own
     session. The prompt is the last argument, after `--`, so a message that
-    starts with `-` is never parsed as an option. A key in `env_extra` mapped
+    starts with `-` is never parsed as an option. Every call gets the same
+    `--settings` (SETTINGS), so a warm-up and its job differ only in their
+    environment, never in their argv. A key in `env_extra` mapped
     to None is removed from the environment instead of set, so a call can
     strip a variable it must never inherit. The fourth return value is True
     only for a call this killed after TIMEOUT_SECONDS; the exit code next to it
@@ -1387,6 +1582,8 @@ def run_claude(
         "-p",
         "--output-format",
         "json",
+        "--settings",
+        SETTINGS,
         "--permission-mode",
         "bypassPermissions",
         "--model",
@@ -1396,12 +1593,14 @@ def run_claude(
     ]
     # Reason: the runner itself usually runs inside a Claude Code session, whose
     # own markers (session id, messaging socket and token, child-session and
-    # bridge ids, effort, pid) would tie the replay to that session. Everything
-    # else, CLAUDE_CONFIG_DIR, PATH, HOME and the auth and provider variables in
+    # bridge ids, effort, pid) would tie the replay to that session. git's
+    # repository-local variables (GIT_DIR and its kin) would point the job's own
+    # git commands at whatever repository they name (Ruling R6). Everything else,
+    # CLAUDE_CONFIG_DIR, PATH, HOME and the auth and provider variables in
     # KEPT_CLAUDE_CODE_VARS included, is kept.
     env = {
         k: v
-        for k, v in os.environ.items()
+        for k, v in without_local_git_vars(os.environ).items()
         if k not in SESSION_VARS and (not k.startswith("CLAUDE_CODE_") or k in KEPT_CLAUDE_CODE_VARS)
     }
     env["JEV_ROUTER"] = "off"
@@ -1490,6 +1689,42 @@ def measure(claude_home: Path, clone: Path, session_id: str, prompt: str, helper
     }
 
 
+def _run_hook(command: str, env: dict) -> subprocess.CompletedProcess[str] | None:
+    """One run of a hook command through the shell, as a PreToolUse hook gets it;
+    None if it could not run or did not finish in time."""
+    hook_input = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "true"}})
+    try:
+        return subprocess.run(
+            command, shell=True, env=env, input=hook_input, capture_output=True, text=True, timeout=PREFLIGHT_TIMEOUT
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def warmup_guard_passes_preflight() -> bool:
+    """Whether the warm-up guard works, checked before any `claude` runs by
+    running every hook command SETTINGS holds, read back from that very string so
+    it is exactly what the calls will run. With WARMUP_VAR set to "1" each must
+    exit 0 and print the stop-and-deny decision (`warmup_hook.STOP`); without
+    it, each must exit 0 and print nothing. So the guard can neither let a
+    warm-up's tool run nor stop a job."""
+    commands = _hook_commands()
+    # Reason: the environment Claude Code will hand the hook, which `run_claude`
+    # builds without git's repository-local variables (Ruling R6).
+    job_env = {k: v for k, v in without_local_git_vars(os.environ).items() if k != WARMUP_VAR}
+    warmup_env = {**job_env, WARMUP_VAR: "1"}
+    for command in commands:
+        warm, job = _run_hook(command, warmup_env), _run_hook(command, job_env)
+        if warm is None or job is None or warm.returncode != 0 or job.returncode != 0 or job.stdout:
+            return False
+        try:
+            if json.loads(warm.stdout) != warmup_hook.STOP:
+                return False
+        except json.JSONDecodeError:
+            return False
+    return bool(commands)
+
+
 def _replay_side(
     snap: Path, work: Path, claude_home: Path, meta: dict, prompt: str, model: str, name: str, position: int
 ) -> tuple[dict, str]:
@@ -1497,14 +1732,19 @@ def _replay_side(
     clone, until the warm-up and the job both prove the cache was hot and
     neither crashes, times out, nor touches the real checkout. Returns the
     last attempt's result and, if the side never became scoreable, why. A
-    leak, a timeout or an unpriced call ends the side (and, via the caller,
-    the whole pair) at once, without retrying: none of the three would be
-    fixed by a fresh clone."""
-    job_env = {"JEV_ROUTER_NOTE_FILE": str(snap / "note.txt")} if name == "delegate" else {"JEV_ROUTER_NOTE_FILE": None}
-    # Reason: the warm-up is never the job; it must never be handed the note,
-    # on either side, or a hook that returns the note for any prompt would
-    # tell the "reply ok" warm-up itself to delegate.
-    warmup_env = {"JEV_ROUTER_NOTE_FILE": None}
+    leak, a warm-up that ran a tool, a timeout or an unpriced call ends the
+    side (and, via the caller, the whole pair) at once, without retrying: none
+    of them would be fixed by a fresh clone."""
+    note = {"JEV_ROUTER_NOTE_FILE": str(snap / "note.txt") if name == "delegate" else None}
+    # Reason: so that the warm-up's first request can match the job's (a cache
+    # entry ends with the request that wrote it), the warm-up gets exactly the
+    # job's environment, the note included, and differs only by WARMUP_VAR,
+    # which makes warmup_hook.py stop it before any tool runs. Whether the job
+    # then really read the cache is checked on every attempt below. The job
+    # removes the variable, so a value inherited from the runner never turns it
+    # into a warm-up.
+    job_env = {**note, WARMUP_VAR: None}
+    warmup_env = {**note, WARMUP_VAR: "1"}
     side: dict = {}
     reason = ""
     for attempt in range(1, ATTEMPTS + 1):
@@ -1526,19 +1766,28 @@ def _replay_side(
         side = {"attempt": attempt, "clone": str(clone), "warm": False, "skipped": skipped}
         before_status = run("git", "-C", str(clone), "status", "--porcelain", "-uall")
         before_head = run("git", "-C", str(clone), "rev-parse", "HEAD").strip()
-        # Reason: the warm-up forks the same conversation with the same tools
-        # and system prompt, so the side's first call can read it from cache.
+        # Reason: the warm-up is launched exactly like the job (same session,
+        # message, settings and model), so the job's first call can read its
+        # prefix from cache; the hook stops the warm-up before its first tool.
         before_files = _session_file_names(pdir)
         warm_data, _, warm_code, warm_timed_out = run_claude(
-            cwd, sid, WARMUP, warmup_env, claude_home, model, pgid_file=dest / "claude.pgid"
+            cwd, sid, job_prompt, warmup_env, claude_home, model, pgid_file=dest / "claude.pgid"
         )
         warm_new_files = _new_session_files(pdir, before_files)
         # Reason: every attempt is scanned, whether it succeeded, crashed or
         # timed out, since a leak can happen before a call ever fails. The scan
         # comes before the session-id check, so a call whose reported id does
         # not match is still scanned rather than lost to that error.
-        if _leaked_real_path(warm_new_files, WARMUP, leak_forms):
+        if _leaked_real_path(warm_new_files, job_prompt, leak_forms):
             return side, "a replay used a path into the real repository"
+        # Reason (Ruling R1): a guard that failed or was skipped lets the warm-up
+        # run the job's own tools under bypass permissions, and the clone check
+        # below cannot see a network call, an ignored file or a write to a file
+        # that was already dirty. Like a leak, it ends the pair at once: an
+        # effect may already have happened, and a fresh clone does not mend the
+        # guard. Scanned like the leak, before the session-id check.
+        if _ran_a_tool(warm_new_files, job_prompt):
+            return side, "warm-up ran a tool"
         _verify_reported_session(warm_data.get("session_id"), warm_new_files)
         if warm_timed_out:
             return side, "timed out"
@@ -1551,7 +1800,7 @@ def _replay_side(
             reason = "warm-up changed the clone"
             continue
         warm_sid = str(warm_data.get("session_id") or "")
-        warm = measure(claude_home, cwd, warm_sid, WARMUP, "")
+        warm = measure(claude_home, cwd, warm_sid, job_prompt, "")
         if warm["calls"] == 0:
             reason = "never warm"
             continue
@@ -1569,6 +1818,12 @@ def _replay_side(
         _verify_reported_session(data.get("session_id"), job_new_files)
         if job_timed_out:
             return side, "timed out"
+        # Reason (Ruling R5): if the guard failed during the job, its
+        # `"onFailure": "block"` rejected the job's own tools, so the job did
+        # not run as it really would; retried like a cold attempt.
+        if _guard_blocked_a_tool(job_new_files, job_prompt):
+            reason = "warm-up guard blocked a job tool"
+            continue
         if code != 0 or data.get("is_error"):
             reason = "crashed"
             continue
@@ -1576,7 +1831,12 @@ def _replay_side(
         m = measure(claude_home, cwd, job_sid, job_prompt, meta["helper"])
         # Reason: the warm-up's own calls being priced does not prove the JOB's
         # first call actually read the shared prefix from cache; both are checked.
-        if m["first_cache_read"] < 0.99 * warm["first_context"] - 2_000:
+        # The read must cover the warm-up's whole context and also the job's own
+        # (Ruling R8): a longer job request (an attachment regenerated with more
+        # content) would otherwise pay for an uncached rest that can differ
+        # between the two sides and skew keep against delegate.
+        read = m["first_cache_read"]
+        if read < 0.99 * warm["first_context"] - 2_000 or read < 0.99 * m["first_context"] - 2_000:
             reason = "never warm"
             continue
         side = {
@@ -1605,6 +1865,16 @@ def replay_pair(snap: Path, work: Path, claude_home: Path, rng: random.Random) -
     rng.shuffle(order)
     if not meta.get("model"):
         return {"id": meta["id"], "order": order, "sides": {}, "inconclusive": True, "reason": "no model recorded"}
+    # Reason (Ruling R1): the guard is all that keeps a warm-up from running the
+    # job's tools under bypass permissions, so it is proven before anything runs.
+    if not warmup_guard_passes_preflight():
+        return {
+            "id": meta["id"],
+            "order": order,
+            "sides": {},
+            "inconclusive": True,
+            "reason": "warm-up guard failed its preflight",
+        }
     model = meta["model"] + ("[1m]" if (meta.get("context") or 0) > LARGE_CONTEXT else "")
     prompt = (snap / "message.txt").read_text()
     sides: dict[str, dict] = {}

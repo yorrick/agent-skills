@@ -208,13 +208,17 @@ the jobs the router selects, on the user's own work.
    message; a replay whose output still names a path into the real repository makes the
    job inconclusive and prints a warning. The delegate side also gets exactly the note
    the live router would add; the keep side gets nothing. Replays run like the user's
-   session: bypass permissions, the same MCP servers, network and credentials. The one
-   difference is that each clone's `origin` is a local bare copy, so a normal push stays
-   local (a push to an explicit URL or another remote still could not be stopped). A
-   crash or a changed clone after the warm-up fails that attempt and is retried in a
-   fresh clone; a timeout, an unpriced call or a leaked real path ends the job at once,
-   without running the other side. The two sides run one after the other in random
-   order. When both are done, the runner
+   session: bypass permissions, the same MCP servers, network and credentials. The
+   differences are that each clone's `origin` is a local bare copy, holding its own copy
+   of every object (no hard links into the real repository, no borrowed objects), so a
+   normal push stays local (a push to an explicit URL or another remote still could not
+   be stopped), and that git's repository-local variables (`GIT_DIR` and its kin, as
+   `git rev-parse --local-env-vars` lists them) are removed from every git call and
+   every process the fork check starts (the replay, the judge's Codex, publish's `gh`),
+   so none of them can be pointed at another repository. A crash or a changed clone after the warm-up fails that attempt and is
+   retried in a fresh clone; a timeout, an unpriced call, a leaked real path or a
+   warm-up that ran a tool ends the job at once, without running the other side. The
+   two sides run one after the other in random order. When both are done, the runner
    pushes the two results (their final files, committed as they stand, never the ignored setup files copied in) to a private
    copy of the repository on GitHub, one per repository (a fork of a public repository
    would be public), as `replay/<job>/keep` and `replay/<job>/delegate`. It then opens
@@ -225,10 +229,28 @@ the jobs the router selects, on the user's own work.
    copy; it never force-pushes and refuses if the result branches already exist.
 4. **Measure** API-equivalent cost, wall time and calls from the transcripts, subagents
    included, pricing every call by its recorded categories (cache reads, cache writes,
-   uncached input, output). Right before each side runs, a one-line throwaway fork of the
-   same transcript, with the same tools and settings and a prompt that asks only for a one-word reply, warms the cache (a fork without tools would cache a different prefix), and a pair is scored only when both
-   sides' first calls read the prefix from cache; otherwise it is rerun. Every run is scored on what
-   it really cost and took, including a parent that kept a job it was told to delegate;
+   uncached input, output). Right before each side runs, a throwaway fork warms the cache.
+   It is launched exactly like the side's own run: the same transcript, message,
+   environment (the delegate side's note included), settings and flags, because a
+   prompt-cache entry ends with the request that wrote it. That makes the two
+   invocations identical, not necessarily the two requests (startup hooks or other
+   runtime state can still differ), so warmth is checked on every attempt: a pair is
+   scored only when both sides' first calls read the prefix from cache; otherwise it is
+   rerun. Each job's first read must cover both the warm-up's whole context and the
+   job's own first context, so a longer job request cannot pay for an uncached rest
+   that differs between the sides. A hook passed to both calls acts only in the
+   warm-up, where it denies the first tool call and stops the run, so the warm-up
+   writes the cache and changes nothing. The hook blocks the tool if it fails, it is
+   tried with and without the warm-up's marker before anything runs, a warm-up whose
+   transcript shows a tool that ran (or cannot show that none did) ends the job at
+   once, and an attempt whose job had a tool blocked by the failing hook is retried.
+   Settings that stop Claude Code from running hooks at all (`disableAllHooks`, a
+   managed `allowManagedHooksOnly`) would silence the hook unseen; that is accepted,
+   because the warm-up would then only run the job once in its scratch clone, as a job
+   attempt does anyway (only a snapshot the user marked safe is replayed, and a pair
+   already runs the job up to six times), and the warm-up scan then ends the job with
+   a warning. Every run is scored on what it
+   really cost and took, including a parent that kept a job it was told to delegate;
    the report counts these overrides. The shadow log's Jev cost and latency over every
    message in the check period are added to the delegate side.
 5. **Judge** quality by criteria fixed in advance: the project's tests pass where they

@@ -333,6 +333,10 @@ def _replay_locked(sid: str, trial: bool) -> int:
         print(f"{sid}: inconclusive ({reason})")
     if reason == "a replay used a path into the real repository":
         print(f"WARNING: {sid} replay used a path into the real repository; discarded.")
+    if reason == "warm-up ran a tool":
+        # Reason: under bypass permissions, that tool may have had an effect the
+        # clone cannot show (a network call, a push); someone should look.
+        print(f"WARNING: {sid} warm-up ran a tool despite its guard; discarded. Its clone is under {out}.")
     for name in result["order"]:
         s = result["sides"].get(name)
         if s is None:

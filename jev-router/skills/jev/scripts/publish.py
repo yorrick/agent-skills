@@ -4,12 +4,21 @@ that shows the delegate result against the keep result."""
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from replay import IDENTITY, refuse_if_ignored_leaked, refuse_if_unusable, restored_ignored, run, run_on_source
+from replay import (
+    IDENTITY,
+    refuse_if_ignored_leaked,
+    refuse_if_unusable,
+    restored_ignored,
+    run,
+    run_on_source,
+    without_local_git_vars,
+)
 
 LOGIN_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 # Reason: the clone's own git hooks (husky, pre-commit) could reformat the result
@@ -20,7 +29,10 @@ NO_HOOKS = ("-c", "core.hooksPath=/dev/null")
 
 
 def run_gh(*args: str) -> str:
-    result = subprocess.run(["gh", *args], capture_output=True, text=True)
+    """One `gh` call, without git's repository-local variables (Ruling R6): gh
+    runs git itself, and a GIT_DIR inherited from the runner would point it at
+    another repository."""
+    result = subprocess.run(["gh", *args], capture_output=True, text=True, env=without_local_git_vars(os.environ))
     if result.returncode != 0:
         raise RuntimeError(f"gh {' '.join(args[:2])} failed: {result.stderr.strip()[:300]}")
     return result.stdout

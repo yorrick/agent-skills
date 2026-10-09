@@ -1,0 +1,34 @@
+{
+  "cli_version": "0.5.0",
+  "checkpoint_id": "88b95e389fd1",
+  "session_id": "43bce55b-7aa7-4002-97d7-3963c1eebb96",
+  "strategy": "manual-commit",
+  "created_at": "2026-10-09T20:12:17.71423Z",
+  "branch": "jev-fork-check-warmup",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/superpowers/specs/2026-09-28-jev-router-cache-aware-design.md"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-5-5",
+  "turn_id": "7b00d442aeb0",
+  "token_usage": {
+    "input_tokens": 4012,
+    "cache_creation_tokens": 9452417,
+    "cache_read_tokens": 542448738,
+    "output_tokens": 1506480,
+    "api_call_count": 1694
+  },
+  "session_metrics": {
+    "turn_count": 460
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-10-09T20:12:13.236079Z",
+    "agent_lines": 0,
+    "human_added": 432,
+    "human_modified": 15,
+    "human_removed": 0,
+    "total_committed": 432,
+    "agent_percentage": 0
+  }
+}

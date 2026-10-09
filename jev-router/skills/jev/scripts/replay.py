@@ -25,6 +25,7 @@ from typing import Any
 
 import snapshot
 import usage
+import warmup_hook
 
 IDENTITY = ["-c", "user.name=jev fork check", "-c", "user.email=jev-fork-check@localhost"]
 
@@ -258,10 +259,14 @@ def restore(snap: Path, dest: Path, *, copy_ignored: bool = True) -> Path:
     bare, clone = dest / "origin.git", dest / "repo"
     # Reason: a clone from a local path hard-links the object files, so a chmod
     # or an in-place write inside the copy would reach the real `.git/objects`;
-    # `--no-hardlinks` copies them. The fetch below goes through the pack
+    # `--no-hardlinks` copies them. A source that borrows objects (made with
+    # `--shared` or `--reference`) would also pass its `objects/info/alternates`
+    # on, so the copy kept reading the lender's store; `--dissociate` copies the
+    # borrowed objects in and drops that file (git accepts it without
+    # `--reference` for exactly this case). The fetch below goes through the pack
     # protocol and never links, and the clone of the bare copy only links
     # scratch files to scratch files.
-    run_on_source("git", "clone", "-q", "--bare", "--no-hardlinks", str(top), str(bare))
+    run_on_source("git", "clone", "-q", "--bare", "--no-hardlinks", "--dissociate", str(top), str(bare))
     # Reason: the bare copy has already fetched everything it needs; dropping
     # "origin" leaves it with no configured path back to the source.
     run("git", "-C", str(bare), "remote", "remove", "origin")
@@ -1019,13 +1024,20 @@ def refuse_if_ignored_leaked(clone: Path, ignored: list[str], label: str) -> Non
 
 
 DEFAULT_CLAUDE_HOME = Path.home() / ".claude"
-# Reason: a prompt-cache entry ends with the exact request that wrote it, so a
-# warm-up warms the job's first call only if it sends that very request: the
-# job's own message and environment, with the same flags. These settings go to
-# every call, warm-up and job alike, and their one hook (warmup_hook.py) acts
-# only when WARMUP_VAR is "1": it denies the warm-up's first tool and stops it.
-# The hook runs by absolute path with this interpreter, never through the user's
-# shell or PATH. Built once, so the two argv are byte-identical.
+# Reason: a prompt-cache entry ends with the exact request that wrote it, so the
+# runner launches the warm-up exactly like the job: the job's own message and
+# environment, with the same flags. That makes the two invocations identical,
+# not the two API requests (startup-hook output, regenerated attachments or
+# other runtime state can still differ); such a difference can only leave an
+# attempt cold, which the per-attempt warmth check turns into an inconclusive
+# result, never a wrong measurement. These settings go to every call, warm-up
+# and job alike, and their one hook (warmup_hook.py) acts only when WARMUP_VAR
+# is "1": it denies the warm-up's first tool and stops it. The hook runs by
+# absolute path with this interpreter, never through the user's shell or PATH.
+# Claude Code lets a tool run when its hook fails (cannot start, crashes, times
+# out, exits non-zero other than 2) unless the hook says `"onFailure": "block"`; in the
+# job the hook exits 0, so that never blocks there. Built once, so the two argv
+# are byte-identical.
 WARMUP_VAR = "JEV_FORK_CHECK_WARMUP"
 WARMUP_HOOK = Path(__file__).resolve().with_name("warmup_hook.py")
 SETTINGS = json.dumps(
@@ -1035,13 +1047,18 @@ SETTINGS = json.dumps(
                 {
                     "matcher": "*",
                     "hooks": [
-                        {"type": "command", "command": f"{shlex.quote(sys.executable)} {shlex.quote(str(WARMUP_HOOK))}"}
+                        {
+                            "type": "command",
+                            "command": f"{shlex.quote(sys.executable)} {shlex.quote(str(WARMUP_HOOK))}",
+                            "onFailure": "block",
+                        }
                     ],
                 }
             ]
         }
     }
 )
+PREFLIGHT_TIMEOUT = 60
 ATTEMPTS = 3
 TIMEOUT_SECONDS = 4 * 3600
 LARGE_CONTEXT = 200_000
@@ -1213,6 +1230,46 @@ def _verify_reported_session(reported: object, new_files: list[Path]) -> None:
         raise RuntimeError(f"claude reported session {reported}, which is not among the session files it just wrote")
 
 
+def _new_entries(session_file: Path, prompt: str) -> list[dict]:
+    """A call's own entries: its session file's new turn (from `prompt`'s entry
+    on, the slice `measure` scores) plus its subagents' transcripts, never the
+    inherited history."""
+    subs_dir = session_file.with_suffix("") / "subagents"
+    subs = [e for sub in sorted(subs_dir.glob("*.jsonl")) for e in usage.read_entries(sub)] if subs_dir.exists() else []
+    return _turn(usage.read_entries(session_file), prompt) + subs
+
+
+def _hook_rejected(entry: dict, block: dict) -> bool:
+    """Whether a tool_result records a call a hook rejected, so its tool never
+    ran. Claude Code (2.1.295, seen in the trial clone's transcripts) records the
+    warm-up guard's denial as an is_error tool_result whose entry carries
+    `permissionDecision` {"decision": "reject", "source": "hook"}; a tool that
+    ran carries {"decision": "accept", ...} instead."""
+    decision = entry.get("permissionDecision")
+    return (
+        block.get("is_error") is True
+        and isinstance(decision, dict)
+        and decision.get("decision") == "reject"
+        and decision.get("source") == "hook"
+    )
+
+
+def _ran_a_tool(new_files: list[Path], prompt: str) -> bool:
+    """Whether a tool actually ran in any of `new_files`' own entries
+    (`_new_entries`): any tool_result that is not a hook's rejection. A result
+    that does not look exactly like one counts as a tool that ran, so a
+    transcript this does not understand fails closed."""
+    for f in new_files:
+        for entry in _new_entries(f, prompt):
+            content = (entry.get("message") or {}).get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_result" and not _hook_rejected(entry, block):
+                    return True
+    return False
+
+
 def _leaked_real_path(new_files: list[Path], prompt: str, leak_forms: list[str]) -> bool:
     """Whether a tool call in any of `new_files`' own new turn, or in their
     subagent transcripts, still names the real checkout. `new_files` (Open 1b)
@@ -1226,14 +1283,7 @@ def _leaked_real_path(new_files: list[Path], prompt: str, leak_forms: list[str])
         return False
     pattern = re.compile(_alternation(leak_forms) + _PATH_BOUNDARY)
     for f in new_files:
-        turn = _turn(usage.read_entries(f), prompt)
-        subs_dir = f.with_suffix("") / "subagents"
-        subs = (
-            [e for sub in sorted(subs_dir.glob("*.jsonl")) for e in usage.read_entries(sub)]
-            if subs_dir.exists()
-            else []
-        )
-        for entry in turn + subs:
+        for entry in _new_entries(f, prompt):
             if entry.get("type") != "assistant":
                 continue
             for block in (entry.get("message") or {}).get("content") or []:
@@ -1521,6 +1571,41 @@ def measure(claude_home: Path, clone: Path, session_id: str, prompt: str, helper
     }
 
 
+def _run_hook(command: str, env: dict) -> subprocess.CompletedProcess[str] | None:
+    """One run of a hook command through the shell, as a PreToolUse hook gets it;
+    None if it could not run or did not finish in time."""
+    hook_input = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "true"}})
+    try:
+        return subprocess.run(
+            command, shell=True, env=env, input=hook_input, capture_output=True, text=True, timeout=PREFLIGHT_TIMEOUT
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def warmup_guard_passes_preflight() -> bool:
+    """Whether the warm-up guard works, checked before any `claude` runs by
+    running every hook command SETTINGS holds, read back from that very string so
+    it is exactly what the calls will run. With WARMUP_VAR set to "1" each must
+    exit 0 and print the stop-and-deny decision (`warmup_hook.STOP`); without
+    it, each must exit 0 and print nothing. So the guard can neither let a
+    warm-up's tool run nor stop a job."""
+    groups = json.loads(SETTINGS)["hooks"]["PreToolUse"]
+    commands = [hook["command"] for group in groups for hook in group["hooks"]]
+    job_env = {k: v for k, v in os.environ.items() if k != WARMUP_VAR}
+    warmup_env = {**job_env, WARMUP_VAR: "1"}
+    for command in commands:
+        warm, job = _run_hook(command, warmup_env), _run_hook(command, job_env)
+        if warm is None or job is None or warm.returncode != 0 or job.returncode != 0 or job.stdout:
+            return False
+        try:
+            if json.loads(warm.stdout) != warmup_hook.STOP:
+                return False
+        except json.JSONDecodeError:
+            return False
+    return bool(commands)
+
+
 def _replay_side(
     snap: Path, work: Path, claude_home: Path, meta: dict, prompt: str, model: str, name: str, position: int
 ) -> tuple[dict, str]:
@@ -1528,16 +1613,17 @@ def _replay_side(
     clone, until the warm-up and the job both prove the cache was hot and
     neither crashes, times out, nor touches the real checkout. Returns the
     last attempt's result and, if the side never became scoreable, why. A
-    leak, a timeout or an unpriced call ends the side (and, via the caller,
-    the whole pair) at once, without retrying: none of the three would be
-    fixed by a fresh clone."""
+    leak, a warm-up that ran a tool, a timeout or an unpriced call ends the
+    side (and, via the caller, the whole pair) at once, without retrying: none
+    of them would be fixed by a fresh clone."""
     note = {"JEV_ROUTER_NOTE_FILE": str(snap / "note.txt") if name == "delegate" else None}
-    # Reason: the warm-up's first request must equal the job's (a cache entry
-    # ends with the request that wrote it), so it gets exactly the job's
-    # environment, the note included, and differs only by WARMUP_VAR, which
-    # makes warmup_hook.py stop it before any tool runs. The job removes the
-    # variable, so a value inherited from the runner never turns it into a
-    # warm-up.
+    # Reason: so that the warm-up's first request can match the job's (a cache
+    # entry ends with the request that wrote it), the warm-up gets exactly the
+    # job's environment, the note included, and differs only by WARMUP_VAR,
+    # which makes warmup_hook.py stop it before any tool runs. Whether the job
+    # then really read the cache is checked on every attempt below. The job
+    # removes the variable, so a value inherited from the runner never turns it
+    # into a warm-up.
     job_env = {**note, WARMUP_VAR: None}
     warmup_env = {**note, WARMUP_VAR: "1"}
     side: dict = {}
@@ -1561,9 +1647,9 @@ def _replay_side(
         side = {"attempt": attempt, "clone": str(clone), "warm": False, "skipped": skipped}
         before_status = run("git", "-C", str(clone), "status", "--porcelain", "-uall")
         before_head = run("git", "-C", str(clone), "rev-parse", "HEAD").strip()
-        # Reason: the warm-up sends the job's own first request (same session,
-        # message, settings and model), so the job's first call can read all of
-        # it from cache; the hook stops the warm-up before its first tool.
+        # Reason: the warm-up is launched exactly like the job (same session,
+        # message, settings and model), so the job's first call can read its
+        # prefix from cache; the hook stops the warm-up before its first tool.
         before_files = _session_file_names(pdir)
         warm_data, _, warm_code, warm_timed_out = run_claude(
             cwd, sid, job_prompt, warmup_env, claude_home, model, pgid_file=dest / "claude.pgid"
@@ -1575,6 +1661,14 @@ def _replay_side(
         # not match is still scanned rather than lost to that error.
         if _leaked_real_path(warm_new_files, job_prompt, leak_forms):
             return side, "a replay used a path into the real repository"
+        # Reason (Ruling R1): a guard that failed or was skipped lets the warm-up
+        # run the job's own tools under bypass permissions, and the clone check
+        # below cannot see a network call, an ignored file or a write to a file
+        # that was already dirty. Like a leak, it ends the pair at once: an
+        # effect may already have happened, and a fresh clone does not mend the
+        # guard. Scanned like the leak, before the session-id check.
+        if _ran_a_tool(warm_new_files, job_prompt):
+            return side, "warm-up ran a tool"
         _verify_reported_session(warm_data.get("session_id"), warm_new_files)
         if warm_timed_out:
             return side, "timed out"
@@ -1641,6 +1735,16 @@ def replay_pair(snap: Path, work: Path, claude_home: Path, rng: random.Random) -
     rng.shuffle(order)
     if not meta.get("model"):
         return {"id": meta["id"], "order": order, "sides": {}, "inconclusive": True, "reason": "no model recorded"}
+    # Reason (Ruling R1): the guard is all that keeps a warm-up from running the
+    # job's tools under bypass permissions, so it is proven before anything runs.
+    if not warmup_guard_passes_preflight():
+        return {
+            "id": meta["id"],
+            "order": order,
+            "sides": {},
+            "inconclusive": True,
+            "reason": "warm-up guard failed its preflight",
+        }
     model = meta["model"] + ("[1m]" if (meta.get("context") or 0) > LARGE_CONTEXT else "")
     prompt = (snap / "message.txt").read_text()
     sides: dict[str, dict] = {}

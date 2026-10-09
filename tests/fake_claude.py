@@ -4,17 +4,23 @@
 prompt and one model call, and prints the JSON result.
 
 A call is a warm-up when JEV_FORK_CHECK_WARMUP is "1", exactly as the runner marks one; the
-argv never tells the two apart, since a warm-up sends the job's own request. Like the real
-CLI before a tool call, every call runs the PreToolUse hook commands its `--settings` name
-(here through /bin/sh), and its one "tool" (writing RESULT.txt, plus handing
-the job to the helper when a note is set) runs only if no hook stopped it. A warm-up whose
-hook fails to stop it therefore changes the clone, just as a real one would.
+argv never tells the two apart, since a warm-up is launched exactly like its job. Each call's
+one model turn asks for one tool: `Agent` (handing the job to the helper) when a note is set,
+`Bash` otherwise. Like the real CLI before a tool call, it first runs the PreToolUse hook
+commands its `--settings` name (here through /bin/sh) and treats them as Claude Code's hook
+docs say: a `permissionDecision` of "deny" or an exit code of 2 blocks the tool; any other
+failure (non-zero exit, a command that cannot start) blocks it only when the hook sets
+`"onFailure": "block"`, and otherwise the tool runs anyway. The tool, when it runs, writes
+RESULT.txt (and, for `Agent`, a subagent transcript). Each tool call gets a tool_result entry
+shaped like the real ones: `permissionDecision` {"decision": "accept", ...} when it ran,
+{"decision": "reject", "source": "hook", ...} with is_error when a hook blocked it.
 
 Env vars the tests use to steer it:
   JEV_FORK_CHECK_WARMUP     "1" marks the call as a warm-up (the FAKE_CLAUDE_* switches below
                             that name the warm-up or the job key off this alone).
-  JEV_ROUTER_NOTE_FILE      unless a hook stops the call, hands the job to the named helper and
-                            writes a subagent transcript.
+  JEV_ROUTER_NOTE_FILE      the call's tool is `Agent`, handing the job to the named helper.
+  FAKE_CLAUDE_HOOK_FAILS=<warmup|job>  in that call, every hook command fails to start (as if
+                            its interpreter had gone: exit 127) instead of running.
   FAKE_CLAUDE_COLD_WARMUP   every warm-up call is cold: no priced call at all.
   FAKE_CLAUDE_COLD_WARMUP_ONCE=<path>  only the first warm-up call ever seen (tracked in the
                             named counter file) is cold; later ones are warm.
@@ -43,7 +49,8 @@ Env vars the tests use to steer it:
                             JSON result: a timeout whose transcript is still there to scan.
   FAKE_CLAUDE_LOG           appends each call's details to a file: its full argv, whether it was
                             a warm-up (and the raw JEV_FORK_CHECK_WARMUP value), its
-                            JEV_ROUTER_NOTE_FILE, whether a hook stopped it, the names of the
+                            JEV_ROUTER_NOTE_FILE, whether a hook stopped it and whether its
+                            tool ran, the names of the
                             CLAUDE* variables it inherited, its HOME and PATH, and a digest of
                             its whole environment except JEV_FORK_CHECK_WARMUP (a digest, so no
                             value of the test runner's own environment is written out).
@@ -111,25 +118,46 @@ if not warm and os.environ.get("FAKE_CLAUDE_CRASH") == "1":
     sys.exit(1)
 
 
-def hook_stops() -> bool:
-    """Run every PreToolUse hook command `--settings` names, through /bin/sh, and
-    report whether one answered `"continue": false`, which stops the call before
-    its tool runs."""
+tool = "Agent" if note else "Bash"
+
+
+def run_hooks() -> tuple[bool, bool, str]:
+    """Run every PreToolUse hook command `--settings` names, through /bin/sh, the way
+    Claude Code's hook docs describe, and return (blocked, stopped, reason): whether
+    the tool is blocked, whether a hook answered `"continue": false`, and the reason
+    a blocked tool's result reports."""
     if "--settings" not in args:
-        return False
+        return False, False, ""
     settings = json.loads(args[args.index("--settings") + 1])
-    hook_input = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}})
+    hook_input = json.dumps({"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": {}})
+    fails = os.environ.get("FAKE_CLAUDE_HOOK_FAILS") == ("warmup" if warm else "job")
+    blocked, stopped, reason = False, False, ""
     for group in (settings.get("hooks") or {}).get("PreToolUse") or []:
         for hook in group.get("hooks") or []:
-            done = subprocess.run(hook["command"], shell=True, input=hook_input, capture_output=True, text=True)
-            if done.returncode != 0:
-                sys.exit(f"fake claude: hook {hook['command']!r} exited {done.returncode}: {done.stderr}")
-            if done.stdout.strip() and json.loads(done.stdout).get("continue") is False:
-                return True
-    return False
+            if fails:
+                code, out, err = 127, "", f"/bin/sh: {hook['command']}: command not found"
+            else:
+                done = subprocess.run(hook["command"], shell=True, input=hook_input, capture_output=True, text=True)
+                code, out, err = done.returncode, done.stdout, done.stderr
+            if code == 2:
+                blocked, reason = True, err.strip()
+            elif code != 0:
+                # Reason: a failed hook does not block the tool unless it says so.
+                if hook.get("onFailure") == "block":
+                    blocked, reason = True, f"hook failed with exit code {code}: {err.strip()}"
+            elif out.strip():
+                try:
+                    decision = json.loads(out)
+                except json.JSONDecodeError:
+                    continue
+                specific = decision.get("hookSpecificOutput") or {}
+                if specific.get("permissionDecision") == "deny":
+                    blocked, reason = True, str(specific.get("permissionDecisionReason") or "")
+                stopped = stopped or decision.get("continue") is False
+    return blocked, stopped, reason
 
 
-stopped = hook_stops()
+blocked, stopped, reason = run_hooks()
 
 entries = [json.loads(line) for line in (pdir / f"{sid}.jsonl").read_text().splitlines()]
 new = str(uuid.uuid4())
@@ -147,17 +175,15 @@ if warm and (once := os.environ.get("FAKE_CLAUDE_COLD_WARMUP_ONCE")):
 if warm and os.environ.get("FAKE_CLAUDE_DIRTY_WARMUP") == "1":
     Path("dirty.txt").write_text("a warm-up should never leave this behind\n")
 
-content: list[dict] = [{"type": "text", "text": "ok"}]
-if note and not stopped:
+# Reason: a cold warm-up makes no model call, so it never asks for a tool at all.
+tool_ran = not blocked and not cold_warmup
+if note:
     helper = re.search(r"`(jev-router:[a-z]+)`", Path(note).read_text())
-    content = [
-        {
-            "type": "tool_use",
-            "id": "t1",
-            "name": "Agent",
-            "input": {"subagent_type": helper.group(1) if helper else "?", "prompt": "brief"},
-        }
-    ]
+    tool_input = {"subagent_type": helper.group(1) if helper else "?", "prompt": "brief"}
+    content: list[dict] = [{"type": "tool_use", "id": "t1", "name": "Agent", "input": tool_input}]
+else:
+    content = [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "echo done > RESULT.txt"}}]
+if note and tool_ran:
     sub = pdir / new / "subagents"
     sub.mkdir(parents=True)
     (sub / "agent-1.jsonl").write_text(
@@ -208,10 +234,27 @@ if not cold_warmup:
             },
         }
     )
+    # Reason: shaped like the real entries (Claude Code 2.1.295): a tool that ran
+    # is accepted, one a hook blocked is rejected with source "hook".
+    for block in content:
+        if tool_ran:
+            result_block = {"tool_use_id": block["id"], "type": "tool_result", "content": "done", "is_error": False}
+            extra: dict = {"permissionDecision": {"decision": "accept", "source": "config", "reasonType": "mode"}}
+        else:
+            text = f"PreToolUse:{block['name']} hook error: {reason}"
+            result_block = {"tool_use_id": block["id"], "type": "tool_result", "content": text, "is_error": True}
+            extra = {
+                "toolUseResult": f"Error: {text}",
+                "toolDenialKind": "permission-rule",
+                "permissionDecision": {"decision": "reject", "source": "hook", "reasonType": "hook"},
+            }
+        entries.append(
+            {"type": "user", "sessionId": new, "message": {"role": "user", "content": [result_block]}, **extra}
+        )
 (pdir / f"{new}.jsonl").write_text("".join(json.dumps(e) + "\n" for e in entries))
-if not stopped:
+if tool_ran:
     Path("RESULT.txt").write_text(f"done by {'delegate' if note else 'keep'}\n")
-log(hook_stopped=stopped)
+log(hook_stopped=stopped, tool_ran=tool_ran)
 if not warm and os.environ.get("FAKE_CLAUDE_HANG_AFTER_WRITE") == "1":
     # Reason: the session file (and any leak in it) is already on disk; this
     # simulates a run the caller's timeout has to kill, not a clean exit.

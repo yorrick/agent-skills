@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import json
 import os
@@ -19,6 +20,7 @@ import threading
 import time
 import urllib.parse
 import uuid
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -29,10 +31,36 @@ import warmup_hook
 
 IDENTITY = ["-c", "user.name=jev fork check", "-c", "user.email=jev-fork-check@localhost"]
 
-# `restore` reads the same "what counts as ignored" list the hook used to
-# fingerprint dependencies; this alias lets a caller reach it through `replay`
-# without importing `snapshot` directly.
-ignored_entries = snapshot.ignored_entries
+
+@functools.cache
+def _local_git_vars() -> frozenset[str]:
+    """The repository-local variables git itself names (`git rev-parse
+    --local-env-vars`, the list it clears for a submodule): GIT_DIR,
+    GIT_WORK_TREE, GIT_INDEX_FILE, GIT_COMMON_DIR and the like. Asked once, with
+    every GIT_ variable removed and outside any repository, so nothing inherited
+    can change the answer."""
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    found = subprocess.run(["git", "rev-parse", "--local-env-vars"], cwd="/", env=clean, capture_output=True, text=True)
+    names = frozenset(found.stdout.split())
+    if found.returncode != 0 or "GIT_DIR" not in names:
+        raise RuntimeError(f"git rev-parse --local-env-vars failed: {found.stderr.strip()[:300]}")
+    return names
+
+
+def without_local_git_vars(env: Mapping[str, str]) -> dict[str, str]:
+    """`env` without git's repository-local variables (Ruling R6). git obeys
+    GIT_DIR and its kin over `-C`, so with one inherited from the runner's own
+    environment, a git call on a scratch copy, or the replayed claude's own,
+    would act on whatever repository it names, the real one included."""
+    local = _local_git_vars()
+    return {k: v for k, v in env.items() if k not in local}
+
+
+def ignored_entries(top: Path) -> list[str]:
+    """What `top` ignores, read exactly as the hook read it when it fingerprinted
+    dependencies (`snapshot.ignored_entries`), but without git's
+    repository-local variables."""
+    return snapshot.ignored_entries(top, env=without_local_git_vars(snapshot.git_env()))
 
 
 class Inconclusive(RuntimeError):
@@ -51,8 +79,15 @@ def _command_name(args: tuple[str, ...]) -> str:
     return f"git {rest[0]}" if rest else "git"
 
 
-def run(*args: str, cwd: Path | None = None, env: dict | None = None) -> str:
-    result = subprocess.run(list(args), cwd=cwd, env=env, capture_output=True, text=True)
+def run(
+    *args: str, cwd: Path | None = None, env: Mapping[str, str] | None = None, local: dict[str, str] | None = None
+) -> str:
+    """Run a command (git, or `cp`) with `env`, by default this process's own
+    environment, always minus git's repository-local variables
+    (`without_local_git_vars`). `local` sets back the only ones a call means to
+    use, such as the start commit's own GIT_INDEX_FILE."""
+    full = {**without_local_git_vars(os.environ if env is None else env), **(local or {})}
+    result = subprocess.run(list(args), cwd=cwd, env=full, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"{_command_name(args)} failed: {result.stderr.strip()[:300]}")
     return result.stdout
@@ -61,7 +96,8 @@ def run(*args: str, cwd: Path | None = None, env: dict | None = None) -> str:
 def run_on_source(*args: str) -> str:
     """A git call that reads the user's real checkout. It runs with
     GIT_OPTIONAL_LOCKS=0 (`snapshot.git_env`), so it never takes
-    `.git/index.lock` away from a `git add` the user's own session is running."""
+    `.git/index.lock` away from a `git add` the user's own session is running,
+    and (through `run`) without git's repository-local variables."""
     return run(*args, env=snapshot.git_env())
 
 
@@ -105,15 +141,15 @@ def _resolves_inside(top: Path, link: Path) -> bool:
     return _inside(top, link.parent / raw)
 
 
-def _refuse_escaping_links(clone: Path, env: dict) -> None:
+def _refuse_escaping_links(clone: Path, start_index: dict[str, str]) -> None:
     """Every symlink in the start state (checked out, applied from the diff or
-    extracted from the tar: the start index `env` names lists them all) must
+    extracted from the tar: the start index `start_index` names lists them all) must
     point inside the clone. A committed `data -> /Users/me/work/app/data`
     would otherwise let a replay write straight through it into the real
     checkout, and the leak scan would never see the real path spelled out.
     Each target is read from its blob, as git recorded it, and checked both as
     text and as resolved on disk."""
-    listing = run("git", "-C", str(clone), "ls-files", "-s", "-z", env=env)
+    listing = run("git", "-C", str(clone), "ls-files", "-s", "-z", local=start_index)
     links = [(e.split("\t", 1)[1], e.split()[1]) for e in listing.split("\0") if e.startswith("120000 ")]
     if not links:
         return
@@ -121,6 +157,7 @@ def _refuse_escaping_links(clone: Path, env: dict) -> None:
         ["git", "-C", str(clone), "cat-file", "--batch"],
         input="".join(f"{oid}\n" for _, oid in links).encode(),
         capture_output=True,
+        env=without_local_git_vars(os.environ),
     )
     if blobs.returncode != 0:
         raise RuntimeError(f"git cat-file failed: {blobs.stderr.decode(errors='replace').strip()[:300]}")
@@ -271,7 +308,10 @@ def restore(snap: Path, dest: Path, *, copy_ignored: bool = True) -> Path:
     # "origin" leaves it with no configured path back to the source.
     run("git", "-C", str(bare), "remote", "remove", "origin")
     branch = meta["branch"] if meta["branch"] != "HEAD" else "jev-snapshot"
-    if subprocess.run(["git", "-C", str(bare), "cat-file", "-e", head], capture_output=True).returncode != 0:
+    present = subprocess.run(
+        ["git", "-C", str(bare), "cat-file", "-e", head], capture_output=True, env=without_local_git_vars(os.environ)
+    )
+    if present.returncode != 0:
         run_on_source("git", "-C", str(bare), "fetch", "-q", str(top), head)
     # Reason: the branch may have moved on since the snapshot; point it back so the
     # clone checks out exactly the snapshot's commit.
@@ -294,13 +334,13 @@ def restore(snap: Path, dest: Path, *, copy_ignored: bool = True) -> Path:
     # excluded, untracked path and silently drop it from the tree.
     index_copy = dest / "start.index"
     shutil.copy2(clone / ".git" / "index", index_copy)
-    env = {**os.environ, "GIT_INDEX_FILE": str(index_copy)}
-    run("git", "-C", str(clone), "add", "-A", env=env)
-    tree = run("git", "-C", str(clone), "write-tree", env=env).strip()
+    start_index = {"GIT_INDEX_FILE": str(index_copy)}
+    run("git", "-C", str(clone), "add", "-A", local=start_index)
+    tree = run("git", "-C", str(clone), "write-tree", local=start_index).strip()
     start = run(
         "git", "-C", str(clone), *IDENTITY, "commit-tree", tree, "-p", head, "-m", "jev fork check: start"
     ).strip()
-    _refuse_escaping_links(clone, env)
+    _refuse_escaping_links(clone, start_index)
     run("git", "-C", str(clone), "update-ref", "refs/jev/start", start)
     if copy_ignored:
         # Reason: without drift an ignored path can never already exist in the
@@ -340,7 +380,7 @@ def restore(snap: Path, dest: Path, *, copy_ignored: bool = True) -> Path:
             _copy_selective(top, rel, clone / rel, excluded)
             skipped.extend(excluded)
             ignored.append(rel)
-        not_captured = sorted(set(snapshot.ignored_entries(top)) - set(captured))
+        not_captured = sorted(set(ignored_entries(top)) - set(captured))
         after = run("git", "-C", str(clone), "status", "--porcelain", "--untracked-files=all")
         if after != before:
             raise Inconclusive("ignored files changed since the snapshot")
@@ -611,7 +651,7 @@ def _judge_left_out(clone: Path) -> tuple[set[str], list[str]]:
     as one."""
     left_out: set[str] = set()
     kept: list[str] = []
-    for rel in snapshot.ignored_entries(clone):
+    for rel in ignored_entries(clone):
         parts = Path(rel).parts
         # Residual (F28 class, accepted in F33): a replay can plant `node_modules` or `pyvenv.cfg` to keep a folder.
         if _in_dependency_folder(rel) or any(_is_venv(clone.joinpath(*parts[:i])) for i in range(1, len(parts) + 1)):
@@ -759,6 +799,17 @@ def _relocate_venvs(clone: Path, target: Path, venvs: list[str]) -> None:
                 path.chmod(stat.S_IMODE(mode))
 
 
+def _symbolic_head(repo: Path) -> str:
+    """The branch `repo`'s HEAD names (`refs/heads/...`), or "" when detached."""
+    shown = subprocess.run(
+        ["git", "-C", str(repo), "symbolic-ref", "-q", "HEAD"],
+        capture_output=True,
+        text=True,
+        env=without_local_git_vars(os.environ),
+    )
+    return shown.stdout.strip()
+
+
 def _fresh_git(clone: Path, target: Path) -> None:
     """Make `target` a repository holding only HEAD's history and
     `refs/jev/start`, fetched from `clone` (Ruling F33), never a copy of the
@@ -768,9 +819,7 @@ def _fresh_git(clone: Path, target: Path) -> None:
     would. HEAD is the clone's own: the same branch, or the same commit when
     the clone's HEAD is detached. The origin remote, the reflogs and
     FETCH_HEAD, which all name the clone's folder, are removed."""
-    branch = subprocess.run(
-        ["git", "-C", str(clone), "symbolic-ref", "-q", "HEAD"], capture_output=True, text=True
-    ).stdout.strip()
+    branch = _symbolic_head(clone)
     head = run("git", "-C", str(clone), "rev-parse", "HEAD").strip()
     which = ["--branch", branch.removeprefix("refs/heads/")] if branch else []
     run(
@@ -790,17 +839,13 @@ def _fresh_git(clone: Path, target: Path) -> None:
     if not branch:
         # Reason: for a detached HEAD, clone puts the copy on a branch that
         # points at the same commit when there is one.
-        guessed = subprocess.run(
-            ["git", "-C", str(target), "symbolic-ref", "-q", "HEAD"], capture_output=True, text=True
-        ).stdout.strip()
+        guessed = _symbolic_head(target)
         run("git", "-C", str(target), "update-ref", "--no-deref", "HEAD", head)
         if guessed:
             run("git", "-C", str(target), "update-ref", "-d", guessed)
     shutil.rmtree(target / ".git" / "logs", ignore_errors=True)
     (target / ".git" / "FETCH_HEAD").unlink(missing_ok=True)
-    copied = subprocess.run(
-        ["git", "-C", str(target), "symbolic-ref", "-q", "HEAD"], capture_output=True, text=True
-    ).stdout.strip()
+    copied = _symbolic_head(target)
     if copied != branch or run("git", "-C", str(target), "rev-parse", "HEAD").strip() != head:
         raise RuntimeError(f"the judge's copy of {clone} did not get the clone's HEAD ({branch or head})")
 
@@ -1035,9 +1080,16 @@ DEFAULT_CLAUDE_HOME = Path.home() / ".claude"
 # is "1": it denies the warm-up's first tool and stops it. The hook runs by
 # absolute path with this interpreter, never through the user's shell or PATH.
 # Claude Code lets a tool run when its hook fails (cannot start, crashes, times
-# out, exits non-zero other than 2) unless the hook says `"onFailure": "block"`; in the
-# job the hook exits 0, so that never blocks there. Built once, so the two argv
-# are byte-identical.
+# out, exits non-zero other than 2) unless the hook says `"onFailure": "block"`;
+# in the job the hook exits 0, so that never blocks there (and an attempt where
+# it did is retried, `_guard_blocked_a_tool`). Settings that stop Claude Code
+# from running hooks at all (`disableAllHooks`, a managed `allowManagedHooksOnly`)
+# would silence the guard where the preflight cannot see it; that is accepted,
+# since the warm-up would then only run the job once in its scratch clone, as a
+# job attempt does anyway (a snapshot is replayed only once the user marked it
+# safe, and a pair already runs the job up to six times), and the warm-up scan
+# then ends the pair with a warning. Built once, so the two argv are
+# byte-identical.
 WARMUP_VAR = "JEV_FORK_CHECK_WARMUP"
 WARMUP_HOOK = Path(__file__).resolve().with_name("warmup_hook.py")
 SETTINGS = json.dumps(
@@ -1270,19 +1322,37 @@ def _tool_results(entries: list[dict]) -> list[tuple[dict, dict]]:
     return found
 
 
+def _tool_use_ids(entries: list[dict]) -> list[object]:
+    """The id of every tool_use block in `entries` (None where one has none)."""
+    return [
+        b.get("id")
+        for entry in entries
+        if entry.get("type") == "assistant"
+        for b in (entry.get("message") or {}).get("content") or []
+        if isinstance(b, dict) and b.get("type") == "tool_use"
+    ]
+
+
 def _ran_a_tool(new_files: list[Path], prompt: str) -> bool:
-    """Whether a tool actually ran in any of `new_files`' own entries
-    (`_new_entries`): any tool_result that is not a hook's rejection. A result
-    that does not look exactly like one counts as a tool that ran, and so does
-    a non-empty file with no entry carrying `prompt` (Ruling R4: its new turn
-    cannot be told from the history, so nothing shows that no tool ran), so a
-    transcript this does not understand fails closed."""
+    """Whether a tool may have run in any of `new_files`' own entries
+    (`_new_entries`). It did unless every tool call there has a result of its
+    own that is a hook's rejection: a result that is not one counts as a tool
+    that ran, and so does a call with no result (Ruling R7: Claude Code may
+    have crashed after the tool ran, before recording it), and a non-empty file
+    with no entry carrying `prompt` (Ruling R4: its new turn cannot be told from
+    the history, so nothing shows that no tool ran). A transcript this does not
+    understand fails closed."""
     for f in new_files:
         entries = usage.read_entries(f)
         turn = _turn(entries, prompt)
         if f.stat().st_size and not turn:
             return True
-        if any(not _hook_rejected(entry, block) for entry, block in _tool_results(turn + _subagent_entries(f))):
+        own = turn + _subagent_entries(f)
+        results = _tool_results(own)
+        if any(not _hook_rejected(entry, block) for entry, block in results):
+            return True
+        rejected = {block.get("tool_use_id") for _, block in results} - {None}
+        if any(call not in rejected for call in _tool_use_ids(own)):
             return True
     return False
 
@@ -1523,12 +1593,14 @@ def run_claude(
     ]
     # Reason: the runner itself usually runs inside a Claude Code session, whose
     # own markers (session id, messaging socket and token, child-session and
-    # bridge ids, effort, pid) would tie the replay to that session. Everything
-    # else, CLAUDE_CONFIG_DIR, PATH, HOME and the auth and provider variables in
+    # bridge ids, effort, pid) would tie the replay to that session. git's
+    # repository-local variables (GIT_DIR and its kin) would point the job's own
+    # git commands at whatever repository they name (Ruling R6). Everything else,
+    # CLAUDE_CONFIG_DIR, PATH, HOME and the auth and provider variables in
     # KEPT_CLAUDE_CODE_VARS included, is kept.
     env = {
         k: v
-        for k, v in os.environ.items()
+        for k, v in without_local_git_vars(os.environ).items()
         if k not in SESSION_VARS and (not k.startswith("CLAUDE_CODE_") or k in KEPT_CLAUDE_CODE_VARS)
     }
     env["JEV_ROUTER"] = "off"
@@ -1757,7 +1829,12 @@ def _replay_side(
         m = measure(claude_home, cwd, job_sid, job_prompt, meta["helper"])
         # Reason: the warm-up's own calls being priced does not prove the JOB's
         # first call actually read the shared prefix from cache; both are checked.
-        if m["first_cache_read"] < 0.99 * warm["first_context"] - 2_000:
+        # The read must cover the warm-up's whole context and also the job's own
+        # (Ruling R8): a longer job request (an attachment regenerated with more
+        # content) would otherwise pay for an uncached rest that can differ
+        # between the two sides and skew keep against delegate.
+        read = m["first_cache_read"]
+        if read < 0.99 * warm["first_context"] - 2_000 or read < 0.99 * m["first_context"] - 2_000:
             reason = "never warm"
             continue
         side = {

@@ -1405,6 +1405,19 @@ NOT_AN_ERROR = {
 }
 NO_DECISION = {k: v for k, v in DENIED_BY_THE_GUARD.items() if k != "permissionDecision"}
 REJECTED_ELSEWHERE = {**DENIED_BY_THE_GUARD, "permissionDecision": {"decision": "reject", "source": "config"}}
+# Reason: a second call, as the real side-2 warm-up of the 0.3.1 trial made in parallel
+# with its first (both were denied, each with its own result).
+SECOND_TOOL_USE = {
+    "type": "assistant",
+    "message": {"content": [{"type": "tool_use", "id": "toolu_2", "name": "Bash", "input": {}}]},
+}
+SECOND_DENIED = {
+    **DENIED_BY_THE_GUARD,
+    "message": {
+        "role": "user",
+        "content": [{**DENIED_BY_THE_GUARD["message"]["content"][0], "tool_use_id": "toolu_2"}],
+    },
+}
 
 
 @pytest.mark.parametrize(
@@ -1418,6 +1431,11 @@ REJECTED_ELSEWHERE = {**DENIED_BY_THE_GUARD, "permissionDecision": {"decision": 
         ([], [REJECTED_ELSEWHERE], [], True),
         ([RAN], [DENIED_BY_THE_GUARD], [], False),
         ([], [DENIED_BY_THE_GUARD], [RAN], True),
+        ([], [], [], True),
+        ([], [SECOND_TOOL_USE, DENIED_BY_THE_GUARD, SECOND_DENIED], [], False),
+        ([], [SECOND_TOOL_USE, DENIED_BY_THE_GUARD], [], True),
+        ([], [SECOND_DENIED], [], True),
+        ([], [DENIED_BY_THE_GUARD], [SECOND_TOOL_USE], True),
     ],
     ids=[
         "denied",
@@ -1428,6 +1446,11 @@ REJECTED_ELSEWHERE = {**DENIED_BY_THE_GUARD, "permissionDecision": {"decision": 
         "rejected-elsewhere",
         "ran-only-in-history",
         "ran-in-a-subagent",
+        "call-without-result",
+        "parallel-calls-all-denied",
+        "second-call-without-result",
+        "result-for-another-call",
+        "subagent-call-without-result",
     ],
 )
 def test_ran_a_tool_reads_the_new_turn_and_its_subagents(
@@ -1435,7 +1458,9 @@ def test_ran_a_tool_reads_the_new_turn_and_its_subagents(
 ) -> None:
     """Ruling R1: any tool_result in the warm-up's own new turn, or in its
     subagents' transcripts, that is not a rejection by a hook counts as a tool
-    that ran; anything that does not look exactly like one fails closed. The
+    that ran; anything that does not look exactly like one fails closed. Ruling
+    R7: so does any tool call there without a hook-rejected result of its own
+    (Claude Code may have crashed after the tool ran, before recording it). The
     inherited history, where the real session's tools ran, never counts."""
     session = write(tmp_path / "s.jsonl", [*history, typed("do it"), TOOL_USE, *turn])
     if subagent:
@@ -1536,6 +1561,87 @@ def test_a_job_tool_denied_by_another_hook_is_scored_normally(
     assert not result["inconclusive"], result["reason"]
     assert all(side["warm"] and side["attempt"] == 1 for side in result["sides"].values())
     assert [c["tool_ran"] for c in calls_log(tmp_path) if not c["warmup"]] == [False, False]
+
+
+def test_a_warmup_tool_call_with_no_recorded_result_ends_the_pair(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling R7, end to end: with the guard skipped, Claude Code crashes after the
+    warm-up's tool ran but before it recorded the result. The bare tool call
+    counts as a tool that ran, so the pair ends at once instead of the crash
+    being retried (which would run the tool again)."""
+    monkeypatch.setattr(replay, "SETTINGS", settings_running(HOOK_COMMAND, on_failure=None))
+    monkeypatch.setenv("FAKE_CLAUDE_HOOK_FAILS", "warmup")
+    monkeypatch.setenv("FAKE_CLAUDE_CRASH_BEFORE_RESULT", "warmup")
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    assert result["inconclusive"] and result["reason"] == "warm-up ran a tool"
+    assert [(c["warmup"], c["tool_ran"]) for c in calls_log(tmp_path)] == [(True, True)]
+
+
+@pytest.mark.parametrize(("extra", "scored"), [(20_000, False), (1_000, True)])
+def test_a_job_must_read_its_own_first_request_from_cache(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch, extra: int, scored: bool
+) -> None:
+    """Ruling R8: reading the warm-up's whole context is not enough when the job's
+    own first request is longer (an attachment regenerated with more content):
+    the uncached rest is paid for, and it can differ between the sides. The
+    job's first read must also cover its own first context (within the same
+    bound), or the attempt is never warm; a job that matches is scored."""
+    monkeypatch.setenv("FAKE_CLAUDE_JOB_EXTRA_UNCACHED", str(extra))
+    result = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+    if scored:
+        assert not result["inconclusive"], result["reason"]
+        assert all(side["attempt"] == 1 for side in result["sides"].values())
+    else:
+        assert result["inconclusive"] and result["reason"] == "never warm"
+        first = result["order"][0]
+        assert list(result["sides"]) == [first]
+        assert result["sides"][first]["attempt"] == replay.ATTEMPTS
+
+
+def _repo_state(repo: Path) -> tuple[str, str, str, bytes]:
+    """A repository's remotes, refs, status and index bytes, read as itself."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+    def show(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(repo), *args], env=env, check=True, capture_output=True, text=True
+        ).stdout
+
+    return show("remote", "-v"), show("for-each-ref"), show("status", "--porcelain"), (repo / ".git/index").read_bytes()
+
+
+def test_inherited_repository_variables_never_reach_another_repository(
+    tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling R6: git obeys GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE and the other
+    repository-local variables over `-C`, so a runner started with them set
+    would act on the repository they name (`remote remove origin` would drop its
+    remote), and so would the replayed claude's own git commands. Every git call
+    of a replay, and claude's environment, go without them."""
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    git(real, "init", "-q", "-b", "main")
+    (real / "f.txt").write_text("x\n")
+    git(real, "add", ".")
+    git(real, "-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-qm", "init")
+    git(real, "remote", "add", "origin", "https://example.com/elsewhere.git")
+    before = _repo_state(real)
+    outcome: dict | Exception
+    with monkeypatch.context() as m:
+        m.setenv("GIT_DIR", str(real / ".git"))
+        m.setenv("GIT_WORK_TREE", str(real))
+        m.setenv("GIT_INDEX_FILE", str(real / ".git" / "index"))
+        try:
+            outcome = replay.replay_pair(snap, tmp_path / "work", fake_claude, random.Random(1))
+        except Exception as exc:  # Reason: the repository is checked whatever happened.
+            outcome = exc
+    assert _repo_state(real) == before
+    assert isinstance(outcome, dict) and not outcome["inconclusive"], outcome
+    local = replay._local_git_vars()
+    assert {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"} <= local
+    calls = calls_log(tmp_path)
+    assert calls and all(not set(c["git_env"]) & local for c in calls)
 
 
 def test_install_session_rewrites_the_main_worktree_and_home_forms_but_not_a_similar_path(

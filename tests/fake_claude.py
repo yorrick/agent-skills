@@ -27,6 +27,11 @@ Env vars the tests use to steer it:
                             (not one `--settings` names) denies the tool, as a real job's hooks may.
   FAKE_CLAUDE_PROMPT_RECORDED_AS=<text>  the warm-up records its user entry with this text instead
                             of its prompt, so nothing in its transcript matches the prompt.
+  FAKE_CLAUDE_CRASH_BEFORE_RESULT=<warmup|job>  that call records its tool_use, runs (or does not
+                            run) its tool as usual, then exits non-zero before recording any
+                            tool_result.
+  FAKE_CLAUDE_JOB_EXTRA_UNCACHED=<n>  the job's first call also writes n more tokens to the cache
+                            (a longer request than the warm-up's, read only in part from cache).
   FAKE_CLAUDE_COLD_WARMUP   every warm-up call is cold: no priced call at all.
   FAKE_CLAUDE_COLD_WARMUP_ONCE=<path>  only the first warm-up call ever seen (tracked in the
                             named counter file) is cold; later ones are warm.
@@ -98,6 +103,7 @@ def log(**extra: object) -> None:
                 "note": note,
                 "router": os.environ.get("JEV_ROUTER"),
                 "claude_env": sorted(k for k in os.environ if k.startswith("CLAUDE")),
+                "git_env": sorted(k for k in os.environ if k.startswith("GIT_")),
                 "home": os.environ.get("HOME"),
                 "path": os.environ.get("PATH"),
                 **extra,
@@ -224,12 +230,14 @@ leak_path = os.environ.get("FAKE_CLAUDE_LEAK_PATH_WARMUP" if warm else "FAKE_CLA
 if leak_path:
     content.append({"type": "tool_use", "id": "t2", "name": "Edit", "input": {"file_path": f"{leak_path}/app.py"}})
 
+crash_before_result = os.environ.get("FAKE_CLAUDE_CRASH_BEFORE_RESULT") == ("warmup" if warm else "job")
 if not cold_warmup:
     unpriced = (not warm and os.environ.get("FAKE_CLAUDE_UNPRICED") == "1") or (
         warm and os.environ.get("FAKE_CLAUDE_UNPRICED_WARMUP") == "1"
     )
     model_name = "unknown-model" if unpriced else "claude-opus-5-5"
     cold_job = not warm and os.environ.get("FAKE_CLAUDE_COLD_JOB") == "1"
+    extra_uncached = 0 if warm else int(os.environ.get("FAKE_CLAUDE_JOB_EXTRA_UNCACHED") or 0)
     ctx = 100_000
     entries.append(
         {
@@ -242,15 +250,16 @@ if not cold_warmup:
                 "usage": {
                     "input_tokens": 5,
                     "cache_read_input_tokens": 0 if cold_job else ctx,
-                    "cache_creation_input_tokens": ctx if cold_job else 200,
+                    "cache_creation_input_tokens": (ctx if cold_job else 200) + extra_uncached,
                     "output_tokens": 50,
                 },
             },
         }
     )
     # Reason: shaped like the real entries (Claude Code 2.1.295): a tool that ran
-    # is accepted, one a hook blocked is rejected with source "hook".
-    for block in content:
+    # is accepted, one a hook blocked is rejected with source "hook". A call that
+    # crashes before recording any result leaves only its tool_use behind.
+    for block in [] if crash_before_result else content:
         if tool_ran:
             result_block = {"tool_use_id": block["id"], "type": "tool_result", "content": "done", "is_error": False}
             extra: dict = {"permissionDecision": {"decision": "accept", "source": "config", "reasonType": "mode"}}
@@ -269,6 +278,8 @@ if not cold_warmup:
 if tool_ran:
     Path("RESULT.txt").write_text(f"done by {'delegate' if note else 'keep'}\n")
 log(hook_stopped=stopped, tool_ran=tool_ran)
+if crash_before_result:
+    sys.exit(1)
 if not warm and os.environ.get("FAKE_CLAUDE_HANG_AFTER_WRITE") == "1":
     # Reason: the session file (and any leak in it) is already on disk; this
     # simulates a run the caller's timeout has to kill, not a clean exit.

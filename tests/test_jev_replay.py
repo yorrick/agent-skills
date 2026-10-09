@@ -1300,6 +1300,24 @@ def test_the_real_warmup_guard_passes_its_preflight() -> None:
     assert replay.warmup_guard_passes_preflight()
 
 
+def test_the_preflight_runs_the_hook_without_repository_local_git_variables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 5 (Ruling R6 extended): the preflight runs a shell command, which
+    could run git, so it gets the environment Claude Code will hand the hook:
+    without git's repository-local variables, other GIT_ settings kept."""
+    names = tmp_path / "git-env.txt"
+    command = f"env | cut -d= -f1 | grep '^GIT_' >> {shlex.quote(str(names))}; {HOOK_COMMAND}"
+    monkeypatch.setattr(replay, "SETTINGS", settings_running(command))
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        monkeypatch.setenv(name, str(tmp_path / "elsewhere"))
+    monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
+    assert replay.warmup_guard_passes_preflight()
+    seen = set(names.read_text().split())
+    assert "GIT_TERMINAL_PROMPT" in seen
+    assert not seen & replay._local_git_vars()
+
+
 @pytest.mark.parametrize("broken", ["missing", "always-stops", "never-stops", "stops-without-denying"])
 def test_a_warmup_guard_that_fails_its_preflight_runs_nothing(
     tmp_path: Path, snap: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch, broken: str

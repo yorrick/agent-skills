@@ -214,7 +214,8 @@ the jobs the router selects, on the user's own work.
    normal push stays local (a push to an explicit URL or another remote still could not
    be stopped), and that git's repository-local variables (`GIT_DIR` and its kin, as
    `git rev-parse --local-env-vars` lists them) are removed from every git call and
-   from the replay itself, so neither can be pointed at another repository. A crash or a changed clone after the warm-up fails that attempt and is
+   every process the fork check starts (the replay, the judge's Codex, publish's `gh`),
+   so none of them can be pointed at another repository. A crash or a changed clone after the warm-up fails that attempt and is
    retried in a fresh clone; a timeout, an unpriced call, a leaked real path or a
    warm-up that ran a tool ends the job at once, without running the other side. The
    two sides run one after the other in random order. When both are done, the runner

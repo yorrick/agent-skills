@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -61,6 +62,26 @@ def test_an_existing_public_copy_stops_everything(tmp_path: Path, repo: Path, sn
     calls: list[tuple[str, ...]] = []
     with pytest.raises(RuntimeError, match="not private"):
         publish.publish(snap, result, gh=_gh(calls, visibility="PUBLIC"), remote=str(tmp_path / "copy2.git"))
+
+
+def test_gh_gets_no_repository_local_git_variable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round 5 (Ruling R6 extended): `gh` runs git itself (it reads remotes, and
+    can push), so with GIT_DIR or its kin inherited from the runner it would act
+    on whatever repository they name. A fake `gh` first on PATH records what it
+    got: none of git's repository-local variables, other GIT_ settings kept."""
+    bin_dir, names = tmp_path / "bin", tmp_path / "git-env.txt"
+    bin_dir.mkdir()
+    fake = bin_dir / "gh"
+    fake.write_text(f"#!/bin/sh\nenv | cut -d= -f1 | grep '^GIT_' > {names}\necho ok\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        monkeypatch.setenv(name, str(tmp_path / "elsewhere"))
+    monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
+    assert publish.run_gh("api", "user") == "ok\n"
+    seen = set(names.read_text().split())
+    assert "GIT_TERMINAL_PROMPT" in seen
+    assert not seen & replay._local_git_vars()
 
 
 def test_copy_name_is_private_repo_named_after_the_source() -> None:

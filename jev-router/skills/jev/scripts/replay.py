@@ -1709,7 +1709,9 @@ def warmup_guard_passes_preflight() -> bool:
     it, each must exit 0 and print nothing. So the guard can neither let a
     warm-up's tool run nor stop a job."""
     commands = _hook_commands()
-    job_env = {k: v for k, v in os.environ.items() if k != WARMUP_VAR}
+    # Reason: the environment Claude Code will hand the hook, which `run_claude`
+    # builds without git's repository-local variables (Ruling R6).
+    job_env = {k: v for k, v in without_local_git_vars(os.environ).items() if k != WARMUP_VAR}
     warmup_env = {**job_env, WARMUP_VAR: "1"}
     for command in commands:
         warm, job = _run_hook(command, warmup_env), _run_hook(command, job_env)

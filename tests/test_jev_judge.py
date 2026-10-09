@@ -986,6 +986,24 @@ def test_a_judge_timeout_kills_codex_and_everything_it_started(tmp_path: Path, m
         pytest.fail("the test process codex started outlived the judge's timeout")
 
 
+def test_codex_gets_no_repository_local_git_variable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round 5 (Ruling R6 extended): the judge's codex works in its own copy, but
+    with GIT_DIR or its kin inherited from the runner, its git commands would act
+    on whatever repository they name. It runs without git's repository-local
+    variables, while other GIT_ settings (GIT_TERMINAL_PROMPT) still reach it."""
+    names = tmp_path / "git-env.txt"
+    fake_codex(
+        tmp_path, monkeypatch, f"env | cut -d= -f1 | grep '^GIT_' > {names}\nprintf verdict > {tmp_path}/verdict.md\n"
+    )
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        monkeypatch.setenv(name, str(tmp_path / "elsewhere"))
+    monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
+    assert judge.run_codex("judge this", tmp_path) == "verdict"
+    seen = set(names.read_text().split())
+    assert "GIT_TERMINAL_PROMPT" in seen
+    assert not seen & replay._local_git_vars()
+
+
 def test_a_codex_failure_names_its_stderr(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     fake_codex(tmp_path, monkeypatch, "echo 'model not available' >&2\nexit 3\n")
     with pytest.raises(RuntimeError, match="codex exec failed: model not available"):
